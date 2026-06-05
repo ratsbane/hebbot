@@ -76,11 +76,9 @@ Some things I should be transparent about.
 
 **It's not faster than VLA in the short term.** A well-trained π0.5 will out-perform my system on a benchmark task next week. The substrate approach has to earn its keep over a longer horizon: generalization to unstructured environments, transferability between hardware platforms, inspectability when things go wrong, ability to incorporate new skills without retraining the whole model.
 
-**The hardware I'm working with is modest.** A Franka Panda arm (yes, the expensive one — bought used). A bunch of cameras: a couple of RealSense D435s and D405s, ZED 2i and ZED Mini stereo cameras incoming. A modest GPU host for inference and data collection. There's nothing here that an interested hobbyist with $5K and patience couldn't replicate, which I think is part of the point.
+**The hardware I'm working with is modest.** A Franka Panda arm, a handful of cameras (a couple of RealSense D435s and D405s, ZED 2i and ZED Mini stereo cameras), and a modest GPU host for inference and data collection. There's nothing here that an interested hobbyist with $5K and patience couldn't replicate, which I think is part of the point.
 
 **I'm planning to port to a $250 arm.** The [SO-100 from LeRobot](https://github.com/huggingface/lerobot). If the skills work on the Franka and on the SO-100, the substrate has proven its hardware portability. If they don't, the substrate is too tightly coupled to the expensive hardware and needs more abstraction.
-
-**The north star is unrealistic on purpose.** I want to eventually build a robotic car-washing system, or some other genuinely useful applied robot. I've wanted this since I was sitting at a Tesla charger seven years ago wondering why no little arm-equipped bot was scrubbing my windshield. I am not going to build a working car-wash bot this year or next. But every design decision in this project is shaped by "would this approach scale toward unstructured outdoor manipulation eventually?" That constraint rules out a lot of clean-room benchmark-chasing and rules in a lot of robustness work.
 
 ---
 
