@@ -70,11 +70,13 @@ This makes the whole project a bootstrapping exercise. The substrate gets better
 
 ---
 
-Some things I should be transparent about.
+Where this fits.
 
 **This isn't novel in every direction.** [SayCan](https://arxiv.org/abs/2204.01691), [Code as Policies](https://arxiv.org/abs/2209.07753), [ProgPrompt](https://arxiv.org/abs/2209.11302), [Inner Monologue](https://arxiv.org/abs/2207.05608), [PaLM-E](https://arxiv.org/abs/2303.03378), and several other 2022–2023 papers pointed at this shape — language-model planners calling robot skills. They were directionally right but predated modern LLM tooling and the substrate around it (no MCP, no good memory primitives, no Claude Code-style iteration loops). The shape they sketched is the shape I'm filling in, with much better tools than they had.
 
 **It's not faster than VLA in the short term.** A well-trained π0.5 will out-perform my system on a benchmark task next week. The substrate approach has to earn its keep over a longer horizon: generalization to unstructured environments, transferability between hardware platforms, inspectability when things go wrong, ability to incorporate new skills without retraining the whole model.
+
+**World models are adjacent, not competing.** A separate body of work — the [Dreamer](https://arxiv.org/abs/1912.01603) series, [DayDreamer](https://arxiv.org/abs/2206.14176), [GAIA-1](https://arxiv.org/abs/2309.17080), [Genie](https://arxiv.org/abs/2402.15391), [GR-1](https://arxiv.org/abs/2312.13139) — focuses on learning environment dynamics so an agent can simulate, plan, or "dream" about what would happen if it took action X. That's a different question from what a VLA answers (*what action should I take?*), and the two are orthogonal: standard VLAs are not world models, but recent work like GR-1 builds VLAs on top of pretrained world-model cores. For Hebbot, both world models and VLAs are *kinds of learned components the substrate can host* — a reflexive policy here, a forward-prediction tool there, a learned dynamics model that the deliberate layer queries when it needs to plan. Neither is the substrate itself. The substrate sits a level above both, and gets to choose which to use, when.
 
 **The hardware I'm working with is modest.** A Franka Panda arm, a handful of cameras (a couple of RealSense D435s and D405s, ZED 2i and ZED Mini stereo cameras), and a modest GPU host for inference and data collection. There's nothing here that an interested hobbyist with $5K and patience couldn't replicate, which I think is part of the point.
 
@@ -132,6 +134,16 @@ The earlier wave of papers that framed language models as planners calling robot
 - Yao et al., [*ReAct: Synergizing Reasoning and Acting in Language Models*](https://arxiv.org/abs/2210.03629), 2023
 - Wang et al., [*Voyager: An Open-Ended Embodied Agent with Large Language Models*](https://arxiv.org/abs/2305.16291), 2023 — closest published cousin to the "AI bootstraps its own skill library" half of Hebbot's thesis
 - Ma et al., [*Eureka: Human-Level Reward Design via Coding Large Language Models*](https://arxiv.org/abs/2310.12931), 2023
+
+### World models (the adjacent line)
+
+- Ha & Schmidhuber, [*World Models*](https://arxiv.org/abs/1803.10122), 2018 — the foundational paper that gave the line its name
+- Hafner et al., [*Dream to Control: Learning Behaviors by Latent Imagination* (Dreamer)](https://arxiv.org/abs/1912.01603), 2019
+- Wu et al., [*DayDreamer: World Models for Physical Robot Learning*](https://arxiv.org/abs/2206.14176), 2022
+- Hafner et al., [*Mastering Diverse Domains through World Models* (DreamerV3)](https://arxiv.org/abs/2301.04104), 2023
+- Hu et al., [*GAIA-1: A Generative World Model for Autonomous Driving*](https://arxiv.org/abs/2309.17080), 2023
+- Wu et al., [*Unleashing Large-Scale Video Generative Pre-training for Visual Robot Manipulation* (GR-1)](https://arxiv.org/abs/2312.13139), 2023
+- Bruce et al., [*Genie: Generative Interactive Environments*](https://arxiv.org/abs/2402.15391), 2024
 
 ### Imitation learning + skill libraries (the lower layer)
 
