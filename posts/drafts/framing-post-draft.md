@@ -14,7 +14,7 @@ Neuroscientists have a name for this: the cortex–basal ganglia–cerebellum lo
 
 ---
 
-The current center of gravity in robot learning is end-to-end vision-language-action models. You take a foundation model, you bolt on a robot, you feed in pixels and language, you train it to output joint commands. Some of these models are extraordinary. Pi 0.5, OpenVLA, RT-2, Gemini Robotics, the Tesla Optimus stack — these are real engineering achievements, often trained on millions of demonstrations across hundreds of robots, costing more compute than most countries' research budgets.
+The current center of gravity in robot learning is end-to-end vision-language-action models. You take a foundation model, you bolt on a robot, you feed in pixels and language, you train it to output joint commands. Some of these models are extraordinary. [π0](https://arxiv.org/abs/2410.24164) and its successor π0.5 from [Physical Intelligence](https://www.physicalintelligence.company), [OpenVLA](https://arxiv.org/abs/2406.09246), [RT-2](https://arxiv.org/abs/2307.15818), [Gemini Robotics](https://deepmind.google/discover/blog/gemini-robotics-brings-ai-into-the-physical-world/), the Tesla Optimus stack — these are real engineering achievements, often trained on millions of demonstrations across hundreds of robots, costing more compute than most countries' research budgets.
 
 And they collapse the entire stack into one network.
 
@@ -26,7 +26,7 @@ I think there's a different shape the field has barely tried.
 
 ---
 
-About a year ago, Anthropic shipped Claude Code: a CLI tool that lets Claude operate on real software projects. You hand it a task, and it reads your code, runs your tests, edits files, calls your build tools, observes the results, and iterates. It uses memory to keep track of what it's learned about your project across sessions. It has permissions and a sense of which actions are reversible vs. dangerous. It uses many small tools — read, edit, grep, bash — composed at runtime rather than one giant monolithic model that "does software."
+About a year ago, Anthropic shipped [Claude Code](https://www.anthropic.com/claude-code): a CLI tool that lets Claude operate on real software projects. You hand it a task, and it reads your code, runs your tests, edits files, calls your build tools, observes the results, and iterates. It uses memory to keep track of what it's learned about your project across sessions. It has permissions and a sense of which actions are reversible vs. dangerous. It uses many small tools — read, edit, grep, bash — composed at runtime rather than one giant monolithic model that "does software."
 
 Claude Code is shockingly effective at a class of problems that, two years ago, we would have said required a specialized code model trained end-to-end on millions of repos.
 
@@ -72,13 +72,13 @@ This makes the whole project a bootstrapping exercise. The substrate gets better
 
 Some things I should be transparent about.
 
-**This isn't novel in every direction.** SayCan, Code-as-Policies, ProgPrompt, and several other 2022–2023 papers pointed at this shape — language-model planners calling robot skills. They were directionally right but predated modern LLM tooling and the substrate around it (no MCP, no good memory primitives, no Claude Code-style iteration loops). The shape they sketched is the shape I'm filling in, with much better tools than they had.
+**This isn't novel in every direction.** [SayCan](https://arxiv.org/abs/2204.01691), [Code as Policies](https://arxiv.org/abs/2209.07753), [ProgPrompt](https://arxiv.org/abs/2209.11302), [Inner Monologue](https://arxiv.org/abs/2207.05608), [PaLM-E](https://arxiv.org/abs/2303.03378), and several other 2022–2023 papers pointed at this shape — language-model planners calling robot skills. They were directionally right but predated modern LLM tooling and the substrate around it (no MCP, no good memory primitives, no Claude Code-style iteration loops). The shape they sketched is the shape I'm filling in, with much better tools than they had.
 
-**It's not faster than VLA in the short term.** A well-trained Pi 0.5 will out-perform my system on a benchmark task next week. The substrate approach has to earn its keep over a longer horizon: generalization to unstructured environments, transferability between hardware platforms, inspectability when things go wrong, ability to incorporate new skills without retraining the whole model.
+**It's not faster than VLA in the short term.** A well-trained π0.5 will out-perform my system on a benchmark task next week. The substrate approach has to earn its keep over a longer horizon: generalization to unstructured environments, transferability between hardware platforms, inspectability when things go wrong, ability to incorporate new skills without retraining the whole model.
 
 **The hardware I'm working with is modest.** A Franka Panda arm (yes, the expensive one — bought used). A bunch of cameras: a couple of RealSense D435s and D405s, ZED 2i and ZED Mini stereo cameras incoming. A modest GPU host for inference and data collection. There's nothing here that an interested hobbyist with $5K and patience couldn't replicate, which I think is part of the point.
 
-**I'm planning to port to a $250 arm.** The SO-100 from LeRobot. If the skills work on the Franka and on the SO-100, the substrate has proven its hardware portability. If they don't, the substrate is too tightly coupled to the expensive hardware and needs more abstraction.
+**I'm planning to port to a $250 arm.** The [SO-100 from LeRobot](https://github.com/huggingface/lerobot). If the skills work on the Franka and on the SO-100, the substrate has proven its hardware portability. If they don't, the substrate is too tightly coupled to the expensive hardware and needs more abstraction.
 
 **The north star is unrealistic on purpose.** I want to eventually build a robotic car-washing system, or some other genuinely useful applied robot. I've wanted this since I was sitting at a Tesla charger seven years ago wondering why no little arm-equipped bot was scrubbing my windshield. I am not going to build a working car-wash bot this year or next. But every design decision in this project is shaped by "would this approach scale toward unstructured outdoor manipulation eventually?" That constraint rules out a lot of clean-room benchmark-chasing and rules in a lot of robustness work.
 
@@ -95,6 +95,51 @@ What I'm planning to build, in serial posts:
 7. **Same skills on a $250 arm** — the SO-100 portability test.
 
 I'll post roughly every two to three weeks. Each post will end with something concrete — code, video, dataset, repo link.
+
+---
+
+## Further reading
+
+A non-exhaustive map of work this project is in conversation with.
+
+### LLM-as-controller for robots (the lineage)
+
+The earlier wave of papers that framed language models as planners calling robot skills:
+
+- Ahn et al., [*Do As I Can, Not As I Say: Grounding Language in Robotic Affordances* (SayCan)](https://arxiv.org/abs/2204.01691), 2022
+- Huang et al., [*Inner Monologue: Embodied Reasoning through Planning with Language Models*](https://arxiv.org/abs/2207.05608), 2022
+- Liang et al., [*Code as Policies: Language Model Programs for Embodied Control*](https://arxiv.org/abs/2209.07753), 2022
+- Singh et al., [*ProgPrompt: Generating Situated Robot Task Plans using Large Language Models*](https://arxiv.org/abs/2209.11302), 2022
+- Driess et al., [*PaLM-E: An Embodied Multimodal Language Model*](https://arxiv.org/abs/2303.03378), 2023
+
+### Modern end-to-end VLAs (what I'm contrasting with)
+
+- Brohan et al., [*RT-2: Vision-Language-Action Models Transfer Web Knowledge to Robotic Control*](https://arxiv.org/abs/2307.15818), 2023
+- Padalkar et al., [*Open X-Embodiment: Robotic Learning Datasets and RT-X Models*](https://arxiv.org/abs/2310.08864), 2023
+- Octo Model Team, [*Octo: An Open-Source Generalist Robot Policy*](https://arxiv.org/abs/2405.12213), 2024
+- Kim et al., [*OpenVLA: An Open-Source Vision-Language-Action Model*](https://arxiv.org/abs/2406.09246), 2024
+- Black et al., [*π₀: A Vision-Language-Action Flow Model for General Robot Control*](https://arxiv.org/abs/2410.24164), 2024
+- Khazatsky et al., [*DROID: A Large-Scale In-The-Wild Robot Manipulation Dataset*](https://arxiv.org/abs/2403.12945), 2024
+
+### Cognitive science and motor learning (the grounding)
+
+- Hebb, D.O., *The Organization of Behavior*, Wiley, 1949 — the original "neurons that fire together wire together" book, eponym for [Hebbot](https://github.com/ratsbane/hebbot)
+- Anderson et al., [*An integrated theory of the mind*](https://psycnet.apa.org/doi/10.1037/0033-295X.111.4.1036) (ACT-R), Psychological Review, 2004
+- Wolpert, Diedrichsen, & Flanagan, [*Principles of sensorimotor learning*](https://www.nature.com/articles/nrn3112), Nature Reviews Neuroscience, 2011 — what cognitive science knows about how skill compression actually works in nervous systems
+- Krakauer et al., [*Motor Learning*](https://onlinelibrary.wiley.com/doi/10.1002/cphy.c170043), Comprehensive Physiology, 2019 — a comprehensive review covering the deliberate → reflexive arc
+- Laird, J.E., *The Soar Cognitive Architecture*, MIT Press, 2012 — the other big pre-LLM cognitive architecture, also a useful template for the kind of high/low layering Hebbot aims at
+
+### Agentic AI bootstrapping skills (the meta-move)
+
+- Yao et al., [*ReAct: Synergizing Reasoning and Acting in Language Models*](https://arxiv.org/abs/2210.03629), 2023
+- Wang et al., [*Voyager: An Open-Ended Embodied Agent with Large Language Models*](https://arxiv.org/abs/2305.16291), 2023 — closest published cousin to the "AI bootstraps its own skill library" half of Hebbot's thesis
+- Ma et al., [*Eureka: Human-Level Reward Design via Coding Large Language Models*](https://arxiv.org/abs/2310.12931), 2023
+
+### Imitation learning + skill libraries (the lower layer)
+
+- Chi et al., [*Diffusion Policy: Visuomotor Policy Learning via Action Diffusion*](https://arxiv.org/abs/2303.04137), 2023
+- Zhao et al., [*Learning Fine-Grained Bimanual Manipulation with Low-Cost Hardware* (ALOHA / ACT)](https://arxiv.org/abs/2304.13705), 2023
+- Fu et al., [*Mobile ALOHA: Learning Bimanual Mobile Manipulation with Low-Cost Whole-Body Teleoperation*](https://arxiv.org/abs/2401.02117), 2024
 
 ---
 
