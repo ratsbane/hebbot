@@ -100,6 +100,47 @@ The substrate hosts learned components. **VLAs** (Vision-Language-Action models)
 
 When the deliberate layer queries "what would happen if I tried this approach?", that's a world-model call. When it invokes "pick up the cup," the underlying skill might be a learned VLA, a classical IK + servo, or a hybrid. The substrate accommodates all of them.
 
+### 9. Unified memory: every episode contributes, two ways
+
+Every skill execution writes a structured episode to a single memory store. That same data feeds two consumers:
+
+- **Retrieval-augmented context (immediate, deliberate-layer).** When the LLM is reasoning about the next action, it can pull the *k* most relevant past episodes — by visual similarity to the current scene, by skill name + outcome, by free-text semantic match — and read them as context. Modern multimodal LLMs read the retrieved images directly; classical metadata filters tighten the search. A single past example can fire on a similar future query. This is RAG applied to embodied experience.
+- **Distillation corpus (periodic, reflexive-layer).** Episodes accumulate over time. When recurring patterns emerge — the same skill called with similar parameters in similar scenes, succeeding consistently — a distillation pass trains a small reflexive policy from those rollouts. This is the Hebbian compression of #2 made concrete: deliberate execution becomes reflexive when the data supports it.
+
+One write path, two read paths. The substrate doesn't need to choose between "RAG vs. VLA training" — those are different uses of the same underlying store.
+
+**Episode schema (sketch):**
+
+```python
+episode = {
+    "id": uuid,
+    "timestamp": ...,
+    "skill": "pick",
+    "params": {"x": 0.45, "y": 0.0},
+    "frames": [{"camera": "d435", "image": <path>, "t": 0.0}, ...],
+    "states": [{"joints": [...], "ee_pose": [...], "force": [...], "t": 0.0}, ...],
+    "deliberate_context": {"goal": "pick the red block", "reasoning": "...", "retrieved_ids": [...]},
+    "outcome": {"success": True, "duration_s": 4.3, "notes": "..."},
+}
+```
+
+**Implementation components:**
+- **Image embeddings** for similarity search: [DINOv2](https://arxiv.org/abs/2304.07193) (scene similarity) or [SigLIP 2](https://arxiv.org/abs/2502.14786) (image-text aligned).
+- **Vector store:** [LanceDB](https://lancedb.github.io) or [ChromaDB](https://www.trychroma.com) — local, serverless, fast enough.
+- **Structured store:** SQLite or DuckDB for metadata, queryable joins, filters.
+- **Frames + states:** raw filesystem (JPEG + numpy arrays in HDF5 or Parquet).
+
+**Substrate API the deliberate layer sees:**
+```
+memory.recall(image=current_frame, k=5)
+memory.recall(skill="pick", outcome="failure", k=5)
+memory.recall(query="things that went wrong when the cup tipped", image=current_frame, k=5)
+```
+
+**Distillation runs periodically** (nightly, or triggered by N new episodes). Identifies skills with enough examples to support training a reflexive policy. The trained policy goes into the skill library; future invocations may use it instead of (or in addition to) the deliberate path. The deliberate layer retains override.
+
+This is the memory architecture that makes "every robot movement contributes to the experience" load-bearing rather than aspirational.
+
 ---
 
 ## Anti-goals (what Hebbot explicitly rules out)
