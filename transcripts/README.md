@@ -1,11 +1,12 @@
 # Claude Code transcripts
 
-Archived Claude Code session transcripts (`.jsonl` format, one JSON record per line) from the development of `panda-mcp` and `hebbot`. These are the record of how the substrate framing emerged from the work — including dead ends, reversals, and the moments where the thesis got reshaped.
+Archived Claude Code session transcripts (`.jsonl` format, one JSON record per line) from the development of `hebbot`. These are the record of how the substrate framing emerged from the work — including dead ends, reversals, and the moments where the thesis got reshaped.
 
 ## What's here
 
-- `panda-mcp-session-2026-03-xx.jsonl` — the main Claude Code session that drove most of the panda-mcp work, recovered from robot2 (the Raspberry Pi 5 that hosted the project before the OMEN replaced it).
-- `macbook-session-2026-05-25-to-2026-06-05.jsonl` — the reset conversation: the strategic reframe, the OMEN setup from scratch, the rename from `panda-mcp` to `hebbot`, the foundations doc. ~6 MB; spans roughly 11 days of intermittent work.
+- `macbook-session-2026-05-25-to-2026-06-05.jsonl` — the reset conversation: the strategic reframe from `panda-mcp`, the OMEN setup from scratch, the rename to `hebbot`, the foundations doc, the architectural decisions about substrate vs. orchestrator. ~6 MB; spans roughly 11 days of intermittent work.
+
+(Sessions from the prior `panda-mcp` project may be archived in that repo separately; they are not duplicated here.)
 
 ## Format
 
@@ -17,7 +18,7 @@ For programmatic access:
 # count messages
 wc -l *.jsonl
 
-# extract just the user prompts (no tool results)
+# extract just the user prompts
 jq -r 'select(.type == "user" and (.content | type) == "string") | .content' < session.jsonl
 ```
 
