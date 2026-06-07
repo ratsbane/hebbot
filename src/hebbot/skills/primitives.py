@@ -456,6 +456,8 @@ def read_camera(
         "camera": cam.name,
         "width": w,
         "height": h,
+        "depth_scale": cap["depth_scale"],
+        "intrinsics": getattr(cam, "intrinsics", None),
         "color_path": None,
         "depth_path": None,
     }

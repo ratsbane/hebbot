@@ -27,7 +27,8 @@ import numpy as np
 class RealSenseCamera:
     """A started RealSense pipeline plus the metadata read_camera needs."""
 
-    def __init__(self, name, pipeline, align, depth_scale, serial, width, height):
+    def __init__(self, name, pipeline, align, depth_scale, serial, width, height,
+                 intrinsics=None):
         self.name = name
         self.pipeline = pipeline
         self.align = align
@@ -35,6 +36,9 @@ class RealSenseCamera:
         self.serial = serial
         self.width = width
         self.height = height
+        # Color-stream intrinsics (depth is aligned to color, so these also
+        # deproject the aligned depth): {fx, fy, cx, cy, width, height}.
+        self.intrinsics = intrinsics
 
     def capture(self, with_depth: bool = True, timeout_ms: int = 5000) -> dict:
         """Grab one frameset. Returns color (BGR uint8) + optional depth (uint16).
@@ -124,6 +128,12 @@ def open_realsense_cameras(
         profile = pipeline.start(config)
         depth_scale = profile.get_device().first_depth_sensor().get_depth_scale()
 
+        # Color-stream intrinsics (used to deproject the color-aligned depth).
+        ci = profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
+        intrinsics = {"fx": ci.fx, "fy": ci.fy, "cx": ci.ppx, "cy": ci.ppy,
+                      "width": ci.width, "height": ci.height,
+                      "model": str(ci.model), "coeffs": list(ci.coeffs)}
+
         # Let auto-exposure settle so the first real capture is usable.
         for _ in range(warmup):
             pipeline.wait_for_frames(timeout_ms=5000)
@@ -136,6 +146,7 @@ def open_realsense_cameras(
             serial=serial,
             width=width,
             height=height,
+            intrinsics=intrinsics,
         )
 
     return cameras
