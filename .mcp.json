@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "hebbot": {
+      "command": "ssh",
+      "args": [
+        "omen",
+        "/home/doug/hebbot/.venv/bin/hebbot-mcp",
+        "--data-dir", "/home/doug/hebbot-data",
+        "--register-primitives",
+        "--log-level", "INFO"
+      ]
+    }
+  }
+}
