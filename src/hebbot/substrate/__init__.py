@@ -1,11 +1,15 @@
 """Substrate: the runtime layer that owns the skill store and dispatches calls.
 
-Public API for the most common path:
+Public API:
 
     from hebbot.substrate import Substrate
     s = Substrate("~/hebbot-data")
     s.register("get_state", function_spec="hebbot.skills.primitives:get_state")
-    result = s.call("get_state")
+    s.register_composition("home", steps=[
+        {"skill": "open_gripper", "args": {"width": 0.08}},
+        {"skill": "move_to_joints", "args": {"q": HOME_Q, "speed_factor": 0.1}},
+    ])
+    result = s.call("home")
 """
 
 from __future__ import annotations
@@ -39,12 +43,36 @@ class Substrate:
         params_schema: Optional[dict] = None,
         expectations: Optional[dict] = None,
     ) -> None:
-        """Register a skill in the store."""
+        """Register a classical-body skill."""
         register(
             self.store,
             name,
             function_spec=function_spec,
             body_type=body_type,
+            params_schema=params_schema,
+            expectations=expectations,
+        )
+
+    def register_composition(
+        self,
+        name: str,
+        *,
+        steps: list[dict],
+        params_schema: Optional[dict] = None,
+        expectations: Optional[dict] = None,
+    ) -> None:
+        """Register a composition-body skill.
+
+        `steps` is an ordered list of:
+            {"skill": "sub_skill_name",
+             "args": {"key": value, ...},     # static args
+             "arg_map": {"sub_arg": "parent_arg"}}  # optional: map parent params
+        """
+        register(
+            self.store,
+            name,
+            body_type="composition",
+            body={"steps": steps},
             params_schema=params_schema,
             expectations=expectations,
         )

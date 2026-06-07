@@ -162,8 +162,10 @@ def main() -> int:
     substrate = Substrate(args.data_dir)
 
     if args.register_primitives:
-        from .skills.primitives import register_all
-        register_all(substrate)
+        from .skills.primitives import register_all as register_primitives
+        from .skills.composed import register_all as register_composed
+        register_primitives(substrate)
+        register_composed(substrate)
         logger.info(f"Registered primitives. Skill count: {len(substrate.list_skills())}")
 
     hardware_ctx = make_hardware_context(args.franka, args.no_robot)

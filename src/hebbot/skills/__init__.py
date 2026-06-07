@@ -1,9 +1,10 @@
-"""hebbot.skills — primitives and (later) higher-level skill helpers.
+"""hebbot.skills — primitives and composed skills.
 
 Importing this module does not register anything; call
-`hebbot.skills.primitives.register_all(substrate)` explicitly.
+`hebbot.skills.primitives.register_all(substrate)` and
+`hebbot.skills.composed.register_all(substrate)` explicitly.
 """
 
-from . import primitives
+from . import composed, primitives
 
-__all__ = ["primitives"]
+__all__ = ["primitives", "composed"]
