@@ -59,10 +59,8 @@ def _run_classical(
     if not spec:
         raise ValueError(f"skill {skill['name']!r} classical body missing 'function'")
     func = _resolve_classical(spec)
-    if _accepts_context(func):
-        result = func(**params, _context=context)
-    else:
-        result = func(**params)
+    extras = _injected_kwargs(func, context=context, store=store, episode_id=episode_id)
+    result = func(**params, **extras)
     return {"success": True, "result": result}
 
 
@@ -185,11 +183,26 @@ def call_skill(
         raise
 
 
-def _accepts_context(func: Callable) -> bool:
-    """Return True if `func` declares a `_context` keyword parameter."""
+def _injected_kwargs(
+    func: Callable,
+    *,
+    context: Any,
+    store: Store,
+    episode_id: str,
+) -> dict:
+    """Substrate-supplied kwargs a primitive may opt into by declaring them.
+
+    A primitive declares any of `_context` (hardware handles), `_store` (the
+    SQLite store), or `_episode_id` (the current episode) in its signature and
+    receives them; primitives that declare none are called with just their
+    params. This is how perception/logging primitives reach the store and the
+    episode they belong to — e.g. `read_camera` writes `frames` rows for the
+    episode it ran in — without threading those through every call.
+    """
     import inspect
-    sig = inspect.signature(func)
-    return "_context" in sig.parameters
+    declared = inspect.signature(func).parameters
+    available = {"_context": context, "_store": store, "_episode_id": episode_id}
+    return {k: v for k, v in available.items() if k in declared}
 
 
 # ---------------------------------------------------------------------------

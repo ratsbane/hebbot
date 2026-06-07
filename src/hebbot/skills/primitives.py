@@ -229,6 +229,116 @@ def move_to_pose(
 
 
 # ---------------------------------------------------------------------------
+# Camera read
+# ---------------------------------------------------------------------------
+
+def _select_camera(cameras: dict, name: Optional[str]):
+    """Pick a camera from the context's camera map.
+
+    - explicit name -> that camera (or None if absent)
+    - no name + exactly one camera -> that camera
+    - no name + several cameras -> error (ambiguous)
+    """
+    if not cameras:
+        return None
+    if name is not None:
+        return cameras.get(name)
+    if len(cameras) == 1:
+        return next(iter(cameras.values()))
+    raise ValueError(
+        f"multiple cameras available ({sorted(cameras)}); specify camera=<name>"
+    )
+
+
+def read_camera(
+    camera: Optional[str] = None,
+    with_depth: bool = True,
+    save: bool = True,
+    *,
+    _context: Optional[Any] = None,
+    _store: Optional[Any] = None,
+    _episode_id: Optional[str] = None,
+) -> dict:
+    """Capture a frame from a camera and (optionally) record it to the episode.
+
+    Reads aligned color (+ depth) from a camera handle supplied in the context
+    under the "cameras" key. When `save` is set and the substrate provided a
+    store + episode id, the color frame (and raw depth) are written under the
+    data root's frames/ tree and a row is inserted into the `frames` table,
+    linking the image to this episode (foundations commitment #9).
+
+    Args:
+        camera: which camera to read ("wrist", "scene", ...). Optional when
+                exactly one camera is connected.
+        with_depth: also capture + save the aligned depth frame.
+        save: persist the frame(s) to disk + the frames table.
+
+    Returns:
+        {camera, width, height, color_path, depth_path, center_depth_m, _source}
+        where *_path are relative to the data root (None when not saved/mock).
+    """
+    cameras = _extract(_context, "cameras") or {}
+    cam = _select_camera(cameras, camera)
+
+    if cam is None:
+        # Mock mode — no camera available. Used for dev/CI without hardware.
+        time.sleep(0.02)
+        return {
+            "_source": "mock",
+            "camera": camera or "mock",
+            "width": 640,
+            "height": 480,
+            "color_path": None,
+            "depth_path": None,
+            "note": "mock — no camera in context",
+        }
+
+    import numpy as np
+
+    cap = cam.capture(with_depth=with_depth)
+    w, h = cap["width"], cap["height"]
+    result: dict[str, Any] = {
+        "_source": "live",
+        "camera": cam.name,
+        "width": w,
+        "height": h,
+        "color_path": None,
+        "depth_path": None,
+    }
+    if with_depth and cap["depth"] is not None:
+        center = cap["depth"][h // 2, w // 2] * cap["depth_scale"]
+        result["center_depth_m"] = float(center)
+        result["depth_coverage"] = float((cap["depth"] > 0).mean())
+
+    if save and _store is not None and _episode_id is not None:
+        from pathlib import Path
+        from PIL import Image
+
+        data_root = Path(_store.db_path).parent
+        d = time.gmtime()
+        rel_dir = (
+            f"frames/{d.tm_year:04d}/{d.tm_mon:02d}/{d.tm_mday:02d}/{_episode_id}"
+        )
+        (data_root / rel_dir).mkdir(parents=True, exist_ok=True)
+
+        color_rel = f"{rel_dir}/{cam.name}_000.jpg"
+        # capture() returns BGR; flip to RGB so the saved JPEG has true colors.
+        Image.fromarray(cap["color"][:, :, ::-1]).save(data_root / color_rel, quality=92)
+        _store.record_frame(_episode_id, camera=cam.name, t=0.0,
+                            file_path=color_rel, width=w, height=h)
+        result["color_path"] = color_rel
+
+        if with_depth and cap["depth"] is not None:
+            depth_rel = f"{rel_dir}/{cam.name}_000_depth.npy"
+            np.save(data_root / depth_rel, cap["depth"])  # lossless uint16
+            _store.record_frame(_episode_id, camera=f"{cam.name}:depth", t=0.0,
+                                file_path=depth_rel, width=w, height=h)
+            result["depth_path"] = depth_rel
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Gripper
 # ---------------------------------------------------------------------------
 
@@ -365,6 +475,25 @@ PRIMITIVE_SPECS = [
                 },
             },
             "required": ["position"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "read_camera",
+        "function_spec": "hebbot.skills.primitives:read_camera",
+        "params_schema": {
+            "type": "object",
+            "properties": {
+                "camera": {
+                    "type": "string",
+                    "description": "camera name (e.g. 'wrist', 'scene'); "
+                                   "optional when only one camera is connected",
+                },
+                "with_depth": {"type": "boolean", "default": True,
+                               "description": "also capture + save aligned depth"},
+                "save": {"type": "boolean", "default": True,
+                         "description": "persist frame(s) to disk + frames table"},
+            },
             "additionalProperties": False,
         },
     },

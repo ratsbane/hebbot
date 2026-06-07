@@ -38,36 +38,50 @@ logger = logging.getLogger("hebbot.mcp")
 def make_hardware_context(
     franka_host: Optional[str],
     no_robot: bool,
+    no_camera: bool = False,
+    camera_settle: float = 5.0,
 ) -> dict:
     """Build the context dict that gets passed to skills.
 
-    Returns {"panda": panda, "gripper": gripper} when hardware is available,
-    or {} when --no-robot is set or the connection fails. Skills check for
-    the relevant keys and fall back to mock mode if missing.
+    Populates "panda"/"gripper" (arm) and "cameras" (perception) independently;
+    each is best-effort. Skills check for the key they need and fall back to
+    mock mode if it's absent, so a missing robot doesn't disable cameras and
+    vice versa.
     """
-    if no_robot or not franka_host:
-        logger.info("Running without hardware (--no-robot or no host set); skills run in mock mode.")
-        return {}
-
-    try:
-        import panda_py
-    except ImportError:
-        logger.warning("panda-python not installed; running in mock mode.")
-        return {}
-
     ctx: dict[str, Any] = {}
-    try:
-        ctx["panda"] = panda_py.Panda(franka_host)
-        logger.info(f"Connected to Franka at {franka_host}")
-    except Exception as e:
-        logger.warning(f"Failed to connect to Franka at {franka_host}: {e}; mock mode.")
-        return {}
 
-    try:
-        ctx["gripper"] = panda_py.libfranka.Gripper(franka_host)
-        logger.info("Gripper connected.")
-    except Exception as e:
-        logger.warning(f"Failed to connect to Gripper: {e}; arm-only mode.")
+    if no_robot or not franka_host:
+        logger.info("Robot disabled (--no-robot or no host); arm skills run in mock mode.")
+    else:
+        try:
+            import panda_py
+            ctx["panda"] = panda_py.Panda(franka_host)
+            logger.info(f"Connected to Franka at {franka_host}")
+            try:
+                ctx["gripper"] = panda_py.libfranka.Gripper(franka_host)
+                logger.info("Gripper connected.")
+            except Exception as e:
+                logger.warning(f"Failed to connect to Gripper: {e}; arm-only mode.")
+        except ImportError:
+            logger.warning("panda-python not installed; arm skills run in mock mode.")
+        except Exception as e:
+            logger.warning(f"Failed to connect to Franka at {franka_host}: {e}; arm in mock mode.")
+
+    if no_camera:
+        logger.info("Cameras disabled (--no-camera); read_camera runs in mock mode.")
+    else:
+        try:
+            from .perception.realsense import open_realsense_cameras
+            cameras = open_realsense_cameras(settle=camera_settle)
+            if cameras:
+                ctx["cameras"] = cameras
+                logger.info(f"Cameras connected: {sorted(cameras)}")
+            else:
+                logger.info("No RealSense cameras found; read_camera runs in mock mode.")
+        except ImportError:
+            logger.warning("pyrealsense2 not installed; read_camera runs in mock mode.")
+        except Exception as e:
+            logger.warning(f"Camera bootstrap failed: {e}; read_camera runs in mock mode.")
 
     return ctx
 
@@ -146,7 +160,12 @@ def main() -> int:
     parser.add_argument("--franka", default="192.168.0.253",
                         help="Franka FCI hostname/IP (default: 192.168.0.253)")
     parser.add_argument("--no-robot", action="store_true",
-                        help="Skip hardware connections; run skills in mock mode.")
+                        help="Skip the arm connection; arm skills run in mock mode.")
+    parser.add_argument("--no-camera", action="store_true",
+                        help="Skip camera connections; read_camera runs in mock mode.")
+    parser.add_argument("--camera-settle", type=float, default=5.0,
+                        help="Seconds to wait after hardware_reset before starting "
+                             "camera pipelines (finding #101; default 5.0).")
     parser.add_argument("--register-primitives", action="store_true",
                         help="Register the built-in primitives into the skill store before serving.")
     parser.add_argument("--log-level", default="INFO",
@@ -168,7 +187,10 @@ def main() -> int:
         register_composed(substrate)
         logger.info(f"Registered primitives. Skill count: {len(substrate.list_skills())}")
 
-    hardware_ctx = make_hardware_context(args.franka, args.no_robot)
+    hardware_ctx = make_hardware_context(
+        args.franka, args.no_robot,
+        no_camera=args.no_camera, camera_settle=args.camera_settle,
+    )
 
     try:
         asyncio.run(serve_stdio(substrate, hardware_ctx))

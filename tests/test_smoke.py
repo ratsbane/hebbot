@@ -32,6 +32,7 @@ def test_all_skills_registered(substrate):
     assert "move_to_pose" in names
     assert "open_gripper" in names
     assert "close_gripper" in names
+    assert "read_camera" in names
     assert "home" in names
 
 
@@ -39,6 +40,52 @@ def test_get_state_mock(substrate):
     out = substrate.call("get_state")
     assert out["success"]
     assert out["result"]["_source"] == "mock"
+
+
+def test_read_camera_mock(substrate):
+    # No camera in context -> mock mode, no file written.
+    out = substrate.call("read_camera")
+    assert out["success"]
+    assert out["result"]["_source"] == "mock"
+    assert out["result"]["color_path"] is None
+
+
+def test_read_camera_writes_frame_row(substrate):
+    # A fake camera lets us exercise the save + frames-table path without
+    # hardware. Requires PIL for the JPEG write.
+    pytest.importorskip("PIL")
+    import numpy as np
+
+    class FakeCamera:
+        name = "wrist"
+
+        def capture(self, with_depth=True):
+            return {
+                "color": np.zeros((8, 8, 3), dtype=np.uint8),
+                "depth": (np.ones((8, 8), dtype=np.uint16) * 500) if with_depth else None,
+                "depth_scale": 0.001,
+                "width": 8,
+                "height": 8,
+            }
+
+    ctx = {"cameras": {"wrist": FakeCamera()}}
+    out = substrate.call("read_camera", context=ctx)
+    assert out["success"]
+    res = out["result"]
+    assert res["_source"] == "live"
+    assert res["camera"] == "wrist"
+    assert res["color_path"] and res["depth_path"]
+    assert res["center_depth_m"] == pytest.approx(0.5)  # 500 * 0.001
+
+    # A color frame row + a depth frame row, both tied to a real episode.
+    rows = substrate.store.conn.execute(
+        "SELECT camera, episode_id, file_path FROM frames ORDER BY camera"
+    ).fetchall()
+    cams = {r["camera"] for r in rows}
+    assert cams == {"wrist", "wrist:depth"}
+    for r in rows:
+        ep = substrate.store.get_episode(r["episode_id"])
+        assert ep is not None and ep["skill_name"] == "read_camera"
 
 
 def test_move_to_joints_mock(substrate):
