@@ -141,6 +141,81 @@ memory.recall(query="things that went wrong when the cup tipped", image=current_
 
 This is the memory architecture that makes "every robot movement contributes to the experience" load-bearing rather than aspirational.
 
+### 10. Skills are records, not code
+
+A skill is a row in the substrate's skill store, not a Python function in the source tree. Each record contains:
+
+- **Name and parameter signature** — what the orchestrator sees when listing tools
+- **Expectation model** — the forward-prediction bounds that drive surprise detection (commitment #1)
+- **Execution body** — a typed field with one of several forms (see below)
+- **Episode history** — the memory link (commitment #9)
+- **Statistics** — success rate, surprise frequency, average duration
+
+The execution body field has multiple legal types, each with a generic substrate runtime:
+
+| Body type | What it is | When it's used |
+|---|---|---|
+| `classical` | Reference to a hand-written primitive + arg map | Bootstrap primitives only — `move_to`, `open_gripper`, `close_gripper`, `read_camera`, `get_state`. The only thing that ships as code. |
+| `script` | Source code string, sandbox-evaluated | LLM-authored at runtime — the first version of a new skill the orchestrator composes |
+| `composition` | Ordered list of subskill calls + arg-passing rules | Skills built by composing existing skills (`pick_object` = locate + approach + grasp + verify) |
+| `trajectory` | Recorded waypoints + adaptation parameters | Skills learned from one or a handful of demonstrations, replayed with correspondence-driven warping (Tether-style) |
+| `learned_policy` | Path to a policy weights file + invocation config | After enough data, distilled into a small task-specific neural net (the "reflex") |
+| `vlm_grounded` | A VLM prompt template + post-processing | Skills whose action depends heavily on language/perception |
+
+**The Hebbian compression arc lives in this field.** A skill's body progresses from `script` → `trajectory` → `learned_policy` as data accumulates. The skill's *contract* (name + parameters + expectations) is stable; the implementation underneath changes. The orchestrator never sees this — it calls `pick(x, y)` on day 1 and day 180 the same way.
+
+**Primitives are the only hand-written exception.** A small bootstrap set lives in the codebase as `classical` body-type skills. Everything else in the store is data created at runtime.
+
+**Composition is first-class.** A `composition` body is just a sequence of `(skill_name, arg_map)` invocations plus optional parent-level phases. The substrate executes them in order, recording nested episodes. Parent skills can declare expectations that span multiple child calls.
+
+**Predicates over names.** Skills take parameter predicates rather than hardcoded variants. One `pick_object(predicate)` accepts diverse forms (text, bbox, pose) — variants live in the predicates, resolved by perception primitives and lower-level skills. We do *not* end up with `pick_red_block`, `pick_blue_block`, etc.
+
+**Skill discovery is dynamic.** The substrate's single MCP server publishes the skill store's current contents as MCP tools — generated from the database, not from a hand-curated list. New skills are visible to the orchestrator the moment they're added to the store. This is the corrected version of commitment #5: the MCP server is a thin window onto the skill store.
+
+### 11. Relational state, not absolute state
+
+When the substrate retrieves "have I seen something like this before?" — for both RAG context (#9) and skill replay/distillation — the embedding key must be **the relational geometry between the gripper and the target object(s)**, not the raw camera frame.
+
+Raw scene pixels are a deceptive key. Two scenes can look 0.92 similar by DINOv2 distance while differing in exactly the way that matters for the action (a cup 5 cm closer looks nearly identical but requires a different motion). Lighting, background, and irrelevant clutter dominate visual embedding distance and drown out the signal we need.
+
+**The right relational state vector captures:**
+
+- Detected object 6-DoF pose (in robot frame)
+- Current gripper pose (in robot frame)
+- The **relative transform** between them — the load-bearing piece
+- Gripper width, object dimensions, contact state
+- Optionally: object class / semantic embedding for filtered retrieval
+
+Producing this state vector requires a perception pipeline running continuously alongside any skill that touches objects:
+
+```
+camera frame → detection (Moondream / Florence-2 / VLM grounding)
+            → segmentation (SAM 2 / Grounding-SAM)
+            → 6-DoF pose (FoundationPose-style, or depth + ICP)
+            → relational state vector
+```
+
+The detection + segmentation + pose-estimation steps were each tried in `panda-mcp` and were either underpowered, under-resourced, or used pre-foundation-model tooling. **The OMEN's RTX 5060 Ti + 16 GB VRAM + CUDA 13 changes what's feasible.** SAM 2 runs live, FoundationPose-style 6-DoF pose models are tractable, and the VLM grounders Doug already uses (Moondream, Qwen-VL) have themselves gotten significantly better since 2026-03. This is a deliberate revisit, not flailing — the compute landscape has shifted enough to make them work.
+
+**Decision logging is part of this.** Every substrate decision (replay vs. orchestrator-led, which past episode to retrieve, which body type to invoke) gets logged with the relational state vector that drove it, the top-*k* retrieval candidates with similarity scores, the decision reasoning, and the eventual outcome. This is the dataset every threshold-tuning attempt later draws on. Without it, all threshold tuning is guessing.
+
+```python
+DecisionLog = {
+    "ts": ...,
+    "skill_called": "pick_object",
+    "params": {"predicate": "red block"},
+    "relational_state": {"object_pose": ..., "gripper_pose": ..., "relative": ..., "object_dims": ...},
+    "candidates": [
+        {"episode_id": ..., "relational_similarity": 0.91, "outcome": "success"},
+        ...  # top-k retrieved
+    ],
+    "decision": "replay_trajectory" | "ask_orchestrator" | "execute_policy",
+    "decision_reasoning": "best candidate similarity 0.91 > threshold 0.85",
+    "outcome": "success" | "fail" | "surprise",
+    "surprise_events": [...],
+}
+```
+
 ---
 
 ## Anti-goals (what Hebbot explicitly rules out)
