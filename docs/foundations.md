@@ -234,7 +234,7 @@ DecisionLog = {
 Hebbot is developed opportunistically — *learn / iterate / experiment / see what emerges* — with optional formal payoffs along the way:
 
 - **Learn / iterate.** Always-on baseline goal.
-- **Publish along the way.** Substack/blog series, every 2–3 weeks, retrospective-with-framing tone (Karpathy / Chollet / Eric Jang style). See [the publishing memory](../.claude/projects/-home-doug-hebbot/memory/hebbot-publishing.md) for venue and cadence details.
+- **Publish along the way.** Substack/blog series, every 2–3 weeks, retrospective-with-framing tone (Karpathy / Chollet / Eric Jang style).
 - **Write a paper** if something genuinely novel surfaces.
 - **Enter a robotics competition** (LeRobot benchmarks, RoboCup@Home variants, real-world tracks) when the substrate is mature enough.
 - **Meet interesting people** via the writing. Distribution is how this happens.
@@ -274,7 +274,7 @@ Five tables. JSON columns wherever the shape will likely change.
 - **`states`** — `(episode_id, t, joints, ee_pose, force, gripper_width)`
 - **`decisions`** — `(id, episode_id, timestamp, skill_called, params, relational_state, candidates, decision, reasoning, threshold_values, outcome)`
 
-See `hebbot/substrate/schema.sql` for the canonical version.
+See `src/hebbot/substrate/schema.sql` for the canonical version.
 
 ### Runtime topology
 

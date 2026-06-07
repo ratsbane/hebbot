@@ -1,6 +1,6 @@
 # Seven Months of Trying to Teach a Robot Arm
 
-*Draft 2026-05-30. Substack/blog post #1.*
+*Draft 2026-05-30.*
 
 ---
 

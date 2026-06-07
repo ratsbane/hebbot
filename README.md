@@ -14,7 +14,7 @@ The name honors [Donald Hebb](https://en.wikipedia.org/wiki/Donald_O._Hebb) — 
 
 ## Status
 
-Earliest days — this repo will accumulate as the substrate takes shape. First commits set up the project structure and document what was learned getting the hardware (Franka Panda + RealSense + ZED cameras + Linux host) talking to each other reliably.
+Early days — the substrate is taking shape. As of 2026-06-06 there's a working library: a SQLite-backed skill/episode store, a skill dispatcher with `classical` and `composition` body types, six live-verified skills on the Franka (five primitives + one composed `home`), and a single MCP server that publishes the skill store as dynamic MCP tools. Tests pass in mock mode without hardware. See [`lab_notebook.md`](lab_notebook.md) for the running log and [`docs/panda-setup.md`](docs/panda-setup.md) for what was learned getting the hardware (Franka Panda + RealSense + ZED cameras + Linux host) talking reliably.
 
 ## Posts
 
