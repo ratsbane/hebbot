@@ -205,6 +205,103 @@ def test_log_decision_seam_records_routing_choice(substrate, monkeypatch):
     assert d["outcome"] == "success"  # stamped by dispatcher post-execution
 
 
+# ---------------------------------------------------------------------------
+# Expectation model / surprise detection (commitment #1, slice 1)
+# ---------------------------------------------------------------------------
+
+def test_evaluate_expectations_pass_and_fail():
+    from hebbot.substrate.expectations import evaluate
+    exp = {"checks": [
+        {"name": "err", "field": "max_error", "op": "le", "value": 0.05},
+        {"name": "grasped", "field": "grasped", "op": "eq", "value": True},
+        {"name": "in_range", "field": "x", "op": "between", "min": 0.2, "max": 0.6},
+    ]}
+    # all satisfied -> no events
+    assert evaluate(exp, {"max_error": 0.01, "grasped": True, "x": 0.4}) == []
+    # one violated -> one event naming the field
+    events = evaluate(exp, {"max_error": 0.5, "grasped": True, "x": 0.4})
+    assert len(events) == 1 and events[0]["field"] == "max_error"
+    # multiple violated -> multiple events
+    assert len(evaluate(exp, {"max_error": 0.5, "grasped": False, "x": 0.9})) == 3
+
+
+def test_evaluate_skips_missing_fields():
+    # A check on a field the result lacks (e.g. mock results) is skipped, not
+    # treated as a violation.
+    from hebbot.substrate.expectations import evaluate
+    exp = {"checks": [{"name": "err", "field": "max_error", "op": "le", "value": 0.05}]}
+    assert evaluate(exp, {"_source": "mock", "note": "no max_error here"}) == []
+
+
+def test_move_to_joints_mock_not_surprised(substrate):
+    # move_to_joints has an expectation, but the mock result omits max_error,
+    # so a mock call is a clean success, not a surprise.
+    out = substrate.call("move_to_joints", params={"q": [0.0] * 7})
+    assert out["success"] and not out.get("surprise")
+
+
+def test_primitives_carry_expectations(substrate):
+    for name in ("move_to_joints", "move_to_pose", "close_gripper"):
+        sk = substrate.store.get_skill(name)
+        assert sk["expectations"]["checks"], f"{name} should declare expectations"
+
+
+def test_expectation_violation_flags_surprise(substrate, monkeypatch):
+    from hebbot.skills import primitives
+
+    def _exp_probe(*, val=0.0):
+        return {"max_error": val}
+
+    monkeypatch.setattr(primitives, "_exp_probe", _exp_probe, raising=False)
+    substrate.register(
+        "exp_probe",
+        function_spec="hebbot.skills.primitives:_exp_probe",
+        expectations={"checks": [
+            {"name": "reached", "field": "max_error", "op": "le", "value": 0.01},
+        ]},
+    )
+
+    # Violating call -> surprise.
+    out = substrate.call("exp_probe", params={"val": 0.5})
+    assert out["success"] is False
+    assert out["surprise"] is True
+    assert out["surprise_events"][0]["field"] == "max_error"
+    decs = substrate.store.recent_decisions(skill_called="exp_probe")
+    assert decs[0]["outcome"] == "surprise"
+
+    # Satisfying call -> clean success.
+    out2 = substrate.call("exp_probe", params={"val": 0.005})
+    assert out2["success"] is True and not out2.get("surprise")
+    decs2 = substrate.store.recent_decisions(skill_called="exp_probe")
+    assert decs2[0]["outcome"] == "success"
+
+
+def test_composition_halts_on_surprise(substrate, monkeypatch):
+    from hebbot.skills import primitives
+
+    def _exp_probe(*, val=0.0):
+        return {"max_error": val}
+
+    monkeypatch.setattr(primitives, "_exp_probe", _exp_probe, raising=False)
+    substrate.register(
+        "exp_probe",
+        function_spec="hebbot.skills.primitives:_exp_probe",
+        expectations={"checks": [
+            {"name": "reached", "field": "max_error", "op": "le", "value": 0.01},
+        ]},
+    )
+    # First step surprises -> composition halts before the second step.
+    substrate.register_composition("surprise_comp", steps=[
+        {"skill": "exp_probe", "args": {"val": 0.5}},
+        {"skill": "open_gripper", "args": {"width": 0.08}},
+    ])
+    out = substrate.call("surprise_comp")
+    assert out["success"] is False
+    assert out["completed_steps"] == 0
+    # The halt carries the surprising sub-outcome forward for diagnosis.
+    assert out["sub_results"][0]["outcome"]["surprise"] is True
+
+
 def test_composition_halts_on_subskill_failure(substrate):
     # Register a deliberately broken composition (bad q length on first step)
     substrate.register_composition(

@@ -13,6 +13,7 @@ from __future__ import annotations
 import importlib
 from typing import Any, Callable, Optional
 
+from .expectations import evaluate as evaluate_expectations
 from .store import Store
 
 
@@ -144,7 +145,18 @@ def _run_classical(
         func, context=context, store=store, episode_id=episode_id, decision=decision,
     )
     result = func(**params, **extras)
-    return {"success": True, "result": result}
+    outcome = {"success": True, "result": result}
+
+    # Commitment #1, slice 1: a result that violates the skill's declared
+    # expectations is a *surprise* — it ran, but not as predicted. Surface it on
+    # the outcome (success=False distinguishes it from a clean run; the events
+    # say why) so compositions halt and the orchestrator can react.
+    events = evaluate_expectations(skill.get("expectations"), result)
+    if events:
+        outcome["success"] = False
+        outcome["surprise"] = True
+        outcome["surprise_events"] = events
+    return outcome
 
 
 def _run_composition(
@@ -262,11 +274,16 @@ def call_skill(
         outcome = runner(store, skill, params, context, episode_id, decision)
         success = bool(outcome.get("success"))
         store.end_episode(episode_id, success=success, outcome=outcome)
-        decision.commit(
-            default_decision="orchestrator",
-            outcome="success" if success else "fail",
-            top_level=top_level,
-        )
+        # Three-way outcome label: a clean run is "success"; a run that violated
+        # expectations is "surprise"; anything else (here, only a falsy success
+        # without a surprise flag) is "fail". Exceptions take the except path.
+        if success:
+            label = "success"
+        elif outcome.get("surprise"):
+            label = "surprise"
+        else:
+            label = "fail"
+        decision.commit(default_decision="orchestrator", outcome=label, top_level=top_level)
         return outcome
 
     except Exception as e:

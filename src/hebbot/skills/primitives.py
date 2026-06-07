@@ -433,6 +433,15 @@ PRIMITIVE_SPECS = [
     {
         "name": "move_to_joints",
         "function_spec": "hebbot.skills.primitives:move_to_joints",
+        # Predict the arm actually reaches the commanded configuration. Live
+        # settle error at speed_factor 0.1 is ~2-4 mrad; >50 mrad means it
+        # stalled / hit something (a surprise). Mock results omit max_error, so
+        # this check is skipped in mock mode.
+        "expectations": {
+            "checks": [
+                {"name": "reached_target", "field": "max_error", "op": "le", "value": 0.05},
+            ],
+        },
         "params_schema": {
             "type": "object",
             "properties": {
@@ -454,6 +463,15 @@ PRIMITIVE_SPECS = [
     {
         "name": "move_to_pose",
         "function_spec": "hebbot.skills.primitives:move_to_pose",
+        # Predict the EE lands near the commanded position. Live error is ~3 mm;
+        # >20 mm means it reached a pose far from target (a surprise). No IK
+        # solution raises instead, taking the hard-fail path. Mock omits
+        # position_error -> skipped.
+        "expectations": {
+            "checks": [
+                {"name": "reached_pose", "field": "position_error", "op": "le", "value": 0.02},
+            ],
+        },
         "params_schema": {
             "type": "object",
             "properties": {
@@ -512,6 +530,14 @@ PRIMITIVE_SPECS = [
     {
         "name": "close_gripper",
         "function_spec": "hebbot.skills.primitives:close_gripper",
+        # Predict the grasp holds. grasped=False means the fingers closed but
+        # didn't settle on an object at the expected width — the canonical
+        # manipulation surprise (closed on air, object slipped, wrong width).
+        "expectations": {
+            "checks": [
+                {"name": "grasped", "field": "grasped", "op": "eq", "value": True},
+            ],
+        },
         "params_schema": {
             "type": "object",
             "properties": {
