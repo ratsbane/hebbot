@@ -16,6 +16,10 @@ dependencies = [
 robot = [
     "panda-python>=0.8.0",
 ]
+perception = [
+    "pyrealsense2>=2.58",
+    "pillow>=10.0",
+]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
