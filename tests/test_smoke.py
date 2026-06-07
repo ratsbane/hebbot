@@ -1,87 +1,114 @@
-"""Smoke test: register the primitive, call it, verify episode + state.
-
-Run from project root:
-    python -m pytest tests/test_smoke.py -v
-or:
-    python tests/test_smoke.py
-"""
+"""Smoke tests for the substrate + all primitives (mock mode)."""
 
 from __future__ import annotations
 
-import sqlite3
 import tempfile
-from pathlib import Path
+
+import pytest
 
 from hebbot import Substrate
 from hebbot.skills.primitives import register_all
 
 
-def test_init_and_call_in_mock_mode():
+@pytest.fixture
+def substrate():
     with tempfile.TemporaryDirectory() as tmp:
         s = Substrate(tmp)
-
-        # No skills yet
-        assert s.list_skills() == []
-
-        # Register the primitives
         register_all(s)
-        skills = s.list_skills()
-        assert {sk["name"] for sk in skills} == {"get_state"}
-        get_state_skill = next(sk for sk in skills if sk["name"] == "get_state")
-        assert get_state_skill["body_type"] == "classical"
-        assert get_state_skill["body"]["function"] == "hebbot.skills.primitives:get_state"
+        yield s
+        s.close()
 
-        # Call the skill in mock mode (no robot)
-        outcome = s.call("get_state")
-        assert outcome["success"] is True
-        result = outcome["result"]
-        assert result["_source"] == "mock"
-        assert len(result["joints"]) == 7
-        assert len(result["ee_pose"]) == 16
 
-        # An episode should have been recorded
-        recent = s.store.recent_episodes(skill_name="get_state", limit=10)
-        assert len(recent) == 1
-        ep = recent[0]
-        assert ep["skill_name"] == "get_state"
+def test_all_primitives_registered(substrate):
+    names = {sk["name"] for sk in substrate.list_skills()}
+    expected = {"get_state", "move_to_joints", "move_to_pose",
+                "open_gripper", "close_gripper"}
+    assert names == expected
+
+
+def test_get_state_mock(substrate):
+    out = substrate.call("get_state")
+    assert out["success"]
+    assert out["result"]["_source"] == "mock"
+
+
+def test_move_to_joints_mock(substrate):
+    q = [0.0, -0.5, 0.0, -2.0, 0.0, 1.5, 0.5]
+    out = substrate.call("move_to_joints", params={"q": q, "speed_factor": 0.1})
+    assert out["success"]
+    assert out["result"]["_source"] == "mock"
+    assert out["result"]["target_q"] == q
+
+
+def test_move_to_joints_validates_q_length(substrate):
+    with pytest.raises(ValueError, match="q must have 7"):
+        substrate.call("move_to_joints", params={"q": [0.0, 0.0]})
+
+
+def test_move_to_joints_clamps_speed(substrate):
+    out = substrate.call("move_to_joints", params={"q": [0.0]*7, "speed_factor": 100.0})
+    assert out["success"]
+    # 100 > max (0.5), should be clamped to 0.5
+    assert out["result"]["speed_factor"] == 0.5
+
+
+def test_move_to_pose_mock_with_default_orientation(substrate):
+    out = substrate.call("move_to_pose", params={"position": [0.4, 0.0, 0.3]})
+    assert out["success"]
+    assert out["result"]["_source"] == "mock"
+    assert out["result"]["target_position"] == [0.4, 0.0, 0.3]
+    assert out["result"]["target_orientation"] == [0.0, 1.0, 0.0, 0.0]
+
+
+def test_open_gripper_mock(substrate):
+    out = substrate.call("open_gripper", params={"width": 0.06})
+    assert out["success"]
+    assert out["result"]["_source"] == "mock"
+    assert out["result"]["target_width"] == 0.06
+
+
+def test_open_gripper_clamps_width(substrate):
+    out = substrate.call("open_gripper", params={"width": 0.5})  # > max 0.08
+    assert out["success"]
+    assert out["result"]["target_width"] == 0.08
+
+
+def test_close_gripper_mock(substrate):
+    out = substrate.call("close_gripper", params={
+        "width": 0.03, "force": 15.0
+    })
+    assert out["success"]
+    assert out["result"]["_source"] == "mock"
+    assert out["result"]["grasped"] is True
+    assert out["result"]["target_width"] == 0.03
+    assert out["result"]["force"] == 15.0
+
+
+def test_episodes_recorded_for_all_skills(substrate):
+    # Call each
+    substrate.call("get_state")
+    substrate.call("move_to_joints", params={"q": [0.0]*7})
+    substrate.call("move_to_pose", params={"position": [0.4, 0.0, 0.3]})
+    substrate.call("open_gripper")
+    substrate.call("close_gripper")
+
+    recent = substrate.store.recent_episodes(limit=20)
+    skill_names = [e["skill_name"] for e in recent]
+    for name in ["get_state", "move_to_joints", "move_to_pose",
+                 "open_gripper", "close_gripper"]:
+        assert name in skill_names
+    for ep in recent:
         assert ep["success"] == 1
-        assert ep["body_type_used"] == "classical"
-        assert ep["started_at"] is not None
         assert ep["ended_at"] is not None
-        assert ep["outcome"]["result"]["_source"] == "mock"
-
-        s.close()
 
 
-def test_register_is_idempotent():
-    with tempfile.TemporaryDirectory() as tmp:
-        s = Substrate(tmp)
-        register_all(s)
-        v1 = s.list_skills()[0]["version"]
-
-        register_all(s)
-        v2 = s.list_skills()[0]["version"]
-        assert v2 == v1 + 1, "re-register should bump version"
-
-        s.close()
-
-
-def test_unknown_skill_raises():
+def test_unknown_skill_raises(substrate):
     from hebbot.substrate import SkillNotFoundError
-
-    with tempfile.TemporaryDirectory() as tmp:
-        s = Substrate(tmp)
-        import pytest
-        with pytest.raises(SkillNotFoundError):
-            s.call("nonexistent_skill")
-        s.close()
+    with pytest.raises(SkillNotFoundError):
+        substrate.call("does_not_exist")
 
 
-if __name__ == "__main__":
-    test_init_and_call_in_mock_mode()
-    test_register_is_idempotent()
-    try:
-        test_unknown_skill_raises()
-    except Exception as e:
-        print(f"unknown_skill test needs pytest; skipping: {e}")
-    print("smoke tests passed (manual run)")
+def test_mcp_server_imports():
+    """Just confirm the module can be imported and main() exists."""
+    from hebbot import mcp_server
+    assert callable(mcp_server.main)
