@@ -322,9 +322,16 @@ def teleop_xbox(
 
     target = panda.get_position().copy()
     quat = panda.get_orientation()  # scalar-last [x,y,z,w]; held fixed
+    q0 = np.array(panda.get_state().q)  # bias the nullspace toward the start config
     min_z = float(target[2])
 
     ctrl = controllers.CartesianImpedance()
+    # Firm orientation + nullspace, compliant translation. The default impedance
+    # let the gripper drift ~25deg and the elbow wander into contorted configs
+    # over a session; high rotational stiffness (entries 3-5) locks gripper-down
+    # while moderate translational stiffness keeps contact (touch-off) soft.
+    ctrl.set_impedance(np.diag([200.0, 200.0, 200.0, 30.0, 30.0, 30.0]))
+    ctrl.set_nullspace_stiffness(20.0)
     panda.start_controller(ctrl)
     start = time.time()
     exited_via = "timeout"
@@ -358,7 +365,7 @@ def teleop_xbox(
                 target[0] = float(np.clip(target[0] + dx, *_TELEOP_BOX["x"]))
                 target[1] = float(np.clip(target[1] + dy, *_TELEOP_BOX["y"]))
                 target[2] = float(np.clip(target[2] + dz, *_TELEOP_BOX["z"]))
-                ctrl.set_control(target, quat)
+                ctrl.set_control(target, quat, q0)
                 min_z = min(min_z, float(panda.get_position()[2]))
     finally:
         panda.stop_controller()
@@ -552,12 +559,24 @@ def close_gripper(
         return {"_source": "mock", "target_width": width, "speed": speed,
                 "force": force, "grasped": True, "note": "mock — no actual gripper move"}
 
-    grasped = gripper.grasp(
-        width=width, speed=speed, force=force,
-        epsilon_inner=epsilon_inner, epsilon_outer=epsilon_outer,
-    )
+    note = None
+    try:
+        grasped = gripper.grasp(
+            width=width, speed=speed, force=force,
+            epsilon_inner=epsilon_inner, epsilon_outer=epsilon_outer,
+        )
+    except Exception:
+        # libfranka rejects a re-issued grasp on an already-held object. If the
+        # current width is within the acceptance band and an object is present,
+        # treat it as already grasped rather than erroring (idempotent close).
+        w = float(gripper.read_once().width)
+        if w > 0.003 and (width - epsilon_inner - 1e-3) <= w <= (width + epsilon_outer + 1e-3):
+            grasped = True
+            note = f"already holding at {w:.4f} m; grasp re-issue skipped"
+        else:
+            raise
     state = gripper.read_once()
-    return {
+    result = {
         "_source": "live",
         "target_width": width,
         "actual_width": float(state.width),
@@ -565,6 +584,9 @@ def close_gripper(
         "force": force,
         "grasped": bool(grasped),
     }
+    if note:
+        result["note"] = note
+    return result
 
 
 # ---------------------------------------------------------------------------
