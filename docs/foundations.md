@@ -244,6 +244,98 @@ Strategy decisions should be evaluated on *which path compounds across multiple 
 
 ---
 
+## Appendix A: Storage and runtime architecture
+
+Not a structural commitment in its own right — the concrete shape that flows from the commitments above. Captured here so we don't drift between sessions. **Expect this to change as we build.**
+
+### Storage layout
+
+Lakehouse pattern: small structured data in SQLite, raw blobs on filesystem, vectors in a vector DB.
+
+```
+~/hebbot-data/
+├── hebbot.db                  SQLite — skill store, episode store, decisions
+├── vectors/                   LanceDB or ChromaDB
+├── frames/
+│   └── YYYY/MM/DD/<episode_id>/<camera>_NNN.jpg
+├── trajectories/              parquet per recorded trajectory body
+│   └── <skill>/<traj_id>.parquet
+└── policies/                  trained reflexive policies
+    └── <skill>/v<N>/{model.pt, metadata.json}
+```
+
+### SQLite schema (starter)
+
+Five tables. JSON columns wherever the shape will likely change.
+
+- **`skills`** — `(name, params_schema, expectations, body_type, body, version, created_at, updated_at, statistics)`
+- **`episodes`** — `(id, skill_name, parent_id, started_at, ended_at, success, params, deliberate_ctx, outcome, body_type_used)`
+- **`frames`** — `(id, episode_id, camera, t, file_path, width, height)`
+- **`states`** — `(episode_id, t, joints, ee_pose, force, gripper_width)`
+- **`decisions`** — `(id, episode_id, timestamp, skill_called, params, relational_state, candidates, decision, reasoning, threshold_values, outcome)`
+
+See `hebbot/substrate/schema.sql` for the canonical version.
+
+### Runtime topology
+
+Three processes, three protocols:
+
+```
+[ Orchestrator ]       <-- Claude Code / etc.
+       |
+       | MCP (stdio or HTTP)
+       v
+[ Hebbot MCP server ]  thin wrapper, exposes skill store as dynamic MCP tools
+       |
+       | Python imports
+       v
+[ Hebbot substrate library ]
+       |
+       +-- ZMQ pub/sub --> [ perception daemon ] --> [ FastAPI viewer @ :8081 ]
+       |
+       +-- ZMQ req/rep --> [ franka_rt (real-time) ]
+       |
+       +-- ZMQ pub/sub --> [ camera daemons ] (one per physical camera)
+```
+
+### Perception daemon
+
+Separate process that:
+1. Subscribes to camera streams (ZMQ from camera daemons)
+2. Runs detector → segmenter → 6-DoF pose at ~10 Hz per camera
+3. Publishes results on ZMQ topics (`perception/<camera>/result`)
+4. Hosts FastAPI viewer on `http://omen:8081/`
+   - `/live/<camera>` — Server-Sent Events stream of annotated JPEGs
+   - `/state` — current relational state JSON
+   - `/decisions` — tail of decision log
+   - `/` — dashboard, multi-camera grid
+
+Annotated viewer overlays: detection boxes + class + confidence, SAM 2 masks (translucent), 6-DoF pose axes, relational state text, current decision-log tail in sidebar. Toggleable per-overlay from dashboard.
+
+`ssh -L 8081:omen:8081 omen` and open `http://localhost:8081/` from any laptop for headless debugging.
+
+### MCP server
+
+Single process. Reads `skills` table from `hebbot.db` at startup (and on file-watch change). Exposes one MCP tool per skill row, with the row's `params_schema` as the tool schema. Tool invocation delegates to the substrate library's `call(skill_name, **params)`.
+
+Skill additions appear as new MCP tools without restart. Skill body type changes (script → trajectory → learned_policy) are transparent — the orchestrator sees the same MCP tool.
+
+### Distillation runtime
+
+Cron at 3 AM (or systemd timer). Pseudocode:
+
+```python
+for skill in skills_with_n_or_more_new_successful_episodes_since_last_distillation():
+    candidate_body_type = pick_next_body_type(skill)  # script → trajectory → learned_policy
+    new_body = train_body(skill, candidate_body_type, episodes)
+    if validate(new_body, holdout_episodes):
+        update_skill_body(skill, new_body)
+```
+
+Promotion is a database UPDATE; next call picks up the new body. No substrate code changes; no MCP tool changes.
+
+---
+
 ## Provenance
 
 These foundations crystallized through a series of conversations between Doug and Claude Code during the 2026-05-25 → 2026-06-05 reset period. The conversation transcripts are preserved in [`transcripts/`](../transcripts/) — they're the record of how the framing emerged from the work, including dead ends, reversals, and the moments where Doug pushed back and reshaped the thesis.
