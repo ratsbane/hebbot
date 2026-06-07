@@ -126,6 +126,6 @@ The running stdio MCP server holds the FCI connection for the whole session and 
 
 ### Open threads carried forward
 
-- `move_to_pose` still wants a **live** arm-motion confirmation through the MCP tool once the server is restarted on the fixed code — only the IK resolution was verified live this session, the Cartesian motion was verified off-hardware.
+- ~~`move_to_pose` still wants a **live** arm-motion confirmation through the MCP tool once the server is restarted on the fixed code~~ **Done** — after reconnecting the MCP server on the fixed code, `move_to_pose([0.45, 0, 0.40])` (the pre-fix failing target) executed live through the tool: arm moved, 2.97 mm Cartesian position error at speed_factor 0.1. All six skills now live-verified through the MCP boundary.
 - D405 capture is a standalone script, **not yet a substrate primitive** — no `read_camera` / perception primitive writes to the `frames` table yet. That's the bridge from "camera works" to "episodes have images."
 - Everything from the prior entry's not-yet-built list (`script` body type, decision logging, relational-state perception pipeline) still stands.
