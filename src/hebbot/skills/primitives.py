@@ -182,7 +182,10 @@ def move_to_pose(
 
     current_q = panda.get_state().q
     pos = np.array(position, dtype=float)
-    quat = np.array(orientation, dtype=float)
+    # API convention is scalar-first [w, x, y, z]; panda_py / Eigen expect
+    # scalar-last [x, y, z, w]. Reorder before handing it to ik_full.
+    w, x, y, z = (float(v) for v in orientation)
+    quat = np.array([x, y, z, w], dtype=float)
 
     # ik_full returns up to 4 branches; pick the one closest to current joints
     # (matches commitment #11's preference for relative-state continuity)
