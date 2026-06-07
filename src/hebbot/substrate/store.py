@@ -318,3 +318,25 @@ class Store:
             ),
         )
         return decision_id
+
+    def recent_decisions(
+        self, skill_called: Optional[str] = None, limit: int = 50
+    ) -> list[dict]:
+        if skill_called:
+            rows = self.conn.execute(
+                """SELECT * FROM decisions WHERE skill_called = ?
+                   ORDER BY timestamp DESC LIMIT ?""",
+                (skill_called, limit),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM decisions ORDER BY timestamp DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            for k in ("params", "relational_state", "candidates", "threshold_values"):
+                d[k] = _unjsonify(d[k])
+            out.append(d)
+        return out

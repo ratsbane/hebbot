@@ -140,6 +140,71 @@ def test_composition_speed_factor_passes_through(substrate):
     assert move_step["outcome"]["result"]["speed_factor"] == 0.05
 
 
+# ---------------------------------------------------------------------------
+# Decision logging
+# ---------------------------------------------------------------------------
+
+def test_top_level_call_logs_orchestrator_decision(substrate):
+    substrate.call("get_state")
+    decs = substrate.store.recent_decisions()
+    assert len(decs) == 1
+    d = decs[0]
+    assert d["skill_called"] == "get_state"
+    assert d["decision"] == "orchestrator"
+    assert d["outcome"] == "success"
+    # Linked to the episode it ran in.
+    ep = substrate.store.get_episode(d["episode_id"])
+    assert ep is not None and ep["skill_name"] == "get_state"
+
+
+def test_composition_logs_one_decision_for_parent_only(substrate):
+    substrate.call("home")
+    decs = substrate.store.recent_decisions()
+    # One decision for the top-level `home` call; the open_gripper /
+    # move_to_joints children are part of its execution, not separately routed.
+    assert [d["skill_called"] for d in decs] == ["home"]
+    assert decs[0]["decision"] == "orchestrator"
+
+
+def test_failed_call_logs_decision_with_fail_outcome(substrate):
+    with pytest.raises(ValueError):
+        substrate.call("move_to_joints", params={"q": [0.0, 0.0]})  # bad q length
+    decs = substrate.store.recent_decisions(skill_called="move_to_joints")
+    assert len(decs) == 1
+    assert decs[0]["outcome"] == "fail"
+
+
+def test_log_decision_seam_records_routing_choice(substrate, monkeypatch):
+    # A body that routes via the injected _log_decision seam. The dispatcher
+    # uses the body's choice instead of the default orchestrator baseline, and
+    # stamps the outcome after execution.
+    from hebbot.skills import primitives
+
+    def _routing_probe(*, _log_decision=None):
+        _log_decision(
+            "replay",
+            reasoning="best candidate 0.91 > threshold 0.85",
+            candidates=[{"episode_id": "abc", "relational_similarity": 0.91}],
+            threshold_values={"replay": 0.85},
+        )
+        return {"_source": "test", "ok": True}
+
+    monkeypatch.setattr(primitives, "_routing_probe", _routing_probe, raising=False)
+    substrate.register("routing_probe",
+                       function_spec="hebbot.skills.primitives:_routing_probe")
+
+    out = substrate.call("routing_probe")
+    assert out["success"]
+
+    decs = substrate.store.recent_decisions(skill_called="routing_probe")
+    assert len(decs) == 1
+    d = decs[0]
+    assert d["decision"] == "replay"
+    assert d["candidates"][0]["relational_similarity"] == 0.91
+    assert d["threshold_values"] == {"replay": 0.85}
+    assert d["outcome"] == "success"  # stamped by dispatcher post-execution
+
+
 def test_composition_halts_on_subskill_failure(substrate):
     # Register a deliberately broken composition (bad q length on first step)
     substrate.register_composition(

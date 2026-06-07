@@ -44,6 +44,86 @@ class UnsupportedBodyTypeError(NotImplementedError):
 
 
 # ---------------------------------------------------------------------------
+# Decision logging
+# ---------------------------------------------------------------------------
+
+# Valid routing decisions, per the schema's CHECK constraint on decisions.decision.
+VALID_DECISIONS = ("replay", "orchestrator", "policy")
+
+
+class _Decision:
+    """Records the substrate's routing decision for one skill invocation.
+
+    A skill body may call the injected `_log_decision(...)` (this object's
+    `record`) to declare how it routed the call — `replay` a past trajectory,
+    defer to the `orchestrator`, or run a learned `policy` — along with the
+    candidates / relational-state / reasoning behind the choice. The dispatcher
+    commits the row after execution, stamping the real outcome (so a body
+    decides *before* running and the outcome is filled in *after*).
+
+    If no body records a decision, the dispatcher logs a default `orchestrator`
+    decision for top-level calls: the orchestrator chose to invoke this skill
+    and the substrate executed it as registered, without rerouting. Sub-skill
+    calls inside a composition are not baseline-logged — they're part of the
+    parent's execution, not independent routing decisions. A composition child
+    that *does* route itself (future replay logic) still logs via `record`.
+    """
+
+    def __init__(self, store: Store, *, skill_called: str, episode_id: str, params: dict):
+        self._store = store
+        self._skill_called = skill_called
+        self._episode_id = episode_id
+        self._params = params
+        self._chosen: Optional[dict] = None
+
+    def record(
+        self,
+        decision: str,
+        *,
+        reasoning: Optional[str] = None,
+        relational_state: Optional[dict] = None,
+        candidates: Optional[list] = None,
+        threshold_values: Optional[dict] = None,
+    ) -> None:
+        """Declare the routing decision for this call (body-facing API).
+
+        `decision` must be one of VALID_DECISIONS. The outcome is stamped by the
+        dispatcher after execution, so callers don't pass it here.
+        """
+        if decision not in VALID_DECISIONS:
+            raise ValueError(
+                f"decision must be one of {VALID_DECISIONS}, got {decision!r}"
+            )
+        self._chosen = {
+            "decision": decision,
+            "reasoning": reasoning,
+            "relational_state": relational_state,
+            "candidates": candidates,
+            "threshold_values": threshold_values,
+        }
+
+    def commit(self, *, default_decision: str, outcome: str, top_level: bool) -> None:
+        """Write the decision row. Called once by the dispatcher post-execution."""
+        if self._chosen is not None:
+            self._store.log_decision(
+                skill_called=self._skill_called,
+                episode_id=self._episode_id,
+                params=self._params,
+                outcome=outcome,
+                **self._chosen,
+            )
+        elif top_level:
+            self._store.log_decision(
+                skill_called=self._skill_called,
+                episode_id=self._episode_id,
+                params=self._params,
+                decision=default_decision,
+                outcome=outcome,
+                reasoning="orchestrator-driven call; substrate executed as registered (no rerouting)",
+            )
+
+
+# ---------------------------------------------------------------------------
 # Body-type runners
 # ---------------------------------------------------------------------------
 
@@ -53,13 +133,16 @@ def _run_classical(
     params: dict,
     context: Any,
     episode_id: str,
+    decision: "_Decision",
 ) -> dict:
     body = skill["body"] or {}
     spec = body.get("function")
     if not spec:
         raise ValueError(f"skill {skill['name']!r} classical body missing 'function'")
     func = _resolve_classical(spec)
-    extras = _injected_kwargs(func, context=context, store=store, episode_id=episode_id)
+    extras = _injected_kwargs(
+        func, context=context, store=store, episode_id=episode_id, decision=decision,
+    )
     result = func(**params, **extras)
     return {"success": True, "result": result}
 
@@ -70,6 +153,7 @@ def _run_composition(
     params: dict,
     context: Any,
     episode_id: str,
+    decision: "_Decision",
 ) -> dict:
     """Execute a composition body: an ordered list of sub-skill calls.
 
@@ -166,6 +250,8 @@ def call_skill(
         deliberate_ctx=deliberate_ctx,
         body_type_used=body_type,
     )
+    decision = _Decision(store, skill_called=name, episode_id=episode_id, params=params)
+    top_level = parent_id is None
 
     try:
         runner = _BODY_RUNNERS.get(body_type)
@@ -173,13 +259,20 @@ def call_skill(
             raise UnsupportedBodyTypeError(
                 f"body type {body_type!r} not yet supported by the dispatcher"
             )
-        outcome = runner(store, skill, params, context, episode_id)
-        store.end_episode(episode_id, success=bool(outcome.get("success")), outcome=outcome)
+        outcome = runner(store, skill, params, context, episode_id, decision)
+        success = bool(outcome.get("success"))
+        store.end_episode(episode_id, success=success, outcome=outcome)
+        decision.commit(
+            default_decision="orchestrator",
+            outcome="success" if success else "fail",
+            top_level=top_level,
+        )
         return outcome
 
     except Exception as e:
         outcome = {"success": False, "error": f"{type(e).__name__}: {e}"}
         store.end_episode(episode_id, success=False, outcome=outcome)
+        decision.commit(default_decision="orchestrator", outcome="fail", top_level=top_level)
         raise
 
 
@@ -189,19 +282,34 @@ def _injected_kwargs(
     context: Any,
     store: Store,
     episode_id: str,
+    decision: "_Decision",
 ) -> dict:
     """Substrate-supplied kwargs a primitive may opt into by declaring them.
 
-    A primitive declares any of `_context` (hardware handles), `_store` (the
-    SQLite store), or `_episode_id` (the current episode) in its signature and
-    receives them; primitives that declare none are called with just their
-    params. This is how perception/logging primitives reach the store and the
-    episode they belong to — e.g. `read_camera` writes `frames` rows for the
-    episode it ran in — without threading those through every call.
+    A primitive declares any of these in its signature and receives them;
+    primitives that declare none are called with just their params:
+
+      - `_context`       hardware handles (panda, gripper, cameras)
+      - `_store`         the SQLite store
+      - `_episode_id`    the current episode id
+      - `_log_decision`  records the substrate's routing decision for this call
+                         (see `_Decision.record`) — candidates, relational
+                         state, reasoning. The dispatcher stamps the outcome
+                         after execution.
+
+    This is the single seam through which perception/logging/routing primitives
+    reach the substrate — `read_camera` writes `frames` rows, a future replay
+    body calls `_log_decision("replay", ...)` — without threading store/episode
+    through every call.
     """
     import inspect
     declared = inspect.signature(func).parameters
-    available = {"_context": context, "_store": store, "_episode_id": episode_id}
+    available = {
+        "_context": context,
+        "_store": store,
+        "_episode_id": episode_id,
+        "_log_decision": decision.record if decision is not None else None,
+    }
     return {k: v for k, v in available.items() if k in declared}
 
 
