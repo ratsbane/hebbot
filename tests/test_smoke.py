@@ -33,7 +33,15 @@ def test_all_skills_registered(substrate):
     assert "open_gripper" in names
     assert "close_gripper" in names
     assert "read_camera" in names
+    assert "teleop_xbox" in names
     assert "home" in names
+
+
+def test_teleop_xbox_mock(substrate):
+    # No panda in context -> mock mode, no hardware/gamepad touched.
+    out = substrate.call("teleop_xbox")
+    assert out["success"]
+    assert out["result"]["_source"] == "mock"
 
 
 def test_get_state_mock(substrate):

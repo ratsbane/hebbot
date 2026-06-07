@@ -229,6 +229,153 @@ def move_to_pose(
 
 
 # ---------------------------------------------------------------------------
+# Teleop (Xbox controller -> Cartesian impedance jog)
+# ---------------------------------------------------------------------------
+
+# Conservative workspace box (robot base frame, metres). Clamps the jog target
+# so the gripper can't be driven outside a safe envelope.
+_TELEOP_BOX = {"x": (0.20, 0.65), "y": (-0.40, 0.40), "z": (-0.02, 0.60)}
+
+
+def _find_gamepad():
+    """Return an evdev InputDevice for the first gamepad, or None."""
+    import evdev
+    from evdev import ecodes
+    for path in evdev.list_devices():
+        dev = evdev.InputDevice(path)
+        caps = dev.capabilities()
+        keys = caps.get(ecodes.EV_KEY, [])
+        # A gamepad reports an A/South button and absolute axes.
+        if ecodes.EV_ABS in caps and (ecodes.BTN_A in keys or ecodes.BTN_SOUTH in keys):
+            return dev
+        dev.close()
+    return None
+
+
+def teleop_xbox(
+    speed: float = 0.06,
+    max_runtime: float = 60.0,
+    frequency: float = 100.0,
+    *,
+    _context: Optional[Any] = None,
+) -> dict:
+    """Jog the end-effector with an Xbox controller via Cartesian impedance.
+
+    Compliant control: driving the gripper into a surface stops at contact with
+    bounded force (no hard collision reflex), so this doubles as a safe touch-off
+    — jog down until the fingertips touch, release, read the returned z.
+
+    Controls (gripper-down orientation held fixed):
+      - Left stick      : X/Y in the table plane (up = +x forward)
+      - Right stick up/dn: Z (raise / lower)
+      - A button        : close gripper   B button: open gripper
+      - START button    : finish and return
+
+    Args:
+        speed: max jog velocity at full stick deflection (m/s).
+        max_runtime: hard cap on the session (s); returns when it elapses.
+        frequency: control-loop rate (Hz).
+
+    Returns:
+        {final_position, final_z, min_z_reached, duration_s, exited_via, _source}
+        min_z_reached is the lowest the EE got — the touch-off reading.
+    """
+    panda = _extract(_context, "panda")
+    gripper = _extract(_context, "gripper")
+    if panda is None:
+        time.sleep(0.02)
+        return {"_source": "mock", "note": "mock — no panda in context",
+                "final_position": None, "min_z_reached": None}
+
+    import numpy as np
+    import threading
+    from evdev import ecodes
+    from panda_py import controllers
+
+    dev = _find_gamepad()
+    if dev is None:
+        raise RuntimeError("no gamepad found in /dev/input (is the controller plugged in?)")
+
+    speed = max(0.005, min(0.2, float(speed)))
+    dt = 1.0 / float(frequency)
+    deadzone = 0.15
+
+    def norm(v, lo=-32768.0, hi=32767.0):
+        n = (2.0 * (v - lo) / (hi - lo)) - 1.0  # -> [-1, 1]
+        return 0.0 if abs(n) < deadzone else n
+
+    axes = {ecodes.ABS_X: 0.0, ecodes.ABS_Y: 0.0, ecodes.ABS_RY: 0.0}
+    state = {"exit": False, "grip": None}  # grip: "open"/"close" request
+
+    def handle_gripper():
+        # Run blocking gripper moves off the RT loop so they don't stall control.
+        if gripper is None:
+            return
+        req, state["grip"] = state["grip"], None
+        if req == "close":
+            try: gripper.grasp(width=0.0, speed=0.1, force=20.0,
+                               epsilon_inner=0.05, epsilon_outer=0.05)
+            except Exception: pass
+        elif req == "open":
+            try: gripper.move(width=0.08, speed=0.1)
+            except Exception: pass
+
+    target = panda.get_position().copy()
+    quat = panda.get_orientation()  # scalar-last [x,y,z,w]; held fixed
+    min_z = float(target[2])
+
+    ctrl = controllers.CartesianImpedance()
+    panda.start_controller(ctrl)
+    start = time.time()
+    exited_via = "timeout"
+    try:
+        with panda.create_context(frequency=frequency, max_runtime=max_runtime) as ctx:
+            while ctx.ok():
+                # Drain pending controller events (non-blocking).
+                while True:
+                    ev = dev.read_one()
+                    if ev is None:
+                        break
+                    if ev.type == ecodes.EV_ABS and ev.code in axes:
+                        axes[ev.code] = norm(ev.value)
+                    elif ev.type == ecodes.EV_KEY and ev.value == 1:
+                        if ev.code in (ecodes.BTN_START,):
+                            state["exit"] = True
+                        elif ev.code in (ecodes.BTN_A, ecodes.BTN_SOUTH):
+                            state["grip"] = "close"
+                        elif ev.code in (ecodes.BTN_B, ecodes.BTN_EAST):
+                            state["grip"] = "open"
+                if state["exit"]:
+                    exited_via = "button"
+                    break
+                if state["grip"]:
+                    threading.Thread(target=handle_gripper, daemon=True).start()
+
+                # Stick -> velocity. Up on a stick reads negative, so negate.
+                dx = -axes[ecodes.ABS_Y] * speed * dt   # forward/back
+                dy = -axes[ecodes.ABS_X] * speed * dt    # left/right
+                dz = -axes[ecodes.ABS_RY] * speed * dt   # up/down
+                target[0] = float(np.clip(target[0] + dx, *_TELEOP_BOX["x"]))
+                target[1] = float(np.clip(target[1] + dy, *_TELEOP_BOX["y"]))
+                target[2] = float(np.clip(target[2] + dz, *_TELEOP_BOX["z"]))
+                ctrl.set_control(target, quat)
+                min_z = min(min_z, float(panda.get_position()[2]))
+    finally:
+        panda.stop_controller()
+        dev.close()
+
+    final = panda.get_position()
+    return {
+        "_source": "live",
+        "final_position": [float(v) for v in final],
+        "final_z": float(final[2]),
+        "min_z_reached": float(min_z),
+        "duration_s": round(time.time() - start, 2),
+        "exited_via": exited_via,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Camera read
 # ---------------------------------------------------------------------------
 
@@ -493,6 +640,24 @@ PRIMITIVE_SPECS = [
                 },
             },
             "required": ["position"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "teleop_xbox",
+        "function_spec": "hebbot.skills.primitives:teleop_xbox",
+        "params_schema": {
+            "type": "object",
+            "properties": {
+                "speed": {"type": "number", "minimum": 0.005, "maximum": 0.2,
+                          "default": 0.06,
+                          "description": "max jog velocity at full stick (m/s)"},
+                "max_runtime": {"type": "number", "minimum": 1, "maximum": 300,
+                                "default": 60,
+                                "description": "hard cap on the session (s)"},
+                "frequency": {"type": "number", "minimum": 10, "maximum": 1000,
+                              "default": 100, "description": "control loop rate (Hz)"},
+            },
             "additionalProperties": False,
         },
     },
