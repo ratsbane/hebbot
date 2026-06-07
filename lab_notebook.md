@@ -164,7 +164,7 @@ Live result on omen (isolated `/tmp/hebbot-camtest` data dir to avoid churning t
 
 ### Open threads carried forward
 
-- `read_camera` still wants a **live** confirmation through the MCP tool once the server is restarted on this code — only the standalone-substrate path was exercised live (the capture + frames-write is identical either way; only the MCP round-trip is unconfirmed).
+- ~~`read_camera` still wants a **live** confirmation through the MCP tool once the server is restarted on this code~~ **Done** — after reconnecting, `read_camera` ran live through the MCP tool against the production data dir: `wrist`, 640×480, center depth 0.530 m, 71.6% coverage, both `frames` rows (`wrist` + `wrist:depth`) written to `~/hebbot-data/hebbot.db` and tied to the `read_camera` episode. First real frames in the production DB. Full path verified: Claude Code → MCP → substrate → D405 → frames table.
 - Depth is saved as raw `.npy` per frame; no compaction (Parquet/HDF5 per episode) yet — fine at current volume, revisit when episodes get long.
 - Decision logging and per-step `states` recording are the obvious next users of the finding-#110 injection seam.
 - Still standing: `script` body type, the relational-state perception pipeline (detection → segmentation → 6-DoF pose) that turns these raw frames into the state vector of commitment #11.
