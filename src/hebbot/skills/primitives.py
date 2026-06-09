@@ -385,13 +385,13 @@ def teleop_xbox(
     min_z_q = q0.copy()  # joint config at the lowest z reached (descent diagnostic)
 
     ctrl = controllers.CartesianImpedance()
-    # Firm orientation, compliant translation. The default impedance let the
-    # gripper drift ~25deg and the elbow wander into contorted configs over a
-    # session; high rotational stiffness (entries 3-5) locks gripper-down while
-    # moderate translational stiffness keeps contact (touch-off) soft. Nullspace
-    # softened 20->10: at 20 the bias toward the (high) start config resisted
-    # descending to a low touch-off, stalling the down-jog near the table.
-    ctrl.set_impedance(np.diag([200.0, 200.0, 200.0, 30.0, 30.0, 30.0]))
+    # Firm orientation, compliant translation. Rotational stiffness 30 held
+    # gripper-down at rest but drifted ~9.5deg under translation jogging over a
+    # session (the leveled start orientation didn't stay level) -> raised to 100
+    # so the gripper holds vertical while moving. Nullspace softened 20->10: at
+    # 20 the bias toward the (high) start config resisted descending to a low
+    # touch-off, stalling the down-jog near the table (now reaches contact freely).
+    ctrl.set_impedance(np.diag([200.0, 200.0, 200.0, 100.0, 100.0, 100.0]))
     ctrl.set_nullspace_stiffness(10.0)
     panda.start_controller(ctrl)
     start = time.time()
