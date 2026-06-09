@@ -17,8 +17,7 @@ from hebbot.skills.composed import register_all as reg_comp
 from hebbot.mcp_server import make_hardware_context
 from panda_py import controllers
 
-p = json.load(open("/tmp/calib_result.json"))["p"]
-X, Y = p[0], p[1]
+X, Y = float(sys.argv[1]), float(sys.argv[2])   # target (x, y) in base frame
 GRASP_Z = 0.038      # EE z target (~where the teleop grab held the block)
 DESCENT_SPEED = 0.04  # m/s
 
@@ -27,7 +26,7 @@ def main():
     s = Substrate(os.environ.get("HEBBOT_DATA", "~/hebbot-data"))
     reg_prim(s); reg_comp(s)
     ctx = make_hardware_context(os.environ.get("HEBBOT_FRANKA", "192.168.0.253"),
-                                no_robot=False, no_camera=False)
+                                no_robot=False, no_camera=True)  # grasp needs no camera
     panda = ctx.get("panda")
     if panda is None:
         print("no panda"); return 1
@@ -36,7 +35,10 @@ def main():
 
     print(f"target ({X:.3f},{Y:.3f}), grasp_z={GRASP_Z}", flush=True)
     call("open_gripper", width=0.08)
-    call("move_to_pose", position=[X, Y, 0.15], speed_factor=0.06)  # hover (stiff, safe)
+    # Re-level to TRUE gripper-down ([w,x,y,z]=[0,1,0,0], i.e. 180deg about x) so a
+    # few-degree teleop tilt doesn't angle the descent. Hover stiff/safe.
+    call("move_to_pose", position=[X, Y, 0.18], orientation=[0.0, 1.0, 0.0, 0.0],
+         speed_factor=0.06)
 
     # --- compliant descent ---
     quat = panda.get_orientation()          # gripper-down (scalar-last)
@@ -65,8 +67,11 @@ def main():
         panda.stop_controller()
     actual_z = float(panda.get_position()[2])
     print(f"descended to EE z={actual_z:.4f} (target {GRASP_Z})", flush=True)
-    if actual_z > 0.055:
-        print(f"STALLED HIGH at {actual_z:.4f} — not closing (would grab air). "
+    # Touch-off put green's top at EE z~0.073. A stall BELOW ~0.068 means the open
+    # fingers are past the top (straddling, light side-graze) -> safe to close. A
+    # stall at/above ~0.073 means a finger is sitting on top -> would grab air.
+    if actual_z > 0.068:
+        print(f"STALLED HIGH at {actual_z:.4f} — finger on top, not closing. "
               f"Lifting.", flush=True)
         call("move_to_pose", position=[X, Y, 0.20], speed_factor=0.06)
         s.close()
