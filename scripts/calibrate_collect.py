@@ -19,7 +19,7 @@ from hebbot.skills.primitives import register_all as reg_prim
 from hebbot.skills.composed import register_all as reg_comp
 from hebbot.mcp_server import make_hardware_context
 
-TARGET = np.array([0.49, -0.10, 0.02])   # rough green-block location (base frame, from B1)
+TARGET = np.array([0.45, -0.17, 0.03])   # green-block location (base frame, 2026-06-09 scene)
 DIST = 0.30                              # EE distance from target along view ray
 OBJECT = "green block"
 FRANKA = os.environ.get("HEBBOT_FRANKA", "192.168.0.253")
@@ -53,15 +53,17 @@ def look_at(e, target):
 
 
 def gen_poses():
+    # Vary DISTANCE as well as angle this time (the 2026-06-07 calib used a fixed
+    # 0.30 m, which may be why localization didn't generalize across depths).
     poses = []
-    for el_deg in (88, 74, 62):          # elevation: near-overhead -> tilted
-        for az_deg in (-45, -15, 15, 45):  # azimuth around the target
+    for el_deg, dist in ((88, 0.38), (74, 0.30), (62, 0.24)):  # overhead-far -> tilted-close
+        for az_deg in (-45, -15, 15, 45):                       # azimuth around the target
             el, az = np.radians(el_deg), np.radians(az_deg)
-            offset = DIST * np.array([np.cos(el)*np.cos(az),
+            offset = dist * np.array([np.cos(el)*np.cos(az),
                                       np.cos(el)*np.sin(az), np.sin(el)])
             e = TARGET + offset
             R = look_at(e, TARGET)
-            poses.append((e.tolist(), mat_to_quat_wxyz(R).tolist(), f"el{el_deg}_az{az_deg}"))
+            poses.append((e.tolist(), mat_to_quat_wxyz(R).tolist(), f"el{el_deg}_d{dist}_az{az_deg}"))
     return poses
 
 
