@@ -237,6 +237,61 @@ def move_to_pose(
 _TELEOP_BOX = {"x": (0.20, 0.65), "y": (-0.40, 0.40), "z": (-0.02, 0.60)}
 
 
+def _quat_to_mat(q):
+    """Quaternion [x, y, z, w] -> 3x3 rotation matrix (numpy)."""
+    import numpy as np
+    x, y, z, w = q
+    return np.array([
+        [1 - 2*(y*y + z*z), 2*(x*y - z*w),     2*(x*z + y*w)],
+        [2*(x*y + z*w),     1 - 2*(x*x + z*z), 2*(y*z - x*w)],
+        [2*(x*z - y*w),     2*(y*z + x*w),     1 - 2*(x*x + y*y)],
+    ])
+
+
+def _mat_to_quat(R):
+    """3x3 rotation matrix -> quaternion [x, y, z, w] (numpy)."""
+    import numpy as np
+    tr = R[0, 0] + R[1, 1] + R[2, 2]
+    if tr > 0:
+        S = np.sqrt(tr + 1.0) * 2
+        w = 0.25 * S
+        x = (R[2, 1] - R[1, 2]) / S
+        y = (R[0, 2] - R[2, 0]) / S
+        z = (R[1, 0] - R[0, 1]) / S
+    elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+        S = np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2]) * 2
+        w = (R[2, 1] - R[1, 2]) / S; x = 0.25 * S
+        y = (R[0, 1] + R[1, 0]) / S; z = (R[0, 2] + R[2, 0]) / S
+    elif R[1, 1] > R[2, 2]:
+        S = np.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2]) * 2
+        w = (R[0, 2] - R[2, 0]) / S; x = (R[0, 1] + R[1, 0]) / S
+        y = 0.25 * S; z = (R[1, 2] + R[2, 1]) / S
+    else:
+        S = np.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1]) * 2
+        w = (R[1, 0] - R[0, 1]) / S; x = (R[0, 2] + R[2, 0]) / S
+        y = (R[1, 2] + R[2, 1]) / S; z = 0.25 * S
+    return np.array([x, y, z, w])
+
+
+def _level_gripper_down(q_xyzw):
+    """Force a truly-vertical gripper-down orientation, preserving yaw.
+
+    Takes the current orientation and rebuilds it with the tool z-axis pointing
+    straight down (0,0,-1) and the tool x-axis = the horizontal projection of the
+    current x-axis. Removes any few-degree tilt that would bias a touch-off.
+    """
+    import numpy as np
+    R = _quat_to_mat(q_xyzw)
+    x_axis = R[:, 0].copy()
+    x_axis[2] = 0.0  # project onto the table plane
+    n = np.linalg.norm(x_axis)
+    x_h = (x_axis / n) if n > 1e-6 else np.array([1.0, 0.0, 0.0])
+    z_new = np.array([0.0, 0.0, -1.0])
+    y_new = np.cross(z_new, x_h)
+    R_new = np.column_stack([x_h, y_new, z_new])
+    return _mat_to_quat(R_new)
+
+
 def _find_gamepad():
     """Return an evdev InputDevice for the first gamepad, or None."""
     import evdev
@@ -321,17 +376,23 @@ def teleop_xbox(
             except Exception: pass
 
     target = panda.get_position().copy()
-    quat = panda.get_orientation()  # scalar-last [x,y,z,w]; held fixed
+    # Hold a TRUE gripper-down orientation (z-axis straight down), preserving the
+    # start yaw. Holding the raw start orientation baked in a few-degree tilt that
+    # biased touch-offs by a few mm at the fingertip.
+    quat = _level_gripper_down(panda.get_orientation())  # scalar-last [x,y,z,w]
     q0 = np.array(panda.get_state().q)  # bias the nullspace toward the start config
     min_z = float(target[2])
+    min_z_q = q0.copy()  # joint config at the lowest z reached (descent diagnostic)
 
     ctrl = controllers.CartesianImpedance()
-    # Firm orientation + nullspace, compliant translation. The default impedance
-    # let the gripper drift ~25deg and the elbow wander into contorted configs
-    # over a session; high rotational stiffness (entries 3-5) locks gripper-down
-    # while moderate translational stiffness keeps contact (touch-off) soft.
+    # Firm orientation, compliant translation. The default impedance let the
+    # gripper drift ~25deg and the elbow wander into contorted configs over a
+    # session; high rotational stiffness (entries 3-5) locks gripper-down while
+    # moderate translational stiffness keeps contact (touch-off) soft. Nullspace
+    # softened 20->10: at 20 the bias toward the (high) start config resisted
+    # descending to a low touch-off, stalling the down-jog near the table.
     ctrl.set_impedance(np.diag([200.0, 200.0, 200.0, 30.0, 30.0, 30.0]))
-    ctrl.set_nullspace_stiffness(20.0)
+    ctrl.set_nullspace_stiffness(10.0)
     panda.start_controller(ctrl)
     start = time.time()
     exited_via = "timeout"
@@ -366,7 +427,10 @@ def teleop_xbox(
                 target[1] = float(np.clip(target[1] + dy, *_TELEOP_BOX["y"]))
                 target[2] = float(np.clip(target[2] + dz, *_TELEOP_BOX["z"]))
                 ctrl.set_control(target, quat, q0)
-                min_z = min(min_z, float(panda.get_position()[2]))
+                z_now = float(panda.get_position()[2])
+                if z_now < min_z:
+                    min_z = z_now
+                    min_z_q = np.array(panda.get_state().q)
     finally:
         panda.stop_controller()
         dev.close()
@@ -377,6 +441,7 @@ def teleop_xbox(
         "final_position": [float(v) for v in final],
         "final_z": float(final[2]),
         "min_z_reached": float(min_z),
+        "joints_at_min_z": [float(v) for v in min_z_q],
         "duration_s": round(time.time() - start, 2),
         "exited_via": exited_via,
     }
