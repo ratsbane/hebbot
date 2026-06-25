@@ -87,3 +87,33 @@ move_to_pose(position, orientation, speed_factor)
 - Confirm cuRobo's Franka EE link vs. Hebbot's TCP before wiring into `move_to_pose`.
 - How conservative to set the table/world collision margins for low pushes (Push-T runs the tip
   ~1 cm above the table — don't let the table obstacle forbid the push height).
+
+## Validated install + spike result (2026-06-25, Omen, RTX 5060 Ti / CUDA 13.1)
+
+Built and ran successfully on the Blackwell card. Working recipe — a **fresh `~/curobo-venv`**,
+isolated from the substrate + perception venvs (script: `~/curobo_build.sh` on Omen):
+
+1. Bootstrap from the uv-managed 3.12 interpreter (`~/.local/share/uv/python/cpython-3.12.13-*/bin/python3.12 -m venv ~/curobo-venv`); the system `python3` is 3.14 (too new for wheels).
+2. **torch matching the CUDA _major_ of the toolkit (13):**
+   `pip install "torch==2.9.1+cu130" --extra-index-url https://download.pytorch.org/whl/cu130`
+   — use `--extra-index-url` (not `--index-url`) so PyPI still supplies the pure-Python deps.
+3. `pip install panda-python numpy scipy` — the PyPI name is **`panda-python`** (imports as `panda_py`).
+4. cuRobo from source: `git clone --depth 1 https://github.com/NVlabs/curobo`, then
+   `CUDA_HOME=/usr/local/cuda-13.1  TORCH_CUDA_ARCH_LIST=12.0  pip install -e ~/curobo --no-build-isolation`
+   (`12.0` = Blackwell sm_120).
+5. **Kernel backend (the non-obvious gotcha):** cuRobo needs a runtime kernel backend. Install the
+   cuda.core one: `pip install "cuda-core[cu13]"`. (It bumps nvrtc/nvjitlink to 13.3 vs torch's
+   13.0 pin — a harmless same-major forward-compat warning; torch + the GPU still work.)
+
+**API note:** the current cuRobo is refactored from this doc's assumptions —
+`curobo.inverse_kinematics.InverseKinematics` + `.solve_pose(GoalToolPose.from_poses({tool: Pose(...)}))`,
+and `curobo.motion_planner.MotionPlanner` + `.plan_pose(...)`. Quaternion is `[w,x,y,z]` (gripper-down `[0,1,0,0]`).
+`scripts/curobo_spike.py` is updated to this API.
+
+### Spike result — the thesis, confirmed
+| pose | panda_py (analytical) | cuRobo (multi-seed, self-collision-aware) |
+|---|---|---|
+| normal (0.45, 0, 0.30) | J4 −2.43, err 0.4 mm | J4 −2.41, err 0.0 mm |
+| **hard (0.30, 0, 0.06)** | **J4 −3.011 (jammed at limit), err 16.7 mm — misses** | **J4 −2.66 (0.4 rad margin), err 0.0 mm — exact** |
+
+Next: wire cuRobo behind `move_to_pose` (Phase 1 — self-collision-aware point-to-point, no world model).
