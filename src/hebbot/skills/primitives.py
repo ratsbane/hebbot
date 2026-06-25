@@ -143,6 +143,45 @@ def move_to_joints(
 # Cartesian-space move (via IK)
 # ---------------------------------------------------------------------------
 
+# panda_py's configured EE sits ~10.3 cm along the tool +z axis from cuRobo's
+# `panda_hand` frame (measured by FK-checking cuRobo configs through panda_py).
+# We offset the target from EE frame to panda_hand frame before asking cuRobo.
+_HAND_EE_OFFSET = 0.103
+
+
+def _curobo_ik(ee_position, orientation_wxyz, start_q, url, timeout=3.0):
+    """Collision-aware IK via the cuRobo planning service.
+
+    ee_position / orientation are in panda_py's EE frame (the substrate
+    convention); we translate to cuRobo's panda_hand frame, seed with start_q for
+    continuity, and return a 7-vector config (np.ndarray) or None on any failure
+    (service down, no solution) so the caller can fall back to analytical IK.
+    """
+    import json
+    import urllib.request
+
+    import numpy as np
+
+    w, x, y, z = (float(v) for v in orientation_wxyz)
+    tool_z = _quat_to_mat([x, y, z, w]) @ np.array([0.0, 0.0, 1.0])
+    hand_pos = np.array(ee_position, dtype=float) - _HAND_EE_OFFSET * tool_z
+    body = json.dumps({
+        "position": [float(v) for v in hand_pos],
+        "quaternion": [float(v) for v in orientation_wxyz],
+        "start_q": [float(v) for v in start_q],
+    }).encode()
+    try:
+        req = urllib.request.Request(url.rstrip("/") + "/ik", data=body,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            res = json.loads(r.read())
+    except Exception:
+        return None
+    if not res.get("ok"):
+        return None
+    return np.array(res["q"], dtype=float)
+
+
 def move_to_pose(
     position: list[float],
     orientation: Optional[list[float]] = None,
@@ -187,28 +226,45 @@ def move_to_pose(
     w, x, y, z = (float(v) for v in orientation)
     quat = np.array([x, y, z, w], dtype=float)
 
-    # ik_full returns up to 4 branches; pick the one closest to current joints
-    # (matches commitment #11's preference for relative-state continuity)
+    import os
+
+    ik_source = "analytical"
     best_q = None
-    best_dist = float("inf")
-    for q7 in [current_q[6], current_q[6] + 0.5, current_q[6] - 0.5, 0.785, -0.785, 0.0]:
-        try:
-            sols = panda_py.ik_full(pos, quat, np.array(current_q), float(q7))
-        except Exception:
-            continue
-        if sols is None:
-            continue
-        sols = np.array(sols)
-        if sols.ndim == 1:
-            sols = sols.reshape(1, -1)
-        for sol in sols:
-            sol = np.array(sol).flatten()
-            if sol.shape != (7,) or np.any(np.isnan(sol)):
+    # Prefer cuRobo collision-aware IK when the planning service is configured
+    # (HEBBOT_CUROBO_URL). FK-verify the returned config against the intended pose
+    # and reject large joint swings; on any miss fall back to analytical ik_full.
+    curobo_url = os.environ.get("HEBBOT_CUROBO_URL")
+    if curobo_url:
+        cand = _curobo_ik(position, orientation, list(current_q), curobo_url)
+        if cand is not None and cand.shape == (7,):
+            reached = panda_py.fk(cand)[:3, 3]
+            swing = float(np.max(np.abs(cand - np.array(current_q))))
+            if np.linalg.norm(reached - pos) < 0.01 and swing < 2.5:
+                best_q = cand
+                ik_source = "curobo"
+
+    # Fallback: analytical ik_full returns up to 4 branches; pick the one closest
+    # to current joints (commitment #11's preference for relative-state continuity).
+    if best_q is None:
+        best_dist = float("inf")
+        for q7 in [current_q[6], current_q[6] + 0.5, current_q[6] - 0.5, 0.785, -0.785, 0.0]:
+            try:
+                sols = panda_py.ik_full(pos, quat, np.array(current_q), float(q7))
+            except Exception:
                 continue
-            dist = float(np.linalg.norm(sol - np.array(current_q)))
-            if dist < best_dist:
-                best_dist = dist
-                best_q = sol
+            if sols is None:
+                continue
+            sols = np.array(sols)
+            if sols.ndim == 1:
+                sols = sols.reshape(1, -1)
+            for sol in sols:
+                sol = np.array(sol).flatten()
+                if sol.shape != (7,) or np.any(np.isnan(sol)):
+                    continue
+                dist = float(np.linalg.norm(sol - np.array(current_q)))
+                if dist < best_dist:
+                    best_dist = dist
+                    best_q = sol
 
     if best_q is None:
         raise RuntimeError(f"no IK solution for position={position} orientation={orientation}")
@@ -222,6 +278,7 @@ def move_to_pose(
         "target_position": list(position),
         "target_orientation": list(orientation),
         "ik_solution_q": [float(v) for v in best_q],
+        "ik_source": ik_source,
         "final_position": final_pos,
         "position_error": float(np.linalg.norm(np.array(final_pos) - pos)),
         "speed_factor": speed_factor,

@@ -116,4 +116,33 @@ and `curobo.motion_planner.MotionPlanner` + `.plan_pose(...)`. Quaternion is `[w
 | normal (0.45, 0, 0.30) | J4 −2.43, err 0.4 mm | J4 −2.41, err 0.0 mm |
 | **hard (0.30, 0, 0.06)** | **J4 −3.011 (jammed at limit), err 16.7 mm — misses** | **J4 −2.66 (0.4 rad margin), err 0.0 mm — exact** |
 
-Next: wire cuRobo behind `move_to_pose` (Phase 1 — self-collision-aware point-to-point, no world model).
+## Phase 1 integration — cuRobo behind `move_to_pose` (2026-06-25)
+
+**Architecture: a persistent cuRobo planning service.** cuRobo's setup + warmup is slow, so it
+must stay resident; and keeping torch/cuRobo out of the substrate venv avoids dep conflicts. So:
+
+- **`scripts/curobo_service.py`** runs in `curobo-venv`, loads collision-aware IK once, and serves
+  `POST /ik {position, quaternion[w,x,y,z], start_q[7]}` over `127.0.0.1:8211`. Launch detached:
+  `cd ~/hebbot && setsid ~/curobo-venv/bin/python scripts/curobo_service.py >/tmp/svc.log 2>&1 </dev/null &`
+- **`move_to_pose`** (in `hebbot/.venv`, stdlib `urllib` only) calls it when **`HEBBOT_CUROBO_URL`**
+  is set, else uses analytical `ik_full`. `_curobo_ik()` is the client.
+
+**Two things the integration handles:**
+1. **Frame offset.** panda_py's configured EE is **~10.3 cm along tool +z** from cuRobo's
+   `panda_hand` (`_HAND_EE_OFFSET`). The client translates the EE-frame target to panda_hand
+   before asking; FK-verified to land the panda_py EE *exactly* on target (0.0 mm).
+2. **Continuity.** cuRobo IK returns a *global* optimum that can be a 2.9 rad swing. Seeding with
+   `current_state` (+ `return_seeds=8`, pick nearest) keeps it to ~0.6–1.5 rad. Requires
+   `use_cuda_graph=False` (varying problem shape per call).
+
+**Safety:** the client result is FK-verified (EE within 1 cm of target) and swing-guarded
+(max joint Δ < 2.5 rad); any miss/timeout falls back to analytical `ik_full`. Result reports
+`ik_source: "curobo" | "analytical"`.
+
+**Status:** validated arm-free (offset exact, continuity bounded, fallback works). The only
+untested piece is the live `move_to_joint_position` execution — pending the Panda being powered on.
+
+**Known tradeoff / next tuning:** at hard near-base poses, home-seeding can force J4 near its limit
+(still hits target + collision-free, unlike analytical which jams *and* misses). A limit-margin-aware
+pick among the 8 seeds, and/or routing through `MotionPlanner.plan_pose` for full collision-free
+*trajectories* (not just endpoint configs), is the Phase 1b refinement.
