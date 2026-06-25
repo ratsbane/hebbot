@@ -4,6 +4,7 @@
       "command": "ssh",
       "args": [
         "omen",
+        "HEBBOT_CUROBO_URL=http://127.0.0.1:8211",
         "/home/doug/hebbot/.venv/bin/hebbot-mcp",
         "--data-dir", "/home/doug/hebbot-data",
         "--register-primitives",
