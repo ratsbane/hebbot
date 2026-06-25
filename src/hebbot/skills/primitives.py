@@ -233,7 +233,8 @@ def move_to_pose(
     # Prefer cuRobo collision-aware IK when the planning service is configured
     # (HEBBOT_CUROBO_URL). FK-verify the returned config against the intended pose
     # and reject large joint swings; on any miss fall back to analytical ik_full.
-    curobo_url = os.environ.get("HEBBOT_CUROBO_URL")
+    # Default to the local cuRobo planning service; set HEBBOT_CUROBO_URL="" to disable.
+    curobo_url = os.environ.get("HEBBOT_CUROBO_URL", "http://127.0.0.1:8211")
     if curobo_url:
         cand = _curobo_ik(position, orientation, list(current_q), curobo_url)
         if cand is not None and cand.shape == (7,):
