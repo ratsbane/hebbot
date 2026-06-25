@@ -146,3 +146,22 @@ untested piece is the live `move_to_joint_position` execution — pending the Pa
 (still hits target + collision-free, unlike analytical which jams *and* misses). A limit-margin-aware
 pick among the 8 seeds, and/or routing through `MotionPlanner.plan_pose` for full collision-free
 *trajectories* (not just endpoint configs), is the Phase 1b refinement.
+
+## Phase 1b — orientation-held trajectory execution (built + validated 2026-06-25)
+
+**Key result:** cuRobo's `MotionPlanner.plan_pose` trajectories hold the gripper vertical along the
+*whole path*, not just the goal — verified arm-free by FK'ing every waypoint: **max tilt 0.02°** to
+(0.45,0,0.30), **0.60°** to the near-base (0.32,0,0.12). The old joint point-to-point let orientation
+wander freely. (No explicit orientation constraint needed for top-down moves; `plan_grasp` adds a
+linear approach when wanted.)
+
+- **Service `/plan`** (`curobo_service.py`): `plan_pose(start_q, pose)` → 7-DOF joint waypoints + dt (0.025 s).
+- **Executor** (`scripts/exec_traj.py`): streams the waypoints through panda_py's **`JointPosition`**
+  controller in a `create_context` loop. **Validated live on the arm:**
+  - 0.4× speed → **2.9 mm** accuracy, **max tilt 0.56°** through the move.
+  - full speed → 5.9 mm, max tilt 0.83° (controller lags a bit more when faster → slower = more accurate;
+    a settle-at-goal would tighten full-speed accuracy).
+
+The executor needs FCI, so today it runs standalone (stop the MCP server first). **Next:** move it inside
+the MCP's panda connection (behind `move_to_pose`, `planned=True`), wire `plan_grasp` (orientation-held
+approach→grasp→lift), then the grasp-pixel servo on top → the autonomous vision grasp.

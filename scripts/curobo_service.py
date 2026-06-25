@@ -21,6 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import numpy as np
 import torch
 from curobo.inverse_kinematics import InverseKinematics, InverseKinematicsCfg
+from curobo.motion_planner import MotionPlanner, MotionPlannerCfg
 from curobo.types import GoalToolPose, JointState, Pose
 
 # use_cuda_graph=False so the problem shape can vary per call (we seed with the
@@ -30,6 +31,31 @@ _cfg = InverseKinematicsCfg.create(robot="franka.yml", num_seeds=64,
 _IK = InverseKinematics(_cfg)
 _TOOL = _IK.tool_frames[0]
 _JN = getattr(_IK, "joint_names", None) or _IK.kinematics.joint_names
+
+# Motion planner: collision-free *trajectories* (orientation-held grasp approach
+# via plan_grasp lives on top of this). Streamed to the arm by the substrate.
+_MP = MotionPlanner(MotionPlannerCfg.create(robot="franka.yml", self_collision_check=True))
+_MP.warmup(enable_graph=False, num_warmup_iterations=3)
+_MP_JN = _MP.joint_names
+_MP_DT = float(_MP.trajopt_solver.config.interpolation_dt)
+
+
+def plan_traj(start_q, position, quat_wxyz):
+    """Collision-free joint trajectory from start_q to a panda_hand pose.
+    Returns {ok, dt, waypoints:[[7]...]} (arm joints only)."""
+    cs = JointState.from_position(
+        torch.tensor([start_q], device="cuda", dtype=torch.float32), joint_names=_MP_JN)
+    goal = GoalToolPose(
+        tool_frames=_MP.tool_frames,
+        position=torch.tensor([[[[position]]]], device="cuda", dtype=torch.float32),
+        quaternion=torch.tensor([[[[quat_wxyz]]]], device="cuda", dtype=torch.float32),
+    )
+    res = _MP.plan_pose(goal, cs)
+    if res is None or not bool(res.success.any()):
+        return {"ok": False}
+    P = res.get_interpolated_plan().position.detach().cpu().numpy()
+    P = P.reshape(-1, P.shape[-1])[:, :7]
+    return {"ok": True, "dt": _MP_DT, "waypoints": [[float(v) for v in row] for row in P]}
 
 
 def solve_ik(position, quat_wxyz, start_q=None):
@@ -99,6 +125,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, solve_ik(pos, quat, sq))
             except Exception as e:
                 self._send(500, {"ok": False, "error": str(e)})
+        elif self.path == "/plan":
+            try:
+                pos = [float(v) for v in body["position"]]
+                quat = [float(v) for v in body.get("quaternion", [0.0, 1.0, 0.0, 0.0])]
+                sq = [float(v) for v in body["start_q"]]
+                self._send(200, plan_traj(sq, pos, quat))
+            except Exception as e:
+                self._send(500, {"ok": False, "error": str(e)})
         else:
             self._send(404, {"error": "not found"})
 
@@ -111,6 +145,7 @@ if __name__ == "__main__":
     ap.add_argument("--port", type=int, default=8211)
     ap.add_argument("--host", default="127.0.0.1")
     args = ap.parse_args()
-    solve_ik([0.45, 0.0, 0.30], [0.0, 1.0, 0.0, 0.0])  # warm the CUDA graph
-    print(f"cuRobo service ready on {args.host}:{args.port} (tool={_TOOL})", flush=True)
+    solve_ik([0.45, 0.0, 0.30], [0.0, 1.0, 0.0, 0.0])  # warm the IK CUDA graph
+    plan_traj([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785], [0.45, 0.0, 0.30], [0.0, 1.0, 0.0, 0.0])
+    print(f"cuRobo service ready on {args.host}:{args.port} (tool={_TOOL}, IK+plan)", flush=True)
     ThreadingHTTPServer((args.host, args.port), Handler).serve_forever()
