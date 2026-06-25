@@ -411,7 +411,7 @@ def teleop_xbox(
 
     speed = max(0.005, min(0.2, float(speed)))
     dt = 1.0 / float(frequency)
-    deadzone = 0.15
+    deadzone = 0.30  # raised from 0.15 to swallow a drifting stick (2026-06-25)
 
     def norm(v, lo=-32768.0, hi=32767.0):
         n = (2.0 * (v - lo) / (hi - lo)) - 1.0  # -> [-1, 1]
