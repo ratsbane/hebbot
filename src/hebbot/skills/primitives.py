@@ -1038,6 +1038,134 @@ def place_block(
             "actual_z": actual_z, "released_width": float(gripper.read_once().width)}
 
 
+_CUBE_WIDTH = {"blue": 0.024, "green": 0.029}   # measured cube widths (m)
+
+
+def stack_on(
+    *,
+    pick: str = "green",
+    onto: str = "blue",
+    camera: Optional[str] = None,
+    acquire_z: float = _VG_ACQUIRE_Z,
+    approach_z: float = _VG_APPROACH_Z,
+    max_steps: int = 10,
+    pixel_tol: float = 4.0,
+    descend_tol: float = 22.0,
+    z_step: float = 0.045,
+    contact_gap: float = 0.008,
+    z_floor: float = 0.06,
+    _context: Optional[Any] = None,
+) -> dict:
+    """Pick the `pick` cube and stack it on top of the `onto` cube.
+
+    `vision_grasp`s the pick cube, lifts, image-servos the gripper over the onto cube
+    (same coarse-to-fine loop, onto's centroid as the target), then descends the held
+    cube straight down until its bottom **contacts** onto's top — detected by the
+    commanded z diverging from the actual z (the soft-z impedance can't push through the
+    contact) — and releases at contact. The contact-detect (vs a guessed release height)
+    is the generalization that makes this work at *any* stack height: a 2nd cube, a 3rd,
+    uneven cubes — it finds the top each time instead of needing place_z per level. The
+    manual proof-of-concept (servo-over-onto + place_block to a fixed height) already
+    stacked green on blue (lab notebook #134); this productizes it as one call. `stacked`
+    means contact was reached and the cube released — verify the seat by re-imaging.
+
+    Args:
+        pick, onto: cube colors (calibrated: blue, green). pick != onto.
+        contact_gap: commanded−actual z gap (m) that signals contact.
+        z_floor: abort if no contact by this EE z (onto cube missing / mis-located).
+    """
+    if pick not in _SEGMENT_COLORS or onto not in _SEGMENT_COLORS or pick == onto:
+        return {"_source": "error", "stacked": None,
+                "note": f"need two distinct calibrated colors; got pick={pick!r} onto={onto!r}"}
+    panda = _extract(_context, "panda")
+    gripper = _extract(_context, "gripper")
+    cameras = _extract(_context, "cameras") or {}
+    if panda is None or gripper is None or not cameras:
+        time.sleep(0.05)
+        return {"_source": "mock", "stacked": None, "note": "mock — no arm/gripper/camera"}
+
+    import numpy as np
+    from panda_py import controllers
+
+    cam = _select_camera(cameras, camera)
+
+    # 1) Grab the pick cube with the full vision grasp.
+    g = vision_grasp(color=pick, width=_CUBE_WIDTH.get(pick, 0.024),
+                     acquire_z=acquire_z, approach_z=approach_z, _context=_context)
+    if not g.get("grasped"):
+        return {"_source": "live", "stacked": False, "stage": "grasp_pick", "grasp": g}
+
+    # 2) Lift and image-servo the gripper over the onto cube (no grasp).
+    p = panda.get_position()
+    z = float(np.clip(acquire_z, approach_z, 0.45))
+    move_to_pose([float(p[0]), float(p[1]), z], _context=_context)
+    servo: list[dict] = []
+    for step in range(max_steps):
+        seg = _segment(cam.capture(with_depth=False)["color"], onto)
+        if seg is None:
+            return {"_source": "live", "stacked": False, "stage": "locate_onto",
+                    "note": f"{onto} cube not found", "servo": servo, "grasp": g}
+        u, v, npix = seg
+        expected = 5600.0 * (_VG_APPROACH_Z / z) ** 2
+        if not (0.2 * expected <= npix <= 4.0 * expected):
+            return {"_source": "live", "stacked": False, "stage": "locate_onto",
+                    "note": f"implausible {onto} blob npix={npix}", "servo": servo, "grasp": g}
+        tu, tv = _vg_grasp_pixel(z)
+        du, dv = tu - u, tv - v
+        err = float(np.hypot(du, dv))
+        at_bottom = z <= approach_z + 1e-3
+        servo.append({"step": step, "z": round(z, 3), "pixel_err": round(err, 1)})
+        if at_bottom and err <= pixel_tol:
+            break
+        jinv = _vg_jinv(z)
+        dex = float(np.clip(jinv[0][0] * du + jinv[0][1] * dv, -0.15, 0.15))
+        dey = float(np.clip(jinv[1][0] * du + jinv[1][1] * dv, -0.15, 0.15))
+        if err <= descend_tol and not at_bottom:
+            z = max(approach_z, z - z_step)
+        p = panda.get_position()
+        tx = float(np.clip(float(p[0]) + dex, 0.30, 0.60))
+        ty = float(np.clip(float(p[1]) + dey, -0.28, 0.28))
+        move_to_pose([tx, ty, z], _context=_context)
+
+    # 3) Compliant descend to contact, then release at contact (no press).
+    X, Y = float(panda.get_position()[0]), float(panda.get_position()[1])
+    quat = panda.get_orientation()
+    q0 = np.array(panda.get_state().q)
+    ctrl = controllers.CartesianImpedance()
+    ctrl.set_impedance(np.diag([400.0, 400.0, 200.0, 30.0, 30.0, 30.0]))  # softer z for a gentle seat
+    ctrl.set_nullspace_stiffness(1.0)
+    panda.start_controller(ctrl)
+    dt = 0.01
+    tz = float(panda.get_position()[2])
+    contact_z = None
+    try:
+        with panda.create_context(frequency=100, max_runtime=8.0) as cx:
+            while cx.ok():
+                tz = max(z_floor, tz - 0.02 * dt)              # slow descent
+                ctrl.set_control(np.array([X, Y, tz]), quat, q0)
+                az = float(panda.get_position()[2])
+                if (tz - az) > contact_gap:                     # held cube met resistance
+                    contact_z = az
+                    break
+                if tz <= z_floor + 1e-4:                        # reached floor with no contact
+                    break
+    finally:
+        gripper.move(width=_GRIPPER_MAX_WIDTH, speed=0.1)       # release (at contact, not pressing)
+        panda.stop_controller()
+
+    if contact_z is None:
+        # no contact by the floor — onto cube wasn't under us; lift, report miss
+        p = panda.get_position()
+        move_to_pose([float(p[0]), float(p[1]), 0.25], _context=_context)
+        return {"_source": "live", "stacked": False, "stage": "no_contact",
+                "note": f"descended to floor {z_floor} without contact", "servo": servo}
+
+    p = panda.get_position()
+    move_to_pose([float(p[0]), float(p[1]), 0.25], _context=_context)
+    return {"_source": "live", "stacked": True, "contact_z": round(contact_z, 4),
+            "final_pixel_err": servo[-1]["pixel_err"] if servo else None, "servo": servo}
+
+
 # ---------------------------------------------------------------------------
 # Bulk registration
 # ---------------------------------------------------------------------------
@@ -1275,6 +1403,38 @@ PRIMITIVE_SPECS = [
                 "approach_z": {"type": "number", "minimum": 0.1, "maximum": 0.3, "default": 0.20},
                 "lift_z": {"type": "number", "minimum": 0.1, "maximum": 0.4, "default": 0.22},
                 "descent_speed": {"type": "number", "minimum": 0.005, "maximum": 0.1, "default": 0.04},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "stack_on",
+        "function_spec": "hebbot.skills.primitives:stack_on",
+        # Predict the pick cube ends grasped, carried, and released on contact with
+        # onto's top. stacked=False = grasp miss, onto not located, or no contact.
+        "expectations": {
+            "checks": [
+                {"name": "stacked", "field": "stacked", "op": "eq", "value": True},
+            ],
+        },
+        "params_schema": {
+            "type": "object",
+            "properties": {
+                "pick": {"type": "string", "enum": ["blue", "green"], "default": "green",
+                         "description": "cube to pick up"},
+                "onto": {"type": "string", "enum": ["blue", "green"], "default": "blue",
+                         "description": "cube to stack onto"},
+                "camera": {"type": "string"},
+                "acquire_z": {"type": "number", "minimum": 0.2, "maximum": 0.45, "default": 0.34},
+                "approach_z": {"type": "number", "minimum": 0.1, "maximum": 0.3, "default": 0.20},
+                "max_steps": {"type": "integer", "minimum": 1, "maximum": 20, "default": 10},
+                "pixel_tol": {"type": "number", "minimum": 0.5, "default": 4.0},
+                "descend_tol": {"type": "number", "minimum": 1.0, "default": 22.0},
+                "z_step": {"type": "number", "minimum": 0.01, "maximum": 0.1, "default": 0.045},
+                "contact_gap": {"type": "number", "minimum": 0.002, "maximum": 0.03, "default": 0.008,
+                                "description": "commanded−actual z gap (m) that signals contact"},
+                "z_floor": {"type": "number", "minimum": 0.0, "maximum": 0.2, "default": 0.06,
+                            "description": "abort if no contact by this EE z"},
             },
             "additionalProperties": False,
         },
