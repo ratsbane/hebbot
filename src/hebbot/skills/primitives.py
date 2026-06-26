@@ -714,6 +714,77 @@ def close_gripper(
     return result
 
 
+def grasp_at(
+    *,
+    grasp_z: float = 0.038,
+    width: float = 0.024,
+    force: float = _DEFAULT_GRIP_FORCE,
+    descent_speed: float = 0.04,
+    stall_guard: float = 0.068,
+    _context: Optional[Any] = None,
+) -> dict:
+    """Compliant straight-down descent from the current (x, y) to grasp_z, then close.
+
+    Reflex-safe: Cartesian impedance with firm xy + orientation and softer vertical
+    stiffness, so a finger graze deflects rather than tripping a cartesian_reflex
+    (which would lock the robot). Assumes the gripper is already positioned over the
+    target (e.g. via the vision servo). If a fingertip lands on top of the object the
+    descent stalls above stall_guard and refuses to close (would grab air).
+
+    Args:
+        grasp_z: EE z target for the fingertips-around-object height (m).
+        width: expected object width (m) for the grasp-success band.
+        force: grip force (N). descent_speed: m/s. stall_guard: refuse-to-close EE z.
+    """
+    panda = _extract(_context, "panda")
+    gripper = _extract(_context, "gripper")
+    if panda is None or gripper is None:
+        time.sleep(0.05)
+        return {"_source": "mock", "grasped": None, "note": "mock — no arm/gripper"}
+
+    import numpy as np
+    from panda_py import controllers
+
+    gripper.move(width=_GRIPPER_MAX_WIDTH, speed=0.1)  # open so the fingers straddle
+    pos0 = panda.get_position()
+    X, Y = float(pos0[0]), float(pos0[1])
+    quat = panda.get_orientation()      # hold current (gripper-down) orientation
+    q0 = np.array(panda.get_state().q)
+
+    ctrl = controllers.CartesianImpedance()
+    ctrl.set_impedance(np.diag([400.0, 400.0, 300.0, 30.0, 30.0, 30.0]))
+    ctrl.set_nullspace_stiffness(1.0)
+    panda.start_controller(ctrl)
+    dt = 0.01
+    tz = float(panda.get_position()[2])
+    settle = 0
+    try:
+        with panda.create_context(frequency=100, max_runtime=8.0) as cx:
+            while cx.ok():
+                tz = max(grasp_z, tz - descent_speed * dt)
+                ctrl.set_control(np.array([X, Y, tz]), quat, q0)
+                if tz <= grasp_z + 1e-4:
+                    settle += 1
+                    if settle > 60:        # ~0.6 s settle at target
+                        break
+    finally:
+        panda.stop_controller()
+
+    actual_z = float(panda.get_position()[2])
+    if actual_z > stall_guard:
+        return {"_source": "live", "grasped": False, "stalled_high": True,
+                "actual_z": actual_z,
+                "note": f"stalled at {actual_z:.4f} m (fingertip on object top) — not closing"}
+
+    try:
+        grasped = gripper.grasp(width=width, speed=0.1, force=force,
+                                epsilon_inner=0.018, epsilon_outer=0.018)
+    except Exception:
+        grasped = float(gripper.read_once().width) > 0.003   # already holding
+    return {"_source": "live", "grasped": bool(grasped), "actual_z": actual_z,
+            "actual_width": float(gripper.read_once().width)}
+
+
 # ---------------------------------------------------------------------------
 # Bulk registration
 # ---------------------------------------------------------------------------
@@ -860,6 +931,32 @@ PRIMITIVE_SPECS = [
                           "description": "grip force in N"},
                 "epsilon_inner": {"type": "number", "minimum": 0.0, "default": 0.005},
                 "epsilon_outer": {"type": "number", "minimum": 0.0, "default": 0.005},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "grasp_at",
+        "function_spec": "hebbot.skills.primitives:grasp_at",
+        # Predict the compliant descent ends holding the object. grasped=False
+        # (incl. the stalled-high refusal) is the surprise — fingertip on top, xy
+        # off, or closed on air.
+        "expectations": {
+            "checks": [
+                {"name": "grasped", "field": "grasped", "op": "eq", "value": True},
+            ],
+        },
+        "params_schema": {
+            "type": "object",
+            "properties": {
+                "grasp_z": {"type": "number", "minimum": 0.0, "maximum": 0.2, "default": 0.038,
+                            "description": "EE z for fingertips-around-object height (m)"},
+                "width": {"type": "number", "minimum": 0.0, "maximum": 0.08, "default": 0.024,
+                          "description": "expected object width (m)"},
+                "force": {"type": "number", "minimum": 1.0, "default": 20.0},
+                "descent_speed": {"type": "number", "minimum": 0.005, "maximum": 0.1, "default": 0.04},
+                "stall_guard": {"type": "number", "minimum": 0.0, "maximum": 0.2, "default": 0.068,
+                                "description": "refuse to close if the descent stalls above this EE z"},
             },
             "additionalProperties": False,
         },
