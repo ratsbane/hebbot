@@ -817,20 +817,32 @@ def _vg_jinv(z):
             (_VG_JINV0[1][0] * s, _VG_JINV0[1][1] * s))
 
 
-def _segment_blue(bgr):
-    """Centroid of the navy cube in a BGR frame.
+_SEGMENT_COLORS = ("blue", "green")
 
-    The cube reads RGB≈(1,45,72) — near-zero red, blue-dominant, and *dark* — which
-    separates it from (a) the bright bluish background / cast-shadow (high R or small
-    B−G) and (b) bright cyan ceiling-light glare, which is also low-red and blue-
-    dominant but bright (G≈120, B≈250 vs the cube's G≈55, B≈85). The G<95 ceiling
-    rejects the glare while leaving the lit cube untouched. Returns (u, v, npix) or
-    None if too few pixels match.
+
+def _color_mask(R, G, B, color):
+    """Boolean cube mask from integer RGB channel arrays. Calibrated per color:
+
+    - **blue** — the navy cube reads RGB≈(1,45,72): near-zero red, blue-dominant, and
+      *dark*. The G<95 ceiling rejects bright cyan ceiling-light glare (G≈120,B≈250),
+      which is otherwise also low-red + blue-dominant.
+    - **green** — RGB≈(70,90,38): green-dominant with low blue. The `G−B>25` test is the
+      decisive one — it rejects the *blue* cube (G−B≈−36) and the neutral table/glare/
+      shadow (G−B≈+5), so blue and green never get confused.
     """
+    if color == "blue":
+        return (R < 40) & (B - G > 18) & (B > 50) & (G < 95)
+    if color == "green":
+        return (G - B > 25) & (G - R > 12) & (G > 45)
+    raise ValueError(f"uncalibrated color {color!r}; have {_SEGMENT_COLORS}")
+
+
+def _segment(bgr, color="blue"):
+    """Centroid (u, v, npix) of the `color` cube in a BGR frame, or None if too few px."""
     import numpy as np
     rgb = bgr[:, :, ::-1].astype(int)    # capture() is BGR; flip to true RGB
     R, G, B = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
-    m = (R < 40) & (B - G > 18) & (B > 50) & (G < 95)
+    m = _color_mask(R, G, B, color)
     ys, xs = np.where(m)
     if len(xs) < 80:
         return None
@@ -864,7 +876,7 @@ def vision_grasp(
     (lab notebook #130/#132/#133)
 
     Args:
-        color: block color — only "blue" is calibrated.
+        color: block color to grasp — calibrated: "blue", "green".
         camera: camera name (optional when one camera is connected).
         grasp_z, width: passed through to grasp_at.
         acquire_z: start/observation height (wide FOV). approach_z: final servo height.
@@ -872,9 +884,9 @@ def vision_grasp(
         descend_tol: pixel error under which it's safe to drop a notch.
         z_step: descent increment (m) per centred step.
     """
-    if color != "blue":
+    if color not in _SEGMENT_COLORS:
         return {"_source": "error", "grasped": None,
-                "note": f"only 'blue' is calibrated; got {color!r}"}
+                "note": f"uncalibrated color {color!r}; have {_SEGMENT_COLORS}"}
     panda = _extract(_context, "panda")
     cameras = _extract(_context, "cameras") or {}
     if panda is None or not cameras:
@@ -895,7 +907,7 @@ def vision_grasp(
     history: list[dict] = []
     located = False
     for step in range(max_steps):
-        seg = _segment_blue(cam.capture(with_depth=False)["color"])
+        seg = _segment(cam.capture(with_depth=False)["color"], color)
         if seg is None:
             return {"_source": "live", "located": located, "grasped": False,
                     "note": "block not found in frame", "servo_steps": step,
@@ -1216,8 +1228,8 @@ PRIMITIVE_SPECS = [
         "params_schema": {
             "type": "object",
             "properties": {
-                "color": {"type": "string", "default": "blue",
-                          "description": "block color (only 'blue' is calibrated)"},
+                "color": {"type": "string", "enum": ["blue", "green"], "default": "blue",
+                          "description": "block color to grasp (calibrated: blue, green)"},
                 "camera": {"type": "string",
                            "description": "camera name; optional when one camera is connected"},
                 "grasp_z": {"type": "number", "minimum": 0.0, "maximum": 0.2, "default": 0.038},
