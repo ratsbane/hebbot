@@ -924,6 +924,90 @@ def vision_grasp(
             "actual_z": g.get("actual_z"), "actual_width": g.get("actual_width")}
 
 
+def place_block(
+    *,
+    target_xy: Optional[list[float]] = None,
+    target_pixel: Optional[list[float]] = None,
+    camera: Optional[str] = None,
+    place_z: float = 0.05,
+    approach_z: float = _VG_APPROACH_Z,
+    lift_z: float = 0.22,
+    descent_speed: float = 0.04,
+    _context: Optional[Any] = None,
+) -> dict:
+    """Set a held block down at a target, then lift clear. The inverse of vision_grasp.
+
+    The target may be given as a world xy ([x, y] in base frame — what auto-reset uses,
+    a fixed home), or as a target_pixel ([u, v] in the wrist frame), which is deprojected
+    to the EE xy that puts the gripper over that image point using the same grasp-pixel /
+    image-Jacobian map as the grasp (Δee = Jinv(z)·(grasp_pixel(z) − target_pixel)). With
+    neither, it places straight down at the current xy. Descent is compliant (soft z) so a
+    slightly-off table height sets the block down rather than jamming. (lab notebook #133)
+
+    Args:
+        target_xy: [x, y] world place location (m). Takes precedence over target_pixel.
+        target_pixel: [u, v] wrist-frame place location (deprojected via the grasp map).
+        place_z: EE z at release (m). approach_z: travel height. lift_z: retreat height.
+    """
+    panda = _extract(_context, "panda")
+    gripper = _extract(_context, "gripper")
+    if panda is None or gripper is None:
+        time.sleep(0.05)
+        return {"_source": "mock", "placed": None, "note": "mock — no arm/gripper"}
+
+    import numpy as np
+    from panda_py import controllers
+
+    # 1) Get over the target xy at travel height.
+    if target_xy is not None:
+        X, Y = float(target_xy[0]), float(target_xy[1])
+        move_to_pose([X, Y, approach_z], _context=_context)
+    elif target_pixel is not None:
+        pos = panda.get_position()
+        move_to_pose([float(pos[0]), float(pos[1]), approach_z], _context=_context)
+        tu, tv = _vg_grasp_pixel(approach_z)
+        ji = _vg_jinv(approach_z)
+        du, dv = tu - float(target_pixel[0]), tv - float(target_pixel[1])
+        p = panda.get_position()
+        X = float(p[0]) + ji[0][0] * du + ji[0][1] * dv
+        Y = float(p[1]) + ji[1][0] * du + ji[1][1] * dv
+        move_to_pose([X, Y, approach_z], _context=_context)
+    else:
+        p = panda.get_position()
+        X, Y = float(p[0]), float(p[1])
+        move_to_pose([X, Y, approach_z], _context=_context)
+
+    # 2) Compliant straight-down descent to the release height.
+    quat = panda.get_orientation()
+    q0 = np.array(panda.get_state().q)
+    ctrl = controllers.CartesianImpedance()
+    ctrl.set_impedance(np.diag([400.0, 400.0, 300.0, 30.0, 30.0, 30.0]))
+    ctrl.set_nullspace_stiffness(1.0)
+    panda.start_controller(ctrl)
+    dt = 0.01
+    tz = float(panda.get_position()[2])
+    settle = 0
+    try:
+        with panda.create_context(frequency=100, max_runtime=8.0) as cx:
+            while cx.ok():
+                tz = max(place_z, tz - descent_speed * dt)
+                ctrl.set_control(np.array([X, Y, tz]), quat, q0)
+                if tz <= place_z + 1e-4:
+                    settle += 1
+                    if settle > 40:
+                        break
+    finally:
+        panda.stop_controller()
+    actual_z = float(panda.get_position()[2])
+
+    # 3) Release and lift clear.
+    gripper.move(width=_GRIPPER_MAX_WIDTH, speed=0.1)
+    p = panda.get_position()
+    move_to_pose([float(p[0]), float(p[1]), lift_z], _context=_context)
+    return {"_source": "live", "placed": True, "place_xy": [round(X, 4), round(Y, 4)],
+            "actual_z": actual_z, "released_width": float(gripper.read_once().width)}
+
+
 # ---------------------------------------------------------------------------
 # Bulk registration
 # ---------------------------------------------------------------------------
@@ -1132,6 +1216,35 @@ PRIMITIVE_SPECS = [
                                 "description": "pixel error under which it drops a height notch"},
                 "z_step": {"type": "number", "minimum": 0.01, "maximum": 0.1, "default": 0.045,
                            "description": "descent increment (m) per centred step"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "place_block",
+        "function_spec": "hebbot.skills.primitives:place_block",
+        # Predict the held block is set down and released. placed=False would be a
+        # descent/controller failure.
+        "expectations": {
+            "checks": [
+                {"name": "placed", "field": "placed", "op": "eq", "value": True},
+            ],
+        },
+        "params_schema": {
+            "type": "object",
+            "properties": {
+                "target_xy": {"type": "array", "items": {"type": "number"},
+                              "minItems": 2, "maxItems": 2,
+                              "description": "[x, y] world place location (m); preferred"},
+                "target_pixel": {"type": "array", "items": {"type": "number"},
+                                 "minItems": 2, "maxItems": 2,
+                                 "description": "[u, v] wrist-frame place location (deprojected)"},
+                "camera": {"type": "string"},
+                "place_z": {"type": "number", "minimum": 0.0, "maximum": 0.2, "default": 0.05,
+                            "description": "EE z at release (m)"},
+                "approach_z": {"type": "number", "minimum": 0.1, "maximum": 0.3, "default": 0.20},
+                "lift_z": {"type": "number", "minimum": 0.1, "maximum": 0.4, "default": 0.22},
+                "descent_speed": {"type": "number", "minimum": 0.005, "maximum": 0.1, "default": 0.04},
             },
             "additionalProperties": False,
         },
