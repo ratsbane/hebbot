@@ -853,6 +853,85 @@ def _segment(bgr, color="blue"):
     return float(xs.mean()), float(ys.mean()), int(len(xs))
 
 
+def _label_cc(mask, max_iter=120):
+    """Pure-numpy 4-connected components (no scipy): min-label propagation to
+    convergence. Returns an int label array (0 = background). Compact blobs
+    converge in ~radius iterations; the substrate venv has no cv2/scipy."""
+    import numpy as np
+    h, w = mask.shape
+    lab = np.where(mask, np.arange(1, h * w + 1).reshape(h, w), 0).astype(np.int64)
+    BIG = h * w + 1
+    for _ in range(max_iter):
+        prev = lab
+        nb = np.stack([lab,
+                       np.pad(lab[:-1], ((1, 0), (0, 0))),
+                       np.pad(lab[1:], ((0, 1), (0, 0))),
+                       np.pad(lab[:, :-1], ((0, 0), (1, 0))),
+                       np.pad(lab[:, 1:], ((0, 0), (0, 1)))])
+        nb[nb == 0] = BIG
+        new = nb.min(0)
+        new[~mask] = 0
+        lab = new
+        if np.array_equal(lab, prev):
+            break
+    return lab
+
+
+def find_blocks(
+    *,
+    camera: Optional[str] = None,
+    colors: Optional[list] = None,
+    min_px: int = 120,
+    _context: Optional[Any] = None,
+) -> dict:
+    """Per-instance block detection — the shape-aware perception (lab notebook #137).
+
+    Unlike `_segment` (one centroid per colour), this labels connected components so
+    *multiple same-colour blocks are separated*, and reports each instance's geometry:
+    centroid pixel, principal-axis angle, pixel extent (L×W), aspect ratio, and a
+    shape tag (`rect` if aspect ≥ 1.5 else `cube`). A rectangular block lying down shows
+    its long face (rect); standing on its end it shows a near-square top face (cube-like)
+    — so aspect also hints at orientation. Calibrated colours: blue, green, red.
+
+    Returns {blocks: [{color, shape, u, v, ang, L, W, aspect, npix}, ...]} sorted by size.
+    """
+    cameras = _extract(_context, "cameras") or {}
+    if not cameras:
+        time.sleep(0.02)
+        return {"_source": "mock", "blocks": []}
+    import numpy as np
+    cam = _select_camera(cameras, camera)
+    if cam is None:
+        return {"_source": "error", "blocks": [], "note": "no camera"}
+    rgb = cam.capture(with_depth=False)["color"][:, :, ::-1].astype(int)  # BGR->RGB
+    R, G, B = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
+    want = colors or list(_SEGMENT_COLORS)
+    blocks = []
+    for col in want:
+        if col not in _SEGMENT_COLORS:
+            continue
+        lab = _label_cc(_color_mask(R, G, B, col))
+        for L in np.unique(lab):
+            if L == 0:
+                continue
+            ys, xs = np.where(lab == L)
+            if len(xs) < min_px:
+                continue
+            pts = np.stack([xs, ys]).astype(float)
+            c = pts.mean(1)
+            p = pts - c[:, None]
+            evals, evecs = np.linalg.eigh(p @ p.T / p.shape[1])
+            ang = float(np.degrees(np.arctan2(evecs[1, -1], evecs[0, -1])))
+            Lp, Wp = 4 * np.sqrt(evals[-1]), 4 * np.sqrt(max(evals[0], 1e-6))
+            asp = float(Lp / max(Wp, 1.0))
+            blocks.append({"color": col, "shape": "rect" if asp >= 1.5 else "cube",
+                           "u": round(float(c[0]), 1), "v": round(float(c[1]), 1),
+                           "ang": round(ang), "L": round(float(Lp)), "W": round(float(Wp)),
+                           "aspect": round(asp, 2), "npix": int(len(xs))})
+    blocks.sort(key=lambda b: -b["npix"])
+    return {"_source": "live", "blocks": blocks, "n": len(blocks)}
+
+
 def vision_grasp(
     *,
     color: str = "blue",
@@ -1194,6 +1273,135 @@ def stack_on(
             "final_pixel_err": servo[-1]["pixel_err"] if servo else None, "servo": servo}
 
 
+def _qmul(a, b):
+    """Hamilton product of [w,x,y,z] quaternions."""
+    aw, ax, ay, az = a
+    bw, bx, by, bz = b
+    return [aw * bw - ax * bx - ay * by - az * bz,
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw]
+
+
+def stand_on_end(
+    *,
+    color: str = "red",
+    camera: Optional[str] = None,
+    grip_width: float = 0.03,
+    grip_z: float = 0.045,
+    lift_z: float = 0.30,
+    block_half: float = 0.03,
+    pitch_sign: float = 1.0,
+    _context: Optional[Any] = None,
+) -> dict:
+    """Stand a lying rectangular block up on its end — the first non-top-down maneuver.
+
+    Finds the (largest) rect block of `color` with `find_blocks`, centres the gripper
+    over it, yaws so the fingers close across its *narrow* axis (computed from its image
+    angle via the camera rotation), grips it flat, lifts, **pitches the wrist 90° about
+    the finger axis** so the block goes vertical, lowers the bottom end to a force-sensed
+    contact with the table, and releases. (lab notebook #137; Moravec → reflex.)
+
+    Self-checks: if the grip closes too wide it gripped the long axis (yaw 90° off) and
+    retries flipped. pitch_sign ∈ {+1,-1} picks which way it tips up — flip if it tips
+    the wrong way. block_half = half the block's length (m), sets the place height.
+    """
+    import numpy as np, math
+    from panda_py import controllers
+
+    panda = _extract(_context, "panda")
+    gripper = _extract(_context, "gripper")
+    cameras = _extract(_context, "cameras") or {}
+    if panda is None or gripper is None or not cameras:
+        time.sleep(0.05)
+        return {"_source": "mock", "stood": None, "note": "mock — no arm/gripper/camera"}
+    cam = _select_camera(cameras, camera)
+
+    # 1) locate the target rect block
+    fb = find_blocks(colors=[color], _context=_context)
+    rects = [b for b in fb.get("blocks", []) if b["shape"] == "rect"]
+    if not rects:
+        return {"_source": "live", "stood": False, "note": f"no lying {color} block found"}
+    tgt = rects[0]
+
+    # 2) centre the gripper (down) over the block, image-servo on its centroid
+    for _ in range(6):
+        seg = _segment(cam.capture(with_depth=False)["color"], color)
+        if seg is None:
+            break
+        u, v, _ = seg
+        z = float(panda.get_position()[2])
+        tu, tv = _vg_grasp_pixel(z)
+        du, dv = tu - u, tv - v
+        if math.hypot(du, dv) <= 5:
+            break
+        ji = _vg_jinv(z)
+        dex = float(np.clip(ji[0][0] * du + ji[0][1] * dv, -0.12, 0.12))
+        dey = float(np.clip(ji[1][0] * du + ji[1][1] * dv, -0.12, 0.12))
+        p = panda.get_position()
+        move_to_pose([float(p[0]) + dex, float(p[1]) + dey, max(0.20, z)], _context=_context)
+
+    # 3) yaw so the fingers (EE-y, world-Y at gripper-down) close across the block's SHORT
+    #    axis. Block long-axis image angle θ → world long-axis φ ∝ (−sinθ,−cosθ); the
+    #    needed yaw about world-Z is ψ = φ.
+    th = math.radians(tgt["ang"])
+    phi = math.atan2(-math.cos(th), -math.sin(th))
+    bx, by = float(panda.get_position()[0]), float(panda.get_position()[1])
+
+    def grip_with_yaw(psi):
+        q = _qmul([math.cos(psi / 2), 0, 0, math.sin(psi / 2)], [0.0, 1.0, 0.0, 0.0])
+        move_to_pose([bx, by, 0.20], orientation=q, _context=_context)
+        g = grasp_at(grasp_z=grip_z, width=grip_width, stall_guard=0.085, _context=_context)
+        return q, g
+
+    q_grip, g = grip_with_yaw(phi)
+    w = float(gripper.read_once().width)
+    if w > grip_width + 0.012:          # gripped the long face → yaw was 90° off
+        gripper.move(width=_GRIPPER_MAX_WIDTH, speed=0.1)
+        q_grip, g = grip_with_yaw(phi + math.pi / 2)
+        w = float(gripper.read_once().width)
+    if not g.get("grasped") and w < 0.004:
+        return {"_source": "live", "stood": False, "stage": "grip", "note": "grip closed empty", "grip_w": w}
+
+    # 4) lift, then pitch 90° about the local finger (Y) axis → block vertical
+    move_to_pose([bx, by, lift_z], orientation=q_grip, _context=_context)
+    a = pitch_sign * math.pi / 4
+    q_stand = _qmul(q_grip, [math.cos(a), 0, math.sin(a), 0])
+    move_to_pose([bx, by, lift_z], orientation=q_stand, _context=_context)
+
+    # 5) lower the block's lower end to a force-sensed contact with the table, release
+    quat_xyzw = panda.get_orientation()
+    q0 = np.array(panda.get_state().q)
+    ctrl = controllers.CartesianImpedance()
+    ctrl.set_impedance(np.diag([400.0, 400.0, 200.0, 30.0, 30.0, 30.0]))
+    ctrl.set_nullspace_stiffness(1.0)
+    panda.start_controller(ctrl)
+    dt = 0.01
+    tz = float(panda.get_position()[2])
+    fz0 = float(panda.get_state().O_F_ext_hat_K[2])
+    floor = 0.04
+    contact_z = None
+    try:
+        with panda.create_context(frequency=100, max_runtime=8.0) as cx:
+            while cx.ok():
+                tz = max(floor, tz - 0.02 * dt)
+                ctrl.set_control(np.array([bx, by, tz]), quat_xyzw, q0)
+                if abs(float(panda.get_state().O_F_ext_hat_K[2]) - fz0) > 4.0:
+                    contact_z = float(panda.get_position()[2])
+                    break
+                if tz <= floor + 1e-4:
+                    break
+    finally:
+        gripper.move(width=_GRIPPER_MAX_WIDTH, speed=0.1)   # release the standing block
+        panda.stop_controller()
+
+    # 6) retreat up + away without knocking it
+    p = panda.get_position()
+    move_to_pose([float(p[0]), float(p[1]), lift_z], _context=_context)
+    return {"_source": "live", "stood": contact_z is not None, "contact_z": contact_z,
+            "grip_w": round(w, 4), "yaw_deg": round(math.degrees(phi))}
+
+
 # ---------------------------------------------------------------------------
 # Bulk registration
 # ---------------------------------------------------------------------------
@@ -1472,6 +1680,45 @@ PRIMITIVE_SPECS = [
                                 "description": "commanded−actual z gap (m); secondary contact trigger"},
                 "z_floor": {"type": "number", "minimum": 0.0, "maximum": 0.2, "default": 0.06,
                             "description": "abort if no contact by this EE z"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "find_blocks",
+        "function_spec": "hebbot.skills.primitives:find_blocks",
+        "params_schema": {
+            "type": "object",
+            "properties": {
+                "camera": {"type": "string"},
+                "colors": {"type": "array", "items": {"type": "string", "enum": ["blue", "green", "red"]},
+                           "description": "colours to detect (default all calibrated)"},
+                "min_px": {"type": "integer", "minimum": 20, "default": 120,
+                           "description": "min pixels for an instance"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "stand_on_end",
+        "function_spec": "hebbot.skills.primitives:stand_on_end",
+        "expectations": {
+            "checks": [
+                {"name": "stood", "field": "stood", "op": "eq", "value": True},
+            ],
+        },
+        "params_schema": {
+            "type": "object",
+            "properties": {
+                "color": {"type": "string", "enum": ["blue", "green", "red"], "default": "red"},
+                "camera": {"type": "string"},
+                "grip_width": {"type": "number", "minimum": 0.0, "maximum": 0.08, "default": 0.03},
+                "grip_z": {"type": "number", "minimum": 0.0, "maximum": 0.2, "default": 0.045},
+                "lift_z": {"type": "number", "minimum": 0.1, "maximum": 0.4, "default": 0.30},
+                "block_half": {"type": "number", "minimum": 0.0, "maximum": 0.1, "default": 0.03,
+                               "description": "half the block's length (m); sets place height"},
+                "pitch_sign": {"type": "number", "enum": [1, -1], "default": 1,
+                               "description": "which way to tip the block up"},
             },
             "additionalProperties": False,
         },
