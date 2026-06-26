@@ -817,7 +817,7 @@ def _vg_jinv(z):
             (_VG_JINV0[1][0] * s, _VG_JINV0[1][1] * s))
 
 
-_SEGMENT_COLORS = ("blue", "green")
+_SEGMENT_COLORS = ("blue", "green", "red")
 
 
 def _color_mask(R, G, B, color):
@@ -829,11 +829,15 @@ def _color_mask(R, G, B, color):
     - **green** — RGB≈(70,90,38): green-dominant with low blue. The `G−B>25` test is the
       decisive one — it rejects the *blue* cube (G−B≈−36) and the neutral table/glare/
       shadow (G−B≈+5), so blue and green never get confused.
+    - **red** — RGB≈(160,80,75): strongly red-dominant and *bright*. The R>115 floor
+      rejects the cube's own reddish cast shadow (R≈101, same hue but dark).
     """
     if color == "blue":
         return (R < 40) & (B - G > 18) & (B > 50) & (G < 95)
     if color == "green":
         return (G - B > 25) & (G - R > 12) & (G > 45)
+    if color == "red":
+        return (R - G > 40) & (R - B > 40) & (R > 115)
     raise ValueError(f"uncalibrated color {color!r}; have {_SEGMENT_COLORS}")
 
 
@@ -1038,13 +1042,14 @@ def place_block(
             "actual_z": actual_z, "released_width": float(gripper.read_once().width)}
 
 
-_CUBE_WIDTH = {"blue": 0.024, "green": 0.029}   # measured cube widths (m)
+_CUBE_WIDTH = {"blue": 0.024, "green": 0.029, "red": 0.029}   # measured cube widths (m)
 
 
 def stack_on(
     *,
     pick: str = "green",
     onto: str = "blue",
+    onto_top: float = 0.0,
     camera: Optional[str] = None,
     acquire_z: float = _VG_ACQUIRE_Z,
     approach_z: float = _VG_APPROACH_Z,
@@ -1070,7 +1075,10 @@ def stack_on(
     means contact was reached and the cube released — verify the seat by re-imaging.
 
     Args:
-        pick, onto: cube colors (calibrated: blue, green). pick != onto.
+        pick, onto: cube colors (calibrated: blue, green, red). pick != onto.
+        onto_top: height (m) of onto's top surface above the table — the stack it sits on
+            (0 for a cube on the table, ≈0.053 for stacking onto a 2-high tower). Cancels
+            the parallax of centring over an elevated target; raise z_floor to match.
         contact_gap: commanded−actual z gap (m) that signals contact.
         z_floor: abort if no contact by this EE z (onto cube missing / mis-located).
     """
@@ -1106,18 +1114,22 @@ def stack_on(
             return {"_source": "live", "stacked": False, "stage": "locate_onto",
                     "note": f"{onto} cube not found", "servo": servo, "grasp": g}
         u, v, npix = seg
-        expected = 5600.0 * (_VG_APPROACH_Z / z) ** 2
+        # onto is elevated by onto_top (height of the stack we're placing on), so it
+        # sits at camera distance d = z − onto_top. Evaluate the grasp-pixel/Jacobian
+        # there to cancel parallax (≈16 mm error if ignored when stacking 3-high).
+        d = z - onto_top
+        expected = 5600.0 * (_VG_APPROACH_Z / d) ** 2
         if not (0.2 * expected <= npix <= 4.0 * expected):
             return {"_source": "live", "stacked": False, "stage": "locate_onto",
                     "note": f"implausible {onto} blob npix={npix}", "servo": servo, "grasp": g}
-        tu, tv = _vg_grasp_pixel(z)
+        tu, tv = _vg_grasp_pixel(d)
         du, dv = tu - u, tv - v
         err = float(np.hypot(du, dv))
         at_bottom = z <= approach_z + 1e-3
         servo.append({"step": step, "z": round(z, 3), "pixel_err": round(err, 1)})
         if at_bottom and err <= pixel_tol:
             break
-        jinv = _vg_jinv(z)
+        jinv = _vg_jinv(d)
         dex = float(np.clip(jinv[0][0] * du + jinv[0][1] * dv, -0.15, 0.15))
         dey = float(np.clip(jinv[1][0] * du + jinv[1][1] * dv, -0.15, 0.15))
         if err <= descend_tol and not at_bottom:
@@ -1356,8 +1368,8 @@ PRIMITIVE_SPECS = [
         "params_schema": {
             "type": "object",
             "properties": {
-                "color": {"type": "string", "enum": ["blue", "green"], "default": "blue",
-                          "description": "block color to grasp (calibrated: blue, green)"},
+                "color": {"type": "string", "enum": ["blue", "green", "red"], "default": "blue",
+                          "description": "block color to grasp (calibrated: blue, green, red)"},
                 "camera": {"type": "string",
                            "description": "camera name; optional when one camera is connected"},
                 "grasp_z": {"type": "number", "minimum": 0.0, "maximum": 0.2, "default": 0.038},
@@ -1420,10 +1432,13 @@ PRIMITIVE_SPECS = [
         "params_schema": {
             "type": "object",
             "properties": {
-                "pick": {"type": "string", "enum": ["blue", "green"], "default": "green",
+                "pick": {"type": "string", "enum": ["blue", "green", "red"], "default": "green",
                          "description": "cube to pick up"},
-                "onto": {"type": "string", "enum": ["blue", "green"], "default": "blue",
+                "onto": {"type": "string", "enum": ["blue", "green", "red"], "default": "blue",
                          "description": "cube to stack onto"},
+                "onto_top": {"type": "number", "minimum": 0.0, "maximum": 0.2, "default": 0.0,
+                             "description": "height (m) of onto's top surface (the stack it sits on); "
+                                            "≈0.053 to stack onto a 2-high tower"},
                 "camera": {"type": "string"},
                 "acquire_z": {"type": "number", "minimum": 0.2, "maximum": 0.45, "default": 0.34},
                 "approach_z": {"type": "number", "minimum": 0.1, "maximum": 0.3, "default": 0.20},
