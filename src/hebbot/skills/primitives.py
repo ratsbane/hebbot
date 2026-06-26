@@ -820,15 +820,17 @@ def _vg_jinv(z):
 def _segment_blue(bgr):
     """Centroid of the navy cube in a BGR frame.
 
-    The cube reads RGB≈(1,45,72) — near-zero red and blue-dominant — which cleanly
-    separates it from the bright bluish background (high R) and the gray cast-shadow
-    streak (small B−G), both of which a naive B>R blue test catches. Returns
-    (u, v, npix) or None if too few pixels match.
+    The cube reads RGB≈(1,45,72) — near-zero red, blue-dominant, and *dark* — which
+    separates it from (a) the bright bluish background / cast-shadow (high R or small
+    B−G) and (b) bright cyan ceiling-light glare, which is also low-red and blue-
+    dominant but bright (G≈120, B≈250 vs the cube's G≈55, B≈85). The G<95 ceiling
+    rejects the glare while leaving the lit cube untouched. Returns (u, v, npix) or
+    None if too few pixels match.
     """
     import numpy as np
     rgb = bgr[:, :, ::-1].astype(int)    # capture() is BGR; flip to true RGB
     R, G, B = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
-    m = (R < 40) & (B - G > 18) & (B > 50)
+    m = (R < 40) & (B - G > 18) & (B > 50) & (G < 95)
     ys, xs = np.where(m)
     if len(xs) < 80:
         return None
@@ -898,8 +900,17 @@ def vision_grasp(
             return {"_source": "live", "located": located, "grasped": False,
                     "note": "block not found in frame", "servo_steps": step,
                     "history": history}
-        located = True
         u, v, npix = seg
+        # Plausibility gate: a real block's area scales as 1/z². A blob far outside
+        # that band is glare/clutter/a merge — don't chase it (this is what flung the
+        # arm before the G<95 fix). Abort cleanly rather than servo to a phantom.
+        expected = 5600.0 * (_VG_APPROACH_Z / z) ** 2
+        if not (0.2 * expected <= npix <= 4.0 * expected):
+            return {"_source": "live", "located": False, "grasped": False,
+                    "note": f"implausible blob npix={npix} (expected ~{expected:.0f} "
+                            f"at z={z:.2f}) — glare/clutter, not grasping",
+                    "servo_steps": step, "history": history}
+        located = True
         tu, tv = _vg_grasp_pixel(z)
         du, dv = tu - u, tv - v
         err = float(np.hypot(du, dv))
@@ -911,11 +922,18 @@ def vision_grasp(
         jinv = _vg_jinv(z)
         dex = jinv[0][0] * du + jinv[0][1] * dv
         dey = jinv[1][0] * du + jinv[1][1] * dv
+        # Clamp the step so one bad reading can't fling the arm; the block is always
+        # within FOV reach of the current pose.
+        dex = float(np.clip(dex, -0.15, 0.15))
+        dey = float(np.clip(dey, -0.15, 0.15))
         # Drop a notch only once we're well-centred at this altitude.
         if err <= descend_tol and not at_bottom:
             z = max(approach_z, z - z_step)
         p = panda.get_position()
-        move_to_pose([float(p[0]) + dex, float(p[1]) + dey, z], _context=_context)
+        # Final clamp into the reachable top-down workspace box.
+        tx = float(np.clip(float(p[0]) + dex, 0.30, 0.60))
+        ty = float(np.clip(float(p[1]) + dey, -0.28, 0.28))
+        move_to_pose([tx, ty, z], _context=_context)
 
     g = grasp_at(grasp_z=grasp_z, width=width, _context=_context)
     return {"_source": "live", "located": located, "servo_steps": len(history),
