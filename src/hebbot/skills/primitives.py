@@ -1028,15 +1028,18 @@ def vision_grasp(
         # d = z − pick_top; evaluate the grasp-pixel/Jacobian/size-gate there (parallax,
         # same as stack_on's onto_top). 0 for a cube on the table.
         d = z - pick_top
-        # Plausibility gate: a real block's area scales as 1/d². A blob far outside
-        # that band is glare/clutter/a merge — don't chase it (this is what flung the
-        # arm before the G<95 fix). Abort cleanly rather than servo to a phantom.
-        expected = 5600.0 * (_VG_APPROACH_Z / d) ** 2
-        if not (0.2 * expected <= npix <= 4.0 * expected):
-            return {"_source": "live", "located": False, "grasped": False,
-                    "note": f"implausible blob npix={npix} (expected ~{expected:.0f} "
-                            f"at d={d:.2f}) — glare/clutter, not grasping",
-                    "servo_steps": step, "history": history}
+        # Plausibility gate (merged-colour path only): a compact cube's area scales as
+        # 1/d²; a blob far outside that band is glare/clutter. We DON'T apply it when
+        # tracking a specific instance — `_nearest_instance` already locked onto a real
+        # connected component, and a rect block legitimately exceeds the cube area
+        # (the gate wrongly rejected a lying rect, lab notebook #139).
+        if track is None:
+            expected = 5600.0 * (_VG_APPROACH_Z / d) ** 2
+            if not (0.2 * expected <= npix <= 4.0 * expected):
+                return {"_source": "live", "located": False, "grasped": False,
+                        "note": f"implausible blob npix={npix} (expected ~{expected:.0f} "
+                                f"at d={d:.2f}) — glare/clutter, not grasping",
+                        "servo_steps": step, "history": history}
         located = True
         tu, tv = _vg_grasp_pixel(d)
         du, dv = tu - u, tv - v
@@ -1062,13 +1065,30 @@ def vision_grasp(
         ty = float(np.clip(float(p[1]) + dey, -0.28, 0.28))
         move_to_pose([tx, ty, z], _context=_context)
 
+    # Shape-aware grip: when tracking an instance, re-perceive it and — if it's a rect
+    # block — yaw the fingers across its narrow (short) axis for a firm grip, instead of
+    # the fixed gripper-down yaw that assumes a cube (lab notebook #139). Cubes grip as-is.
+    grip_yaw = None
+    if track is not None:
+        import math
+        fb = find_blocks(colors=[color], _context=_context)
+        cand = [b for b in fb.get("blocks", [])]
+        if cand:
+            inst = min(cand, key=lambda b: (b["u"] - track[0]) ** 2 + (b["v"] - track[1]) ** 2)
+            if inst["shape"] == "rect":
+                phi = math.atan2(-math.cos(math.radians(inst["ang"])),
+                                 -math.sin(math.radians(inst["ang"])))
+                grip_yaw = round(math.degrees(phi))
+                q = _qmul([math.cos(phi / 2), 0, 0, math.sin(phi / 2)], [0.0, 1.0, 0.0, 0.0])
+                p = panda.get_position()
+                move_to_pose([float(p[0]), float(p[1]), approach_z], orientation=q, _context=_context)
     # Raise the grasp + stall-guard heights by pick_top so an elevated cube is grasped
     # at its real height (and grasp_at doesn't refuse it as a stalled-high descent).
     g = grasp_at(grasp_z=grasp_z + pick_top, width=width,
                  stall_guard=0.068 + pick_top, _context=_context)
     return {"_source": "live", "located": located, "servo_steps": len(history),
             "final_pixel_err": history[-1]["pixel_err"] if history else None,
-            "history": history, "grasped": g.get("grasped"),
+            "grip_yaw_deg": grip_yaw, "history": history, "grasped": g.get("grasped"),
             "actual_z": g.get("actual_z"), "actual_width": g.get("actual_width")}
 
 
