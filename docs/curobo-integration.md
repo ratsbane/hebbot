@@ -122,8 +122,11 @@ and `curobo.motion_planner.MotionPlanner` + `.plan_pose(...)`. Quaternion is `[w
 must stay resident; and keeping torch/cuRobo out of the substrate venv avoids dep conflicts. So:
 
 - **`scripts/curobo_service.py`** runs in `curobo-venv`, loads collision-aware IK once, and serves
-  `POST /ik {position, quaternion[w,x,y,z], start_q[7]}` over `127.0.0.1:8211`. Launch detached:
-  `cd ~/hebbot && setsid ~/curobo-venv/bin/python scripts/curobo_service.py >/tmp/svc.log 2>&1 </dev/null &`
+  `POST /ik {position, quaternion[w,x,y,z], start_q[7]}` over `127.0.0.1:8211`. It runs as a
+  **systemd service** (`/etc/systemd/system/curobo.service`, `User=doug`, `Restart=always`) installed
+  2026-06-26 — auto-starts on boot and self-heals on crash, so no manual launch after an omen reboot.
+  Manage with `systemctl {status,restart} curobo` / `journalctl -u curobo`. (Legacy manual launch, if
+  ever needed: `cd ~/hebbot && setsid ~/curobo-venv/bin/python scripts/curobo_service.py >/tmp/svc.log 2>&1 </dev/null &`.)
 - **`move_to_pose`** (in `hebbot/.venv`, stdlib `urllib` only) calls it when **`HEBBOT_CUROBO_URL`**
   is set, else uses analytical `ik_full`. `_curobo_ik()` is the client.
 
