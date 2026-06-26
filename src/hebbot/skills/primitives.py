@@ -1288,7 +1288,8 @@ def stand_on_end(
     color: str = "red",
     camera: Optional[str] = None,
     grip_width: float = 0.03,
-    grip_z: float = 0.045,
+    grip_z: float = 0.037,   # a LYING block presents a low (~one-cube) profile — grip low,
+                             # not at the mid-height of a standing block (lab notebook #138)
     lift_z: float = 0.30,
     block_half: float = 0.03,
     pitch_sign: float = 1.0,

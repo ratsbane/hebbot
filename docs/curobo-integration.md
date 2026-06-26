@@ -168,3 +168,27 @@ linear approach when wanted.)
 The executor needs FCI, so today it runs standalone (stop the MCP server first). **Next:** move it inside
 the MCP's panda connection (behind `move_to_pose`, `planned=True`), wire `plan_grasp` (orientation-held
 approach→grasp→lift), then the grasp-pixel servo on top → the autonomous vision grasp.
+
+## Production status (2026-06-26) — cuRobo is the motion backend under the whole stack
+
+cuRobo's collision-aware IK is now the **default** behind `move_to_pose` (set `HEBBOT_CUROBO_URL`,
+defaults to the local service), FK-verified + swing-guarded with analytical `ik_full` as the fallback.
+Every higher-level capability built since runs on top of it and depends on its two properties —
+**clean, continuous configs** and **held orientation**:
+
+- **Autonomous vision grasp** — calibration-free, image-Jacobian visual servo to a recorded
+  "grasp-pixel", then a compliant grasp. No hand-eye `X` in the loop.
+- **Pick-and-place / auto-reset** — `vision_grasp` + `place_block`; height-robust (coarse-to-fine
+  descending servo) and multi-colour (blue/green/red).
+- **Block stacking** — `stack_on`, force-sensed contact-stop; built a 3-high tower (blue·green·red)
+  repeatably. Stacking onto an elevated cube needs a parallax correction (`onto_top`), evaluating the
+  grasp-pixel at the reduced camera-to-target distance.
+- **Reorientation** — `stand_on_end`, the first non-top-down maneuver (grip cross-section → pitch the
+  wrist 90° → balance-place), all via cuRobo's arbitrary-orientation planning.
+
+**Ops:** the planning service runs as a **systemd service** on omen (`/etc/systemd/system/curobo.service`,
+`Restart=always`) — auto-starts on boot, self-heals on crash. Manage with `systemctl status curobo` /
+`journalctl -u curobo`.
+
+The full reasoning trail (every finding, every live-verified result, every dead end) is in
+`lab_notebook.md` — that running log + the git history *is* the agentic-development transcript.
