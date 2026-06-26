@@ -1324,12 +1324,15 @@ def stand_on_end(
         return {"_source": "live", "stood": False, "note": f"no lying {color} block found"}
     tgt = rects[0]
 
-    # 2) centre the gripper (down) over the block, image-servo on its centroid
+    # 2) centre the gripper (down) over the block — servo on the INSTANCE centroid from
+    #    find_blocks (not _segment, which merges all same-colour blobs and aims off-centre).
     for _ in range(6):
-        seg = _segment(cam.capture(with_depth=False)["color"], color)
-        if seg is None:
+        fb = find_blocks(colors=[color], _context=_context)
+        rs = [b for b in fb.get("blocks", []) if b["shape"] == "rect"]
+        if not rs:
             break
-        u, v, _ = seg
+        tgt = max(rs, key=lambda b: b["npix"])
+        u, v = tgt["u"], tgt["v"]
         z = float(panda.get_position()[2])
         tu, tv = _vg_grasp_pixel(z)
         du, dv = tu - u, tv - v
@@ -1379,7 +1382,7 @@ def stand_on_end(
     dt = 0.01
     tz = float(panda.get_position()[2])
     fz0 = float(panda.get_state().O_F_ext_hat_K[2])
-    floor = 0.04
+    floor = 0.015
     contact_z = None
     try:
         with panda.create_context(frequency=100, max_runtime=8.0) as cx:
