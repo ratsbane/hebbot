@@ -932,6 +932,28 @@ def find_blocks(
     return {"_source": "live", "blocks": blocks, "n": len(blocks)}
 
 
+def _nearest_instance(bgr, color, track, min_px=80):
+    """Centroid (u,v,npix) of the `color` connected-component nearest pixel `track` —
+    lets the servo lock onto ONE instance in a cluttered / multi-same-colour scene
+    instead of _segment's merged centroid. None if no plausible instance."""
+    import numpy as np
+    rgb = bgr[:, :, ::-1].astype(int)
+    R, G, B = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
+    lab = _label_cc(_color_mask(R, G, B, color))
+    best, bestd = None, 1e18
+    for L in np.unique(lab):
+        if L == 0:
+            continue
+        ys, xs = np.where(lab == L)
+        if len(xs) < min_px:
+            continue
+        cu, cv = float(xs.mean()), float(ys.mean())
+        d = (cu - track[0]) ** 2 + (cv - track[1]) ** 2
+        if d < bestd:
+            bestd, best = d, (cu, cv, int(len(xs)))
+    return best
+
+
 def vision_grasp(
     *,
     color: str = "blue",
@@ -945,6 +967,7 @@ def vision_grasp(
     descend_tol: float = 22.0,
     z_step: float = 0.045,
     pick_top: float = 0.0,
+    target: Optional[list] = None,
     _context: Optional[Any] = None,
 ) -> dict:
     """Locate a block from the wrist camera and grasp it — no hand-eye calibration.
@@ -990,13 +1013,17 @@ def vision_grasp(
 
     history: list[dict] = []
     located = False
+    track = list(target) if target else None   # lock onto one instance when given
     for step in range(max_steps):
-        seg = _segment(cam.capture(with_depth=False)["color"], color)
+        frame = cam.capture(with_depth=False)["color"]
+        seg = _nearest_instance(frame, color, track) if track else _segment(frame, color)
         if seg is None:
             return {"_source": "live", "located": located, "grasped": False,
                     "note": "block not found in frame", "servo_steps": step,
                     "history": history}
         u, v, npix = seg
+        if track is not None:
+            track = [u, v]                     # follow the instance as the gripper moves
         # pick_top elevates an already-stacked cube, so it sits at camera distance
         # d = z − pick_top; evaluate the grasp-pixel/Jacobian/size-gate there (parallax,
         # same as stack_on's onto_top). 0 for a cube on the table.
@@ -1618,6 +1645,9 @@ PRIMITIVE_SPECS = [
                              "description": "height (m) of the cube's base above the table when it's "
                                             "already stacked; parallax + raises the grasp height "
                                             "(≈0.053 to grasp the top of a 2-high tower)"},
+                "target": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2,
+                           "description": "[u,v] pixel of a specific instance (from find_blocks) to "
+                                          "lock onto in a multi-block scene; default grabs the merged colour"},
             },
             "additionalProperties": False,
         },
