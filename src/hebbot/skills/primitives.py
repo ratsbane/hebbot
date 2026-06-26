@@ -1052,10 +1052,12 @@ def vision_grasp(
         jinv = _vg_jinv(d)
         dex = jinv[0][0] * du + jinv[0][1] * dv
         dey = jinv[1][0] * du + jinv[1][1] * dv
-        # Clamp the step so one bad reading can't fling the arm; the block is always
-        # within FOV reach of the current pose.
-        dex = float(np.clip(dex, -0.15, 0.15))
-        dey = float(np.clip(dey, -0.15, 0.15))
+        # Clamp the step. When tracking ONE instance, keep steps small so the block
+        # can't jump far enough in the image for the tracker to re-lock onto a different
+        # same-colour region (lab #139: a big first step lost the block to a phantom).
+        clamp = 0.06 if track is not None else 0.15
+        dex = float(np.clip(dex, -clamp, clamp))
+        dey = float(np.clip(dey, -clamp, clamp))
         # Drop a notch only once we're well-centred at this altitude.
         if err <= descend_tol and not at_bottom:
             z = max(approach_z, z - z_step)
