@@ -786,6 +786,110 @@ def grasp_at(
 
 
 # ---------------------------------------------------------------------------
+# Vision grasp — calibration-free top-down pick via image-Jacobian servo
+# ---------------------------------------------------------------------------
+# Calibration captured 2026-06-25 (lab notebook #130/#132). Valid only for a
+# dead-vertical gripper-down pick at the servo height; the grasp-pixel and the
+# image Jacobian are both height- and orientation-specific.
+_VG_SERVO_Z = 0.20                       # approach/observation height (m), EE frame
+_VG_GRASP_PIXEL = (357.5, 372.7)         # block centroid when the gripper is over it
+# image-Jacobian inverse (metres EE per pixel): Δee = Jinv · (grasp_pixel − block_pixel)
+_VG_JINV = ((-1.168537e-05, -4.959711e-04),
+            (-4.821881e-04,  1.770091e-05))
+
+
+def _segment_blue(bgr):
+    """Centroid of the navy cube in a BGR frame.
+
+    The cube reads RGB≈(1,45,72) — near-zero red and blue-dominant — which cleanly
+    separates it from the bright bluish background (high R) and the gray cast-shadow
+    streak (small B−G), both of which a naive B>R blue test catches. Returns
+    (u, v, npix) or None if too few pixels match.
+    """
+    import numpy as np
+    rgb = bgr[:, :, ::-1].astype(int)    # capture() is BGR; flip to true RGB
+    R, G, B = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
+    m = (R < 40) & (B - G > 18) & (B > 50)
+    ys, xs = np.where(m)
+    if len(xs) < 80:
+        return None
+    return float(xs.mean()), float(ys.mean()), int(len(xs))
+
+
+def vision_grasp(
+    *,
+    color: str = "blue",
+    camera: Optional[str] = None,
+    grasp_z: float = 0.038,
+    width: float = 0.024,
+    max_steps: int = 5,
+    pixel_tol: float = 4.0,
+    _context: Optional[Any] = None,
+) -> dict:
+    """Locate a block from the wrist camera and grasp it — no hand-eye calibration.
+
+    Drops to the servo height, then regulates the block's image position to the
+    grasp-pixel (where the gripper sits directly over a block) using a fixed image
+    Jacobian: each step segments the block, computes Δee = Jinv·(grasp_pixel −
+    block_pixel), and moves. Converges in ~1 step per ~3 cm of initial offset. Once
+    within pixel_tol, runs the compliant `grasp_at`. Expects the block to be in the
+    wrist FOV and a dead-vertical gripper-down pose. (lab notebook #130/#132)
+
+    Args:
+        color: block color — only "blue" is calibrated.
+        camera: camera name (optional when one camera is connected).
+        grasp_z, width: passed through to grasp_at.
+        max_steps: servo iteration cap. pixel_tol: convergence threshold (px).
+    """
+    if color != "blue":
+        return {"_source": "error", "grasped": None,
+                "note": f"only 'blue' is calibrated; got {color!r}"}
+    panda = _extract(_context, "panda")
+    cameras = _extract(_context, "cameras") or {}
+    if panda is None or not cameras:
+        time.sleep(0.05)
+        return {"_source": "mock", "grasped": None, "note": "mock — no arm/camera"}
+
+    import numpy as np
+
+    cam = _select_camera(cameras, camera)
+    if cam is None:
+        return {"_source": "error", "grasped": None, "note": "named camera not found"}
+
+    # The Jacobian + grasp-pixel are calibrated at _VG_SERVO_Z; get there first,
+    # preserving xy so the block stays in view.
+    pos = panda.get_position()
+    move_to_pose([float(pos[0]), float(pos[1]), _VG_SERVO_Z], _context=_context)
+
+    gx, gy = _VG_GRASP_PIXEL
+    history: list[dict] = []
+    for step in range(max_steps):
+        seg = _segment_blue(cam.capture(with_depth=False)["color"])
+        if seg is None:
+            return {"_source": "live", "located": False, "grasped": False,
+                    "note": "block not found in frame", "servo_steps": step,
+                    "history": history}
+        u, v, npix = seg
+        du, dv = gx - u, gy - v
+        err = float(np.hypot(du, dv))
+        history.append({"step": step, "u": round(u, 1), "v": round(v, 1),
+                        "pixel_err": round(err, 1), "npix": npix})
+        if err <= pixel_tol:
+            break
+        dex = _VG_JINV[0][0] * du + _VG_JINV[0][1] * dv
+        dey = _VG_JINV[1][0] * du + _VG_JINV[1][1] * dv
+        p = panda.get_position()
+        move_to_pose([float(p[0]) + dex, float(p[1]) + dey, _VG_SERVO_Z],
+                     _context=_context)
+
+    g = grasp_at(grasp_z=grasp_z, width=width, _context=_context)
+    return {"_source": "live", "located": True, "servo_steps": len(history),
+            "final_pixel_err": history[-1]["pixel_err"] if history else None,
+            "history": history, "grasped": g.get("grasped"),
+            "actual_z": g.get("actual_z"), "actual_width": g.get("actual_width")}
+
+
+# ---------------------------------------------------------------------------
 # Bulk registration
 # ---------------------------------------------------------------------------
 
@@ -957,6 +1061,34 @@ PRIMITIVE_SPECS = [
                 "descent_speed": {"type": "number", "minimum": 0.005, "maximum": 0.1, "default": 0.04},
                 "stall_guard": {"type": "number", "minimum": 0.0, "maximum": 0.2, "default": 0.068,
                                 "description": "refuse to close if the descent stalls above this EE z"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "vision_grasp",
+        "function_spec": "hebbot.skills.primitives:vision_grasp",
+        # Predict the full locate→servo→grasp loop ends holding the block.
+        # grasped=False (block not found, servo diverged, or grasp_at refused)
+        # is the surprise.
+        "expectations": {
+            "checks": [
+                {"name": "grasped", "field": "grasped", "op": "eq", "value": True},
+            ],
+        },
+        "params_schema": {
+            "type": "object",
+            "properties": {
+                "color": {"type": "string", "default": "blue",
+                          "description": "block color (only 'blue' is calibrated)"},
+                "camera": {"type": "string",
+                           "description": "camera name; optional when one camera is connected"},
+                "grasp_z": {"type": "number", "minimum": 0.0, "maximum": 0.2, "default": 0.038},
+                "width": {"type": "number", "minimum": 0.0, "maximum": 0.08, "default": 0.024},
+                "max_steps": {"type": "integer", "minimum": 1, "maximum": 12, "default": 5,
+                              "description": "image-servo iteration cap"},
+                "pixel_tol": {"type": "number", "minimum": 0.5, "default": 4.0,
+                              "description": "servo convergence threshold (px)"},
             },
             "additionalProperties": False,
         },
