@@ -1075,7 +1075,7 @@ def vision_grasp(
         cand = [b for b in fb.get("blocks", [])]
         if cand:
             inst = min(cand, key=lambda b: (b["u"] - track[0]) ** 2 + (b["v"] - track[1]) ** 2)
-            if inst["shape"] == "rect":
+            if inst["aspect"] >= 1.3:   # yaw for any non-square block; a true cube (~1.1) grips as-is
                 phi = math.atan2(-math.cos(math.radians(inst["ang"])),
                                  -math.sin(math.radians(inst["ang"])))
                 grip_yaw = round(math.degrees(phi))
