@@ -865,6 +865,7 @@ def vision_grasp(
     pixel_tol: float = 4.0,
     descend_tol: float = 22.0,
     z_step: float = 0.045,
+    pick_top: float = 0.0,
     _context: Optional[Any] = None,
 ) -> dict:
     """Locate a block from the wrist camera and grasp it — no hand-eye calibration.
@@ -917,17 +918,21 @@ def vision_grasp(
                     "note": "block not found in frame", "servo_steps": step,
                     "history": history}
         u, v, npix = seg
-        # Plausibility gate: a real block's area scales as 1/z². A blob far outside
+        # pick_top elevates an already-stacked cube, so it sits at camera distance
+        # d = z − pick_top; evaluate the grasp-pixel/Jacobian/size-gate there (parallax,
+        # same as stack_on's onto_top). 0 for a cube on the table.
+        d = z - pick_top
+        # Plausibility gate: a real block's area scales as 1/d². A blob far outside
         # that band is glare/clutter/a merge — don't chase it (this is what flung the
         # arm before the G<95 fix). Abort cleanly rather than servo to a phantom.
-        expected = 5600.0 * (_VG_APPROACH_Z / z) ** 2
+        expected = 5600.0 * (_VG_APPROACH_Z / d) ** 2
         if not (0.2 * expected <= npix <= 4.0 * expected):
             return {"_source": "live", "located": False, "grasped": False,
                     "note": f"implausible blob npix={npix} (expected ~{expected:.0f} "
-                            f"at z={z:.2f}) — glare/clutter, not grasping",
+                            f"at d={d:.2f}) — glare/clutter, not grasping",
                     "servo_steps": step, "history": history}
         located = True
-        tu, tv = _vg_grasp_pixel(z)
+        tu, tv = _vg_grasp_pixel(d)
         du, dv = tu - u, tv - v
         err = float(np.hypot(du, dv))
         at_bottom = z <= approach_z + 1e-3
@@ -935,7 +940,7 @@ def vision_grasp(
                         "v": round(v, 1), "pixel_err": round(err, 1), "npix": npix})
         if at_bottom and err <= pixel_tol:
             break
-        jinv = _vg_jinv(z)
+        jinv = _vg_jinv(d)
         dex = jinv[0][0] * du + jinv[0][1] * dv
         dey = jinv[1][0] * du + jinv[1][1] * dv
         # Clamp the step so one bad reading can't fling the arm; the block is always
@@ -951,7 +956,10 @@ def vision_grasp(
         ty = float(np.clip(float(p[1]) + dey, -0.28, 0.28))
         move_to_pose([tx, ty, z], _context=_context)
 
-    g = grasp_at(grasp_z=grasp_z, width=width, _context=_context)
+    # Raise the grasp + stall-guard heights by pick_top so an elevated cube is grasped
+    # at its real height (and grasp_at doesn't refuse it as a stalled-high descent).
+    g = grasp_at(grasp_z=grasp_z + pick_top, width=width,
+                 stall_guard=0.068 + pick_top, _context=_context)
     return {"_source": "live", "located": located, "servo_steps": len(history),
             "final_pixel_err": history[-1]["pixel_err"] if history else None,
             "history": history, "grasped": g.get("grasped"),
@@ -1057,6 +1065,7 @@ def stack_on(
     pixel_tol: float = 4.0,
     descend_tol: float = 22.0,
     z_step: float = 0.045,
+    contact_force: float = 4.0,
     contact_gap: float = 0.008,
     z_floor: float = 0.06,
     _context: Optional[Any] = None,
@@ -1079,7 +1088,8 @@ def stack_on(
         onto_top: height (m) of onto's top surface above the table — the stack it sits on
             (0 for a cube on the table, ≈0.053 for stacking onto a 2-high tower). Cancels
             the parallax of centring over an elevated target; raise z_floor to match.
-        contact_gap: commanded−actual z gap (m) that signals contact.
+        contact_force: external z-force rise (N) that signals contact (primary, slip-immune).
+        contact_gap: commanded−actual z gap (m) — secondary contact trigger.
         z_floor: abort if no contact by this EE z (onto cube missing / mis-located).
     """
     if pick not in _SEGMENT_COLORS or onto not in _SEGMENT_COLORS or pick == onto:
@@ -1149,6 +1159,7 @@ def stack_on(
     panda.start_controller(ctrl)
     dt = 0.01
     tz = float(panda.get_position()[2])
+    fz0 = float(panda.get_state().O_F_ext_hat_K[2])   # baseline external z-force (free space)
     contact_z = None
     try:
         with panda.create_context(frequency=100, max_runtime=8.0) as cx:
@@ -1156,7 +1167,12 @@ def stack_on(
                 tz = max(z_floor, tz - 0.02 * dt)              # slow descent
                 ctrl.set_control(np.array([X, Y, tz]), quat, q0)
                 az = float(panda.get_position()[2])
-                if (tz - az) > contact_gap:                     # held cube met resistance
+                fz = float(panda.get_state().O_F_ext_hat_K[2])
+                # Contact = the held cube's bottom meets the surface → external z-force
+                # rises. This is SLIP-IMMUNE: when the cube slides up in the gripper the
+                # commanded−actual z gap never grows (lab #136), but the force still does.
+                # Keep the gap as a secondary trigger.
+                if abs(fz - fz0) > contact_force or (tz - az) > contact_gap:
                     contact_z = az
                     break
                 if tz <= z_floor + 1e-4:                        # reached floor with no contact
@@ -1386,6 +1402,10 @@ PRIMITIVE_SPECS = [
                                 "description": "pixel error under which it drops a height notch"},
                 "z_step": {"type": "number", "minimum": 0.01, "maximum": 0.1, "default": 0.045,
                            "description": "descent increment (m) per centred step"},
+                "pick_top": {"type": "number", "minimum": 0.0, "maximum": 0.2, "default": 0.0,
+                             "description": "height (m) of the cube's base above the table when it's "
+                                            "already stacked; parallax + raises the grasp height "
+                                            "(≈0.053 to grasp the top of a 2-high tower)"},
             },
             "additionalProperties": False,
         },
@@ -1446,8 +1466,10 @@ PRIMITIVE_SPECS = [
                 "pixel_tol": {"type": "number", "minimum": 0.5, "default": 4.0},
                 "descend_tol": {"type": "number", "minimum": 1.0, "default": 22.0},
                 "z_step": {"type": "number", "minimum": 0.01, "maximum": 0.1, "default": 0.045},
+                "contact_force": {"type": "number", "minimum": 1.0, "maximum": 20.0, "default": 4.0,
+                                  "description": "external z-force rise (N) signalling contact (primary, slip-immune)"},
                 "contact_gap": {"type": "number", "minimum": 0.002, "maximum": 0.03, "default": 0.008,
-                                "description": "commanded−actual z gap (m) that signals contact"},
+                                "description": "commanded−actual z gap (m); secondary contact trigger"},
                 "z_floor": {"type": "number", "minimum": 0.0, "maximum": 0.2, "default": 0.06,
                             "description": "abort if no contact by this EE z"},
             },
