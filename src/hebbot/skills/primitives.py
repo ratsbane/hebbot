@@ -791,11 +791,30 @@ def grasp_at(
 # Calibration captured 2026-06-25 (lab notebook #130/#132). Valid only for a
 # dead-vertical gripper-down pick at the servo height; the grasp-pixel and the
 # image Jacobian are both height- and orientation-specific.
-_VG_SERVO_Z = 0.20                       # approach/observation height (m), EE frame
-_VG_GRASP_PIXEL = (357.5, 372.7)         # block centroid when the gripper is over it
-# image-Jacobian inverse (metres EE per pixel): Δee = Jinv · (grasp_pixel − block_pixel)
-_VG_JINV = ((-1.168537e-05, -4.959711e-04),
-            (-4.821881e-04,  1.770091e-05))
+_VG_APPROACH_Z = 0.20                    # final servo/grasp-approach height (m), EE frame
+_VG_ACQUIRE_Z = 0.34                     # start height — wide FOV finds the block anywhere
+# grasp-pixel(z): where a table point directly under the gripper appears, as a function
+# of camera height. The camera is tilted+offset from the gripper axis, so this point's
+# image slides as z changes — a perspective law pixel = a + b/z (fit sub-pixel over
+# 0.20–0.36, 2026-06-25). The old single-height grasp-pixel (357.5,372.7) is this at z=0.20.
+_VG_GP_U = (328.9, 5.94)                 # u(z) = a + b/z
+_VG_GP_V = (235.6, 27.4)                 # v(z) = a + b/z
+# image-Jacobian inverse at z=0.20 (metres EE per pixel). The gain is ~f/z, so at any
+# other height Jinv scales by z/0.20 (verified to ~7% at z=0.36 — well inside servo tol).
+_VG_JINV0 = ((-1.168537e-05, -4.959711e-04),
+             (-4.821881e-04,  1.770091e-05))
+
+
+def _vg_grasp_pixel(z):
+    """Pixel where a table point directly under the gripper appears at EE height z."""
+    return (_VG_GP_U[0] + _VG_GP_U[1] / z, _VG_GP_V[0] + _VG_GP_V[1] / z)
+
+
+def _vg_jinv(z):
+    """Image-Jacobian inverse at height z (Jinv0 scaled by z/0.20; gain ~ f/z)."""
+    s = z / _VG_APPROACH_Z
+    return ((_VG_JINV0[0][0] * s, _VG_JINV0[0][1] * s),
+            (_VG_JINV0[1][0] * s, _VG_JINV0[1][1] * s))
 
 
 def _segment_blue(bgr):
@@ -822,24 +841,34 @@ def vision_grasp(
     camera: Optional[str] = None,
     grasp_z: float = 0.038,
     width: float = 0.024,
-    max_steps: int = 5,
+    acquire_z: float = _VG_ACQUIRE_Z,
+    approach_z: float = _VG_APPROACH_Z,
+    max_steps: int = 10,
     pixel_tol: float = 4.0,
+    descend_tol: float = 22.0,
+    z_step: float = 0.045,
     _context: Optional[Any] = None,
 ) -> dict:
     """Locate a block from the wrist camera and grasp it — no hand-eye calibration.
 
-    Drops to the servo height, then regulates the block's image position to the
-    grasp-pixel (where the gripper sits directly over a block) using a fixed image
-    Jacobian: each step segments the block, computes Δee = Jinv·(grasp_pixel −
-    block_pixel), and moves. Converges in ~1 step per ~3 cm of initial offset. Once
-    within pixel_tol, runs the compliant `grasp_at`. Expects the block to be in the
-    wrist FOV and a dead-vertical gripper-down pose. (lab notebook #130/#132)
+    Coarse-to-fine image servo: starts high (acquire_z, wide FOV → the block can be
+    anywhere on the table), and at each step segments the block, drives its image to
+    the height-dependent grasp-pixel with the 1/z-scaled image Jacobian
+    (Δee = Jinv(z)·(grasp_pixel(z) − block_pixel)), and descends a notch *once it is
+    centred enough at the current height* (pixel error < descend_tol). When it reaches
+    approach_z centred to within pixel_tol it runs the compliant `grasp_at`. Centring
+    before committing lower keeps the block inside the narrowing FOV and away from the
+    grasp-pixel's z-sensitivity. Expects a dead-vertical gripper-down pose.
+    (lab notebook #130/#132/#133)
 
     Args:
         color: block color — only "blue" is calibrated.
         camera: camera name (optional when one camera is connected).
         grasp_z, width: passed through to grasp_at.
-        max_steps: servo iteration cap. pixel_tol: convergence threshold (px).
+        acquire_z: start/observation height (wide FOV). approach_z: final servo height.
+        max_steps: servo iteration cap. pixel_tol: final convergence threshold (px).
+        descend_tol: pixel error under which it's safe to drop a notch.
+        z_step: descent increment (m) per centred step.
     """
     if color != "blue":
         return {"_source": "error", "grasped": None,
@@ -856,34 +885,40 @@ def vision_grasp(
     if cam is None:
         return {"_source": "error", "grasped": None, "note": "named camera not found"}
 
-    # The Jacobian + grasp-pixel are calibrated at _VG_SERVO_Z; get there first,
-    # preserving xy so the block stays in view.
+    # Rise to the acquisition height (preserving xy) for the widest catch basin.
     pos = panda.get_position()
-    move_to_pose([float(pos[0]), float(pos[1]), _VG_SERVO_Z], _context=_context)
+    z = float(np.clip(acquire_z, approach_z, 0.45))
+    move_to_pose([float(pos[0]), float(pos[1]), z], _context=_context)
 
-    gx, gy = _VG_GRASP_PIXEL
     history: list[dict] = []
+    located = False
     for step in range(max_steps):
         seg = _segment_blue(cam.capture(with_depth=False)["color"])
         if seg is None:
-            return {"_source": "live", "located": False, "grasped": False,
+            return {"_source": "live", "located": located, "grasped": False,
                     "note": "block not found in frame", "servo_steps": step,
                     "history": history}
+        located = True
         u, v, npix = seg
-        du, dv = gx - u, gy - v
+        tu, tv = _vg_grasp_pixel(z)
+        du, dv = tu - u, tv - v
         err = float(np.hypot(du, dv))
-        history.append({"step": step, "u": round(u, 1), "v": round(v, 1),
-                        "pixel_err": round(err, 1), "npix": npix})
-        if err <= pixel_tol:
+        at_bottom = z <= approach_z + 1e-3
+        history.append({"step": step, "z": round(z, 3), "u": round(u, 1),
+                        "v": round(v, 1), "pixel_err": round(err, 1), "npix": npix})
+        if at_bottom and err <= pixel_tol:
             break
-        dex = _VG_JINV[0][0] * du + _VG_JINV[0][1] * dv
-        dey = _VG_JINV[1][0] * du + _VG_JINV[1][1] * dv
+        jinv = _vg_jinv(z)
+        dex = jinv[0][0] * du + jinv[0][1] * dv
+        dey = jinv[1][0] * du + jinv[1][1] * dv
+        # Drop a notch only once we're well-centred at this altitude.
+        if err <= descend_tol and not at_bottom:
+            z = max(approach_z, z - z_step)
         p = panda.get_position()
-        move_to_pose([float(p[0]) + dex, float(p[1]) + dey, _VG_SERVO_Z],
-                     _context=_context)
+        move_to_pose([float(p[0]) + dex, float(p[1]) + dey, z], _context=_context)
 
     g = grasp_at(grasp_z=grasp_z, width=width, _context=_context)
-    return {"_source": "live", "located": True, "servo_steps": len(history),
+    return {"_source": "live", "located": located, "servo_steps": len(history),
             "final_pixel_err": history[-1]["pixel_err"] if history else None,
             "history": history, "grasped": g.get("grasped"),
             "actual_z": g.get("actual_z"), "actual_width": g.get("actual_width")}
@@ -1085,10 +1120,18 @@ PRIMITIVE_SPECS = [
                            "description": "camera name; optional when one camera is connected"},
                 "grasp_z": {"type": "number", "minimum": 0.0, "maximum": 0.2, "default": 0.038},
                 "width": {"type": "number", "minimum": 0.0, "maximum": 0.08, "default": 0.024},
-                "max_steps": {"type": "integer", "minimum": 1, "maximum": 12, "default": 5,
+                "acquire_z": {"type": "number", "minimum": 0.2, "maximum": 0.45, "default": 0.34,
+                              "description": "start/observation height (m) — higher = wider FOV"},
+                "approach_z": {"type": "number", "minimum": 0.1, "maximum": 0.3, "default": 0.20,
+                               "description": "final servo height (m) before grasp"},
+                "max_steps": {"type": "integer", "minimum": 1, "maximum": 20, "default": 10,
                               "description": "image-servo iteration cap"},
                 "pixel_tol": {"type": "number", "minimum": 0.5, "default": 4.0,
-                              "description": "servo convergence threshold (px)"},
+                              "description": "final servo convergence threshold (px)"},
+                "descend_tol": {"type": "number", "minimum": 1.0, "default": 22.0,
+                                "description": "pixel error under which it drops a height notch"},
+                "z_step": {"type": "number", "minimum": 0.01, "maximum": 0.1, "default": 0.045,
+                           "description": "descent increment (m) per centred step"},
             },
             "additionalProperties": False,
         },
