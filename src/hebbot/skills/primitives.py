@@ -1502,16 +1502,23 @@ def practice(
         fb = find_blocks(colors=[pick, onto], _context=_context)
         pk = [b for b in fb.get("blocks", []) if b["color"] == pick]
         on = [b for b in fb.get("blocks", []) if b["color"] == onto]
-        verified = bool(pk) and not on
+        # Stacked ⇒ onto's centroid coincides with pick's (within a cube) OR onto is fully
+        # occluded under pick. Separate ⇒ centroids far apart. (#139: "onto absent" was too
+        # strict — a sliver of the lower block peeks out at close range.)
+        pc = max(pk, key=lambda b: b["npix"]) if pk else None
+        oc = max(on, key=lambda b: b["npix"]) if on else None
+        verified = pc is not None and (oc is None or
+                   ((pc["u"] - oc["u"]) ** 2 + (pc["v"] - oc["v"]) ** 2) < 60 ** 2)
         trial = {"trial": t, "attempt": s.get("stacked"), "stage": s.get("stage"),
                  "contact_z": s.get("contact_z"), "verified": verified, "reset": None}
-        # reset: lift pick off (elevated by onto_height when stacked) and set it aside.
-        if pk:
-            g = vision_grasp(color=pick, target=[pk[0]["u"], pk[0]["v"]],
-                             pick_top=onto_height if verified else 0.0,
+        # reset: lift pick off (elevated by onto_height when stacked) and set it aside; the
+        # release height tracks the grasp height (an elevated grasp holds the block higher).
+        if pc is not None:
+            pt = onto_height if verified else 0.0
+            g = vision_grasp(color=pick, target=[pc["u"], pc["v"]], pick_top=pt,
                              width=_CUBE_WIDTH.get(pick, 0.029), max_steps=16, _context=_context)
             if g.get("grasped"):
-                place_block(target_xy=rx, place_z=0.05, lift_z=0.30, _context=_context)
+                place_block(target_xy=rx, place_z=0.04 + pt, lift_z=0.30, _context=_context)
                 trial["reset"] = "ok"
             else:
                 trial["reset"] = "grasp_failed"
