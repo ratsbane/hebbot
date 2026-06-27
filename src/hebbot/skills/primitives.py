@@ -1663,6 +1663,7 @@ def practice(
     trials: int = 3,
     onto_height: float = 0.024,
     reset_xy: Optional[list] = None,
+    contact_force: float = 4.0,
     camera: Optional[str] = None,
     _context: Optional[Any] = None,
 ) -> dict:
@@ -1682,7 +1683,12 @@ def practice(
     log = []
     fails = 0
     for t in range(trials):
-        s = stack_on(pick=pick, onto=onto, onto_top=0.0, max_steps=16, _context=_context)
+        # NB 2026-06-27: lowering this to 2.5 N to be gentle on the base BROKE contact
+        # detection (most stacks aborted no_contact, two false-tripped at 0.19 m) — 4 N is
+        # load-bearing for reliable slip-immune detection. Base drift/tip needs a different
+        # lever (re-canonicalise the base), not a softer press.
+        s = stack_on(pick=pick, onto=onto, onto_top=0.0, max_steps=16,
+                     contact_force=contact_force, _context=_context)
         # verify from the wide overhead pose (robust re-location; #140).
         fb = _observe([pick, onto], _context)
         pk = [b for b in fb.get("blocks", []) if b["color"] == pick]
@@ -1692,7 +1698,12 @@ def practice(
         # strict — a sliver of the lower block peeks out at close range.)
         pc = max(pk, key=lambda b: b["npix"]) if pk else None
         oc = max(on, key=lambda b: b["npix"]) if on else None
-        verified = pc is not None and (oc is None or
+        # Verify requires the stack to have ACTUALLY happened (stack_on reported contact) AND
+        # the centroids to coincide. Without the stacked() gate, a no_contact abort still
+        # passed on centroid-coincidence — the loop reporting success it never achieved
+        # (2026-06-27: 10/12 'verified' were no-contact non-stacks). Honest failure detection
+        # is the whole point of a self-improvement loop.
+        verified = bool(s.get("stacked")) and pc is not None and (oc is None or
                    ((pc["u"] - oc["u"]) ** 2 + (pc["v"] - oc["v"]) ** 2) < 60 ** 2)
         trial = {"trial": t, "attempt": s.get("stacked"), "stage": s.get("stage"),
                  "contact_z": s.get("contact_z"), "verified": verified, "reset": None}
@@ -2057,6 +2068,8 @@ PRIMITIVE_SPECS = [
                                 "description": "height (m) of the onto block (for the un-stack grasp)"},
                 "reset_xy": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2,
                              "description": "[x,y] where the pick block is set aside between trials"},
+                "contact_force": {"type": "number", "minimum": 1.0, "maximum": 10.0, "default": 4.0,
+                                  "description": "stack contact force (N); <4 breaks slip-immune contact detection"},
                 "camera": {"type": "string"},
             },
             "additionalProperties": False,
