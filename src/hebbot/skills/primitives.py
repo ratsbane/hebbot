@@ -1235,31 +1235,42 @@ def stack_on(
 
     cam = _select_camera(cameras, camera)
 
-    # 1) Grab the pick cube with the full vision grasp.
-    g = vision_grasp(color=pick, width=_CUBE_WIDTH.get(pick, 0.024),
+    # Locate the pick INSTANCE (per-instance — works on rect blocks / clutter, where
+    # the merged-colour centroid would be wrong; lab notebook #139).
+    fb = find_blocks(colors=[pick], _context=_context)
+    picks = [b for b in fb.get("blocks", []) if b["color"] == pick]
+    if not picks:
+        return {"_source": "live", "stacked": False, "stage": "locate", "note": f"no {pick} instance"}
+    pick_inst = max(picks, key=lambda b: b["npix"])
+
+    # 1) Grab the pick instance (shape-aware: targeted + yawed across its short axis).
+    g = vision_grasp(color=pick, width=_CUBE_WIDTH.get(pick, 0.029),
+                     target=[pick_inst["u"], pick_inst["v"]], max_steps=16,
                      acquire_z=acquire_z, approach_z=approach_z, _context=_context)
     if not g.get("grasped"):
         return {"_source": "live", "stacked": False, "stage": "grasp_pick", "grasp": g}
 
-    # 2) Lift and image-servo the gripper over the onto cube (no grasp).
+    # 2) Lift, re-acquire the onto INSTANCE from the new pose, then image-servo over it.
     p = panda.get_position()
     z = float(np.clip(acquire_z, approach_z, 0.45))
     move_to_pose([float(p[0]), float(p[1]), z], _context=_context)
+    fb2 = find_blocks(colors=[onto], _context=_context)
+    ontos = [b for b in fb2.get("blocks", []) if b["color"] == onto]
+    if not ontos:
+        return {"_source": "live", "stacked": False, "stage": "locate_onto",
+                "note": f"no {onto} instance after lift", "grasp": g}
+    onto_track = [max(ontos, key=lambda b: b["npix"])["u"], max(ontos, key=lambda b: b["npix"])["v"]]
     servo: list[dict] = []
     for step in range(max_steps):
-        seg = _segment(cam.capture(with_depth=False)["color"], onto)
+        seg = _nearest_instance(cam.capture(with_depth=False)["color"], onto, onto_track)
         if seg is None:
             return {"_source": "live", "stacked": False, "stage": "locate_onto",
-                    "note": f"{onto} cube not found", "servo": servo, "grasp": g}
+                    "note": f"lost {onto} instance", "servo": servo, "grasp": g}
         u, v, npix = seg
-        # onto is elevated by onto_top (height of the stack we're placing on), so it
-        # sits at camera distance d = z − onto_top. Evaluate the grasp-pixel/Jacobian
-        # there to cancel parallax (≈16 mm error if ignored when stacking 3-high).
+        onto_track = [u, v]   # follow the onto instance
+        # onto is elevated by onto_top (height of the stack we're placing on), so it sits
+        # at camera distance d = z − onto_top — cancel that parallax.
         d = z - onto_top
-        expected = 5600.0 * (_VG_APPROACH_Z / d) ** 2
-        if not (0.2 * expected <= npix <= 4.0 * expected):
-            return {"_source": "live", "stacked": False, "stage": "locate_onto",
-                    "note": f"implausible {onto} blob npix={npix}", "servo": servo, "grasp": g}
         tu, tv = _vg_grasp_pixel(d)
         du, dv = tu - u, tv - v
         err = float(np.hypot(du, dv))
@@ -1268,8 +1279,8 @@ def stack_on(
         if at_bottom and err <= pixel_tol:
             break
         jinv = _vg_jinv(d)
-        dex = float(np.clip(jinv[0][0] * du + jinv[0][1] * dv, -0.15, 0.15))
-        dey = float(np.clip(jinv[1][0] * du + jinv[1][1] * dv, -0.15, 0.15))
+        dex = float(np.clip(jinv[0][0] * du + jinv[0][1] * dv, -0.06, 0.06))
+        dey = float(np.clip(jinv[1][0] * du + jinv[1][1] * dv, -0.06, 0.06))
         if err <= descend_tol and not at_bottom:
             z = max(approach_z, z - z_step)
         p = panda.get_position()
