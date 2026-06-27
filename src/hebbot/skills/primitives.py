@@ -1472,6 +1472,57 @@ def stand_on_end(
             "grip_w": round(w, 4), "yaw_deg": round(math.degrees(phi))}
 
 
+def practice(
+    *,
+    pick: str = "green",
+    onto: str = "blue",
+    trials: int = 3,
+    onto_height: float = 0.024,
+    reset_xy: Optional[list] = None,
+    camera: Optional[str] = None,
+    _context: Optional[Any] = None,
+) -> dict:
+    """The self-improvement loop: repeatedly {attempt → verify → reset}, logging each
+    trial (lab notebook #137–139). `attempt` = stack_on(pick,onto); `verify` = find_blocks
+    "onto occluded under pick" (a stacked onto vanishes top-down — coincidence detector);
+    `reset` = lift pick off and place it aside so the next trial starts fresh. Returns the
+    trial log; the high layer (agent) reviews it and refines the primitives — that review
+    is the self-improvement. Runs unattended on the cuRobo motion layer.
+    """
+    panda = _extract(_context, "panda")
+    cameras = _extract(_context, "cameras") or {}
+    if panda is None or not cameras:
+        time.sleep(0.05)
+        return {"_source": "mock", "trials": []}
+    rx = reset_xy or [0.45, 0.12]
+    log = []
+    for t in range(trials):
+        s = stack_on(pick=pick, onto=onto, onto_top=0.0, max_steps=16, _context=_context)
+        # verify: a stacked `onto` is hidden under `pick` top-down → pick seen, onto not.
+        fb = find_blocks(colors=[pick, onto], _context=_context)
+        pk = [b for b in fb.get("blocks", []) if b["color"] == pick]
+        on = [b for b in fb.get("blocks", []) if b["color"] == onto]
+        verified = bool(pk) and not on
+        trial = {"trial": t, "attempt": s.get("stacked"), "stage": s.get("stage"),
+                 "contact_z": s.get("contact_z"), "verified": verified, "reset": None}
+        # reset: lift pick off (elevated by onto_height when stacked) and set it aside.
+        if pk:
+            g = vision_grasp(color=pick, target=[pk[0]["u"], pk[0]["v"]],
+                             pick_top=onto_height if verified else 0.0,
+                             width=_CUBE_WIDTH.get(pick, 0.029), max_steps=16, _context=_context)
+            if g.get("grasped"):
+                place_block(target_xy=rx, place_z=0.05, lift_z=0.30, _context=_context)
+                trial["reset"] = "ok"
+            else:
+                trial["reset"] = "grasp_failed"
+                log.append(trial)
+                break   # can't continue without a clean reset
+        log.append(trial)
+    return {"_source": "live", "trials": log, "n": len(log),
+            "verified_count": sum(1 for l in log if l.get("verified")),
+            "reset_failures": sum(1 for l in log if l.get("reset") == "grasp_failed")}
+
+
 # ---------------------------------------------------------------------------
 # Bulk registration
 # ---------------------------------------------------------------------------
@@ -1792,6 +1843,24 @@ PRIMITIVE_SPECS = [
                                "description": "half the block's length (m); sets place height"},
                 "pitch_sign": {"type": "number", "enum": [1, -1], "default": 1,
                                "description": "which way to tip the block up"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "practice",
+        "function_spec": "hebbot.skills.primitives:practice",
+        "params_schema": {
+            "type": "object",
+            "properties": {
+                "pick": {"type": "string", "enum": ["blue", "green", "red"], "default": "green"},
+                "onto": {"type": "string", "enum": ["blue", "green", "red"], "default": "blue"},
+                "trials": {"type": "integer", "minimum": 1, "maximum": 50, "default": 3},
+                "onto_height": {"type": "number", "minimum": 0.0, "maximum": 0.1, "default": 0.024,
+                                "description": "height (m) of the onto block (for the un-stack grasp)"},
+                "reset_xy": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2,
+                             "description": "[x,y] where the pick block is set aside between trials"},
+                "camera": {"type": "string"},
             },
             "additionalProperties": False,
         },
