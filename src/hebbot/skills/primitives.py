@@ -721,6 +721,7 @@ def grasp_at(
     force: float = _DEFAULT_GRIP_FORCE,
     descent_speed: float = 0.04,
     stall_guard: float = 0.068,
+    open_width: Optional[float] = None,
     _context: Optional[Any] = None,
 ) -> dict:
     """Compliant straight-down descent from the current (x, y) to grasp_z, then close.
@@ -745,7 +746,11 @@ def grasp_at(
     import numpy as np
     from panda_py import controllers
 
-    gripper.move(width=_GRIPPER_MAX_WIDTH, speed=0.1)  # open so the fingers straddle
+    # Open so the fingers straddle. A narrower pre-open (just wider than the object) makes
+    # the close a short, symmetric squeeze — a long light block can't be cammed/squirted out
+    # the way a full-80mm asymmetric close does (the elongated-block shove, lab 2026-06-27).
+    ow = _GRIPPER_MAX_WIDTH if open_width is None else float(np.clip(open_width, 0.02, _GRIPPER_MAX_WIDTH))
+    gripper.move(width=ow, speed=0.1)
     pos0 = panda.get_position()
     X, Y = float(pos0[0]), float(pos0[1])
     quat = panda.get_orientation()      # hold current (gripper-down) orientation
@@ -954,6 +959,84 @@ def _nearest_instance(bgr, color, track, min_px=80):
     return best
 
 
+# EE z at which the open fingertips touch the table (calibrated from the blue-cube grasp,
+# 2026-06-27: it bottomed out + gripped at actual_z 0.047). Lets us turn a depth-measured
+# block height (above the table) into a grasp_z: grasp_z = _TABLE_EE_Z + (fingertip height).
+_TABLE_EE_Z = 0.047
+_CAM_FX = 394.484   # wrist intrinsics fx (px) — metric extent = px * depth / fx
+
+
+def _perceive_pose_3d(cam, color, track, _context=None, min_px=120):
+    """Depth-derived 3-D pose of the tracked block — the geometry-true grasp perception.
+
+    The colour silhouette is a poor grasp cue: its principal axis is noisy (a small,
+    lit, partly-shadowed blob) and for a *standing* block its centroid is pulled toward
+    the lit side face. Depth is lighting-immune, so we segment by colour to find the
+    instance but read its pose from the depth points: isolate the TOP face (highest
+    points), take its centroid (the real grip target), its principal axis (the stable
+    long-edge direction → fingers go across the short axis), its metric short/long
+    extent, and its height above the table (→ grasp_z, and standing-vs-lying).
+
+    Returns {u, v (top-face centroid px), cu, cv (colour centroid px), ang (deg),
+    width_m, length_m, height_m, coverage, block_depth, table_depth} or None.
+    """
+    import numpy as np
+    cap = cam.capture(with_depth=True)
+    bgr, depth = cap["color"], cap.get("depth")
+    if depth is None:
+        return None
+    ds = cap.get("depth_scale") or 1e-4
+    rgb = bgr[:, :, ::-1].astype(int)
+    R, G, B = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
+    lab = _label_cc(_color_mask(R, G, B, color))
+    best, bestd = None, 1e18
+    for Ll in np.unique(lab):
+        if Ll == 0:
+            continue
+        ys, xs = np.where(lab == Ll)
+        if len(xs) < min_px:
+            continue
+        cu, cv = float(xs.mean()), float(ys.mean())
+        d = (cu - track[0]) ** 2 + (cv - track[1]) ** 2
+        if d < bestd:
+            bestd, best = d, (xs, ys, cu, cv)
+    if best is None:
+        return None
+    xs, ys, cu, cv = best
+    dm = depth.astype(np.float32) * ds
+    dvals = dm[ys, xs]
+    ok = dvals > 0.05
+    cov = float(ok.mean())
+    if int(ok.sum()) < 30:
+        return None
+    gx, gy, gd = xs[ok].astype(float), ys[ok].astype(float), dvals[ok]
+    # table depth: a ring of non-this-colour pixels around the instance
+    yy, xx = np.mgrid[0:dm.shape[0], 0:dm.shape[1]]
+    r = np.hypot(xx - cu, yy - cv)
+    rad = float(np.sqrt(len(xs) / np.pi))
+    ring = (r > rad * 1.6) & (r < rad * 3.4) & (lab == 0) & (dm > 0.05)
+    if int(ring.sum()) < 50:
+        ring = (r > rad * 1.6) & (lab == 0) & (dm > 0.05)
+    table_depth = float(np.median(dm[ring])) if int(ring.sum()) else float(np.percentile(gd, 90))
+    heights = table_depth - gd                      # m above the table (top is closest → tallest)
+    Hmax = float(np.percentile(heights, 92))
+    height_m = max(0.0, Hmax)
+    topf = heights >= (Hmax - 0.012)                # the top plate (within 12 mm of the top)
+    if int(topf.sum()) < 12:
+        topf = heights >= (Hmax - 0.020)
+    tx, ty = gx[topf], gy[topf]
+    u, v = float(tx.mean()), float(ty.mean())
+    block_depth = float(np.median(gd[topf])) if int(topf.sum()) else float(np.median(gd))
+    P = np.stack([tx - u, ty - v])
+    evals, evecs = np.linalg.eigh(P @ P.T / max(P.shape[1], 1))
+    ang = float(np.degrees(np.arctan2(evecs[1, -1], evecs[0, -1])))
+    Lp, Wp = 4 * np.sqrt(max(evals[-1], 1e-9)), 4 * np.sqrt(max(evals[0], 1e-9))
+    return {"u": u, "v": v, "cu": cu, "cv": cv, "ang": ang,
+            "length_m": Lp * block_depth / _CAM_FX, "width_m": Wp * block_depth / _CAM_FX,
+            "height_m": height_m, "coverage": cov,
+            "block_depth": block_depth, "table_depth": table_depth}
+
+
 def vision_grasp(
     *,
     color: str = "blue",
@@ -968,6 +1051,8 @@ def vision_grasp(
     z_step: float = 0.045,
     pick_top: float = 0.0,
     target: Optional[list] = None,
+    max_retry: int = 2,
+    geometry: bool = True,
     _context: Optional[Any] = None,
 ) -> dict:
     """Locate a block from the wrist camera and grasp it — no hand-eye calibration.
@@ -1011,93 +1096,184 @@ def vision_grasp(
     z = float(np.clip(acquire_z, approach_z, 0.45))
     move_to_pose([float(pos[0]), float(pos[1]), z], _context=_context)
 
+    import math
     history: list[dict] = []
     located = False
     track = list(target) if target else None   # lock onto one instance when given
-    for step in range(max_steps):
-        frame = cam.capture(with_depth=False)["color"]
-        seg = _nearest_instance(frame, color, track) if track else _segment(frame, color)
-        if seg is None:
-            return {"_source": "live", "located": located, "grasped": False,
-                    "note": "block not found in frame", "servo_steps": step,
-                    "history": history}
-        u, v, npix = seg
-        if track is not None:
-            track = [u, v]                     # follow the instance as the gripper moves
-        # pick_top elevates an already-stacked cube, so it sits at camera distance
-        # d = z − pick_top; evaluate the grasp-pixel/Jacobian/size-gate there (parallax,
-        # same as stack_on's onto_top). 0 for a cube on the table.
-        d = z - pick_top
-        # Plausibility gate (merged-colour path only): a compact cube's area scales as
-        # 1/d²; a blob far outside that band is glare/clutter. We DON'T apply it when
-        # tracking a specific instance — `_nearest_instance` already locked onto a real
-        # connected component, and a rect block legitimately exceeds the cube area
-        # (the gate wrongly rejected a lying rect, lab notebook #139).
-        if track is None:
-            expected = 5600.0 * (_VG_APPROACH_Z / d) ** 2
-            if not (0.2 * expected <= npix <= 4.0 * expected):
-                return {"_source": "live", "located": False, "grasped": False,
-                        "note": f"implausible blob npix={npix} (expected ~{expected:.0f} "
-                                f"at d={d:.2f}) — glare/clutter, not grasping",
-                        "servo_steps": step, "history": history}
-        located = True
-        tu, tv = _vg_grasp_pixel(d)
-        du, dv = tu - u, tv - v
-        err = float(np.hypot(du, dv))
-        at_bottom = z <= approach_z + 1e-3
-        history.append({"step": step, "z": round(z, 3), "u": round(u, 1),
-                        "v": round(v, 1), "pixel_err": round(err, 1), "npix": npix})
-        if at_bottom and err <= pixel_tol:
-            break
-        jinv = _vg_jinv(d)
-        dex = jinv[0][0] * du + jinv[0][1] * dv
-        dey = jinv[1][0] * du + jinv[1][1] * dv
-        # Clamp the step. When tracking ONE instance, keep steps small so the block
-        # can't jump far enough in the image for the tracker to re-lock onto a different
-        # same-colour region (lab #139: a big first step lost the block to a phantom).
-        clamp = 0.06 if track is not None else 0.15
-        dex = float(np.clip(dex, -clamp, clamp))
-        dey = float(np.clip(dey, -clamp, clamp))
-        # Drop a notch only once we're well-centred at this altitude.
-        if err <= descend_tol and not at_bottom:
-            z = max(approach_z, z - z_step)
-        p = panda.get_position()
-        # Final clamp into the reachable top-down workspace box.
-        tx = float(np.clip(float(p[0]) + dex, 0.30, 0.60))
-        ty = float(np.clip(float(p[1]) + dey, -0.28, 0.28))
-        move_to_pose([tx, ty, z], _context=_context)
 
-    # Shape-aware grip: when tracking an instance, re-perceive it and — if it's a rect
-    # block — yaw the fingers across its narrow (short) axis for a firm grip, instead of
-    # the fixed gripper-down yaw that assumes a cube (lab notebook #139). Cubes grip as-is.
-    grip_yaw = None
-    if track is not None:
-        import math
-        fb = find_blocks(colors=[color], _context=_context)
-        cand = [b for b in fb.get("blocks", [])]
-        if cand:
-            inst = min(cand, key=lambda b: (b["u"] - track[0]) ** 2 + (b["v"] - track[1]) ** 2)
-            if inst["aspect"] >= 1.3:   # yaw for any non-square block; a true cube (~1.1) grips as-is
-                phi = math.atan2(-math.cos(math.radians(inst["ang"])),
-                                 -math.sin(math.radians(inst["ang"])))
-                # normalise to ±90°: a parallel gripper is symmetric under a 180° yaw, so
-                # don't twist the wrist toward a joint limit for an equivalent grip.
-                phi = ((phi + math.pi / 2) % math.pi) - math.pi / 2
+    def _coarse_servo():
+        """Colour-centroid image-Jacobian servo from acquire_z down to approach_z over the
+        tracked instance — a coarse centre. Returns the last (u, v) pixel, or None if lost."""
+        nonlocal track, located
+        z = float(np.clip(acquire_z, approach_z, 0.45))
+        p0 = panda.get_position()
+        move_to_pose([float(p0[0]), float(p0[1]), z], _context=_context)
+        last = None
+        for step in range(max_steps):
+            frame = cam.capture(with_depth=False)["color"]
+            seg = _nearest_instance(frame, color, track) if track else _segment(frame, color)
+            if seg is None:
+                return None
+            u, v, npix = seg
+            if track is not None:
+                track = [u, v]
+            d = z - pick_top                   # parallax: a point pick_top above the table
+            if track is None:                  # plausibility gate (merged-colour path only)
+                expected = 5600.0 * (_VG_APPROACH_Z / d) ** 2
+                if not (0.2 * expected <= npix <= 4.0 * expected):
+                    return None
+            located = True
+            tu, tv = _vg_grasp_pixel(d)
+            du, dv = tu - u, tv - v
+            err = float(np.hypot(du, dv))
+            at_bottom = z <= approach_z + 1e-3
+            history.append({"step": step, "z": round(z, 3), "u": round(u, 1),
+                            "v": round(v, 1), "pixel_err": round(err, 1), "npix": npix})
+            last = (u, v)
+            if at_bottom and err <= pixel_tol:
+                break
+            jinv = _vg_jinv(d)
+            dex = jinv[0][0] * du + jinv[0][1] * dv
+            dey = jinv[1][0] * du + jinv[1][1] * dv
+            clamp = 0.06 if track is not None else 0.15
+            dex = float(np.clip(dex, -clamp, clamp))
+            dey = float(np.clip(dey, -clamp, clamp))
+            if err <= descend_tol and not at_bottom:
+                z = max(approach_z, z - z_step)
+            p = panda.get_position()
+            tx = float(np.clip(float(p[0]) + dex, 0.30, 0.60))
+            ty = float(np.clip(float(p[1]) + dey, -0.28, 0.28))
+            move_to_pose([tx, ty, z], _context=_context)
+        return last
+
+    def _recenter(u, v, tu, tv, d):
+        """Translate (gripper-down → image Jacobian valid) so the depth top-face centroid
+        (u, v) lands on the target grasp-pixel (tu, tv). Run before yawing. `d` is the top
+        face's camera distance so the Jacobian gain matches its height (parallax)."""
+        nonlocal track
+        jinv = _vg_jinv(d)
+        du, dv = tu - u, tv - v
+        dex = float(np.clip(jinv[0][0] * du + jinv[0][1] * dv, -0.05, 0.05))
+        dey = float(np.clip(jinv[1][0] * du + jinv[1][1] * dv, -0.05, 0.05))
+        p = panda.get_position()
+        # Hold the perceive height (pz, ~0.30) — NOT approach_z. Dropping to 0.20 here makes
+        # the re-perceive read close-range depth, which is unreliable (it inflated a cube to
+        # 60 mm and broke the grasp). pz resolves from the enclosing scope at call time.
+        move_to_pose([float(p[0]) + dex, float(p[1]) + dey, pz], _context=_context)
+        track = [u, v]
+
+    def _tilt_classify():
+        """Piece 3 — 'back off and view from another angle': a 35° side glance that resolves
+        the standing-vs-lying ambiguity a single top-down view cannot (it fooled me 3× in one
+        session). Returns 'standing'|'lying'|None and leaves the wrist back over the block."""
+        p = panda.get_position(); bx, by, bz = float(p[0]), float(p[1]), float(p[2])
+        cls = None
+        try:
+            move_to_pose([bx + 0.16, by, 0.28], orientation=[0.0, 0.954, 0.0, -0.301], _context=_context)
+            rgb = cam.capture(with_depth=False)["color"][:, :, ::-1].astype(int)
+            m = _color_mask(rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2], color)
+            ys, xs = np.where(m)
+            if len(xs) > 60:                   # side silhouette: standing → taller than wide
+                vh, uw = (ys.max() - ys.min()), (xs.max() - xs.min())
+                cls = "standing" if vh >= 1.15 * uw else "lying"
+        except Exception:
+            cls = None
+        move_to_pose([bx, by, bz], _context=_context)   # back over the block, same height
+        return cls
+
+    result = None
+    lower_bias = 0.0          # each missed grasp biases the next one lower (Doug: a miss is
+    for attempt in range(max_retry + 1):   # usually 'gripped too high' → open + go down + retry)
+        if _coarse_servo() is None:
+            result = {"_source": "live", "located": located, "grasped": False,
+                      "note": "block not found in frame", "servo_steps": len(history),
+                      "history": history, "attempt": attempt}
+            break
+
+        grip_yaw, geom = None, None
+        g_z, grip_w, s_guard = grasp_z + pick_top, width, 0.068 + pick_top
+        pz = approach_z
+        if geometry and track is not None:
+            # Perceive from 0.30 m, not the 0.20 m servo floor: close-range RealSense depth
+            # drops out below ~0.2 m, and metric pose (axis/width/height) is z-invariant.
+            pz = max(approach_z, 0.30)
+            p = panda.get_position()
+            move_to_pose([float(p[0]), float(p[1]), pz], _context=_context)
+            geom = _perceive_pose_3d(cam, color, track, _context=_context)
+        if geom is not None:
+            H = geom["height_m"]
+            # Re-centre on the TRUE top-face centroid. The grasp-pixel is parallax-corrected
+            # to the top face's height (d = pz − H), like an elevated/stacked pick.
+            d_face = max(0.05, pz - H)
+            tu, tv = _vg_grasp_pixel(d_face)
+            if float(np.hypot(geom["u"] - tu, geom["v"] - tv)) > pixel_tol:
+                _recenter(geom["u"], geom["v"], tu, tv, d_face)
+                geom = _perceive_pose_3d(cam, color, track, _context=_context) or geom
+                H = geom["height_m"]
+
+            # Piece 3: a tilt-glance only when the top-down height is ambiguous / sparse —
+            # it corrects H so a standing block isn't mistaken for a low one (and vice versa).
+            if 0.034 <= H <= 0.052 or geom["coverage"] < 0.40:
+                cls = _tilt_classify()
+                geom = _perceive_pose_3d(cam, color, track, _context=_context) or geom
+                H = geom["height_m"]
+                if cls == "standing" and H < 0.045:
+                    H = 0.058
+                elif cls == "lying" and H > 0.035:
+                    H = 0.029
+
+            grip_w = float(np.clip(geom["width_m"] - 0.004, 0.010, 0.05))
+            open_w = float(np.clip(grip_w + 0.028, 0.045, _GRIPPER_MAX_WIDTH))
+            # Grip height. A block that can reach the table is gripped at TABLE level — the
+            # proven cube/rect grip: descend until the fingertips stall on the table beside it
+            # (mid-height gripping fails — Doug saw it grip 'a little too high'). Only a clearly
+            # tall standing block (can't reach the table) is gripped low on its body. Retries
+            # bias lower, since a miss is usually 'too high'.
+            if H >= 0.050:
+                g_z = _TABLE_EE_Z + float(np.clip(0.40 * H, 0.010, 0.040)) - lower_bias
+                s_guard = g_z + 0.035
+            else:
+                g_z = grasp_z - lower_bias       # ~0.038 → descend & stall at the table
+                s_guard = 0.072
+            g_z = max(0.026, g_z)
+
+            # Piece 2: fingers parallel to the true long edges (across the short axis), using
+            # the STABLE depth principal axis. Skip the twist for near-square tops (cubes).
+            if geom["length_m"] / max(geom["width_m"], 1e-3) >= 1.25:
+                phi = math.atan2(-math.cos(math.radians(geom["ang"])),
+                                 -math.sin(math.radians(geom["ang"])))
+                phi = ((phi + math.pi / 2) % math.pi) - math.pi / 2   # ±90°: gripper is symmetric
                 q = _qmul([math.cos(phi / 2), 0, 0, math.sin(phi / 2)], [0.0, 1.0, 0.0, 0.0])
                 p = panda.get_position()
                 try:
-                    move_to_pose([float(p[0]), float(p[1]), approach_z], orientation=q, _context=_context)
+                    move_to_pose([float(p[0]), float(p[1]), pz], orientation=q, _context=_context)
                     grip_yaw = round(math.degrees(phi))
                 except Exception:
-                    grip_yaw = None   # unreachable yaw → grip gripper-down instead of crashing
-    # Raise the grasp + stall-guard heights by pick_top so an elevated cube is grasped
-    # at its real height (and grasp_at doesn't refuse it as a stalled-high descent).
-    g = grasp_at(grasp_z=grasp_z + pick_top, width=width,
-                 stall_guard=0.068 + pick_top, _context=_context)
-    return {"_source": "live", "located": located, "servo_steps": len(history),
-            "final_pixel_err": history[-1]["pixel_err"] if history else None,
-            "grip_yaw_deg": grip_yaw, "history": history, "grasped": g.get("grasped"),
-            "actual_z": g.get("actual_z"), "actual_width": g.get("actual_width")}
+                    grip_yaw = None
+
+        g = grasp_at(grasp_z=g_z, width=grip_w, stall_guard=s_guard,
+                     open_width=(open_w if geom is not None else None), _context=_context)
+        result = {"_source": "live", "located": located, "servo_steps": len(history),
+                  "final_pixel_err": history[-1]["pixel_err"] if history else None,
+                  "grip_yaw_deg": grip_yaw, "attempt": attempt,
+                  "geom": ({k: round(float(val), 4) for k, val in geom.items()} if geom else None),
+                  "grip_z": round(g_z, 4), "grip_width": round(grip_w, 4),
+                  "history": history, "grasped": g.get("grasped"),
+                  "actual_z": g.get("actual_z"), "actual_width": g.get("actual_width")}
+
+        # Piece 4: verify + retry. A failed grasp usually nudged the block, so lift, re-acquire
+        # near the last sighting, and try again.
+        if g.get("grasped"):
+            break
+        if attempt < max_retry:
+            lower_bias += 0.012          # open + go a notch lower on the next try
+            p = panda.get_position()
+            move_to_pose([float(p[0]), float(p[1]), acquire_z], _context=_context)
+            if track is not None:
+                seg = _nearest_instance(cam.capture(with_depth=False)["color"], color, track)
+                if seg is not None:
+                    track = [seg[0], seg[1]]
+    return result
 
 
 def place_block(
