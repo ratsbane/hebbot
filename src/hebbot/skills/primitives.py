@@ -1185,6 +1185,15 @@ def place_block(
 
 
 _CUBE_WIDTH = {"blue": 0.024, "green": 0.029, "red": 0.029}   # measured cube widths (m)
+_OBSERVE_POSE = [0.43, 0.0, 0.44]   # wide overhead vantage — sees the whole working area
+
+
+def _observe(colors, _context, camera=None):
+    """Move to the wide overhead pose, then find_blocks — robust re-location so a block
+    shifted by a previous (failed) grasp is still found, instead of vanishing from a
+    fixed narrower view and collapsing the run (lab notebook #140)."""
+    move_to_pose(list(_OBSERVE_POSE), _context=_context)
+    return find_blocks(colors=colors, camera=camera, _context=_context)
 
 
 def stack_on(
@@ -1241,9 +1250,9 @@ def stack_on(
 
     cam = _select_camera(cameras, camera)
 
-    # Locate the pick INSTANCE (per-instance — works on rect blocks / clutter, where
-    # the merged-colour centroid would be wrong; lab notebook #139).
-    fb = find_blocks(colors=[pick], _context=_context)
+    # Locate the pick INSTANCE from the wide overhead pose (per-instance — works on rect
+    # blocks / clutter; the wide vantage re-finds blocks shifted by a prior grasp, #139/#140).
+    fb = _observe([pick], _context)
     picks = [b for b in fb.get("blocks", []) if b["color"] == pick]
     if not picks:
         return {"_source": "live", "stacked": False, "stage": "locate", "note": f"no {pick} instance"}
@@ -1256,16 +1265,15 @@ def stack_on(
     if not g.get("grasped"):
         return {"_source": "live", "stacked": False, "stage": "grasp_pick", "grasp": g}
 
-    # 2) Lift, re-acquire the onto INSTANCE from the new pose, then image-servo over it.
-    p = panda.get_position()
-    z = float(np.clip(acquire_z, approach_z, 0.45))
-    move_to_pose([float(p[0]), float(p[1]), z], _context=_context)
-    fb2 = find_blocks(colors=[onto], _context=_context)
+    # 2) Re-acquire the onto INSTANCE from the wide overhead pose (robust to the pick grasp
+    #    having shifted things; #140), then image-servo over it from there.
+    fb2 = _observe([onto], _context)
     ontos = [b for b in fb2.get("blocks", []) if b["color"] == onto]
     if not ontos:
         return {"_source": "live", "stacked": False, "stage": "locate_onto",
-                "note": f"no {onto} instance after lift", "grasp": g}
+                "note": f"no {onto} instance found", "grasp": g}
     onto_track = [max(ontos, key=lambda b: b["npix"])["u"], max(ontos, key=lambda b: b["npix"])["v"]]
+    z = float(_OBSERVE_POSE[2])   # start the onto-servo from the observe height
     servo: list[dict] = []
     for step in range(max_steps):
         seg = _nearest_instance(cam.capture(with_depth=False)["color"], onto, onto_track)
@@ -1496,10 +1504,11 @@ def practice(
         return {"_source": "mock", "trials": []}
     rx = reset_xy or [0.45, 0.12]
     log = []
+    fails = 0
     for t in range(trials):
         s = stack_on(pick=pick, onto=onto, onto_top=0.0, max_steps=16, _context=_context)
-        # verify: a stacked `onto` is hidden under `pick` top-down → pick seen, onto not.
-        fb = find_blocks(colors=[pick, onto], _context=_context)
+        # verify from the wide overhead pose (robust re-location; #140).
+        fb = _observe([pick, onto], _context)
         pk = [b for b in fb.get("blocks", []) if b["color"] == pick]
         on = [b for b in fb.get("blocks", []) if b["color"] == onto]
         # Stacked ⇒ onto's centroid coincides with pick's (within a cube) OR onto is fully
@@ -1522,9 +1531,14 @@ def practice(
                 trial["reset"] = "ok"
             else:
                 trial["reset"] = "grasp_failed"
-                log.append(trial)
-                break   # can't continue without a clean reset
+        # cascade-stop: a good trial stacked, verified, AND reset cleanly. Two failures in a
+        # row → stop rather than thrash and scatter the scene (the failure mode of #140).
+        ok = bool(trial["verified"]) and trial["reset"] == "ok"
+        fails = 0 if ok else fails + 1
         log.append(trial)
+        if fails >= 2:
+            trial["stopped"] = "two consecutive failures"
+            break
     return {"_source": "live", "trials": log, "n": len(log),
             "verified_count": sum(1 for l in log if l.get("verified")),
             "reset_failures": sum(1 for l in log if l.get("reset") == "grasp_failed")}
