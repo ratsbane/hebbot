@@ -1080,10 +1080,16 @@ def vision_grasp(
             if inst["aspect"] >= 1.3:   # yaw for any non-square block; a true cube (~1.1) grips as-is
                 phi = math.atan2(-math.cos(math.radians(inst["ang"])),
                                  -math.sin(math.radians(inst["ang"])))
-                grip_yaw = round(math.degrees(phi))
+                # normalise to ±90°: a parallel gripper is symmetric under a 180° yaw, so
+                # don't twist the wrist toward a joint limit for an equivalent grip.
+                phi = ((phi + math.pi / 2) % math.pi) - math.pi / 2
                 q = _qmul([math.cos(phi / 2), 0, 0, math.sin(phi / 2)], [0.0, 1.0, 0.0, 0.0])
                 p = panda.get_position()
-                move_to_pose([float(p[0]), float(p[1]), approach_z], orientation=q, _context=_context)
+                try:
+                    move_to_pose([float(p[0]), float(p[1]), approach_z], orientation=q, _context=_context)
+                    grip_yaw = round(math.degrees(phi))
+                except Exception:
+                    grip_yaw = None   # unreachable yaw → grip gripper-down instead of crashing
     # Raise the grasp + stall-guard heights by pick_top so an elevated cube is grasped
     # at its real height (and grasp_at doesn't refuse it as a stalled-high descent).
     g = grasp_at(grasp_z=grasp_z + pick_top, width=width,
