@@ -1226,19 +1226,23 @@ def vision_grasp(
                     H = 0.029
 
             grip_w = float(np.clip(geom["width_m"] - 0.004, 0.010, 0.05))
-            open_w = float(np.clip(grip_w + 0.028, 0.045, _GRIPPER_MAX_WIDTH))
-            # Grip height. A block that can reach the table is gripped at TABLE level — the
-            # proven cube/rect grip: descend until the fingertips stall on the table beside it
-            # (mid-height gripping fails — Doug saw it grip 'a little too high'). Only a clearly
-            # tall standing block (can't reach the table) is gripped low on its body. Retries
-            # bias lower, since a miss is usually 'too high'.
+            # Open just enough to clear the target's top (a few mm margin), NOT fully — a full
+            # open reaches into an ADJACENT block and a tip gets blocked by the neighbour (Doug,
+            # 2026-06-28, blue touching green). The too-high cure was the lower grip start below,
+            # not the open width. Truly touching blocks still need a clutter-aware grip axis.
+            open_w = float(np.clip(grip_w + 0.016, 0.035, 0.065))
+            # Grip height. grasp_z=0.038 lands the fingertips ~22 mm up — near the TOP of a ~29 mm
+            # block, not its body — so the first attempt grips 'just above the block' and the
+            # −12 mm lower-bias retry rescues it (Doug's chronic 'grasps too high', 2026-06-28).
+            # Start 12 mm lower so the FIRST attempt grips the body. A clearly tall standing block
+            # (can't reach the table) is still gripped low on its body.
             if H >= 0.050:
                 g_z = _TABLE_EE_Z + float(np.clip(0.40 * H, 0.010, 0.040)) - lower_bias
                 s_guard = g_z + 0.035
             else:
-                g_z = grasp_z - lower_bias       # ~0.038 → descend & stall at the table
+                g_z = grasp_z - 0.012 - lower_bias
                 s_guard = 0.072
-            g_z = max(0.026, g_z)
+            g_z = max(0.018, g_z)
 
             # Piece 2: fingers parallel to the true long edges (across the short axis), using
             # the STABLE depth principal axis. Skip the twist for near-square tops (cubes).
@@ -1254,6 +1258,10 @@ def vision_grasp(
                 except Exception:
                     grip_yaw = None
 
+        # Open just past the target's width (open_w) — enough clearance to descend without a tip
+        # clipping the block top, but not so wide it reaches into an adjacent block. The lower grip
+        # start (above) is what cured 'grasps too high'; the Franka jaws close symmetrically so the
+        # pre-open never affected squirt (the parallel+levelled+centred grip handles that).
         g = grasp_at(grasp_z=g_z, width=grip_w, stall_guard=s_guard,
                      open_width=(open_w if geom is not None else None), _context=_context)
         result = {"_source": "live", "located": located, "servo_steps": len(history),
@@ -1772,6 +1780,86 @@ def probe_table(
             "Fz": round(wrench[2], 2), "dFz": round(wrench[2] - fz0, 2),
             "Mx": round(wrench[3], 3), "My": round(wrench[4], 3), "Mz": round(wrench[5], 3),
             "orientation": [round(float(v), 4) for v in q]}
+
+
+def shove(
+    *,
+    color: str = "blue",
+    target: Optional[list] = None,
+    push_uv: Optional[list] = None,
+    distance: float = 0.05,
+    z_push: float = 0.030,
+    camera: Optional[str] = None,
+    _context: Optional[Any] = None,
+) -> dict:
+    """Push a block sideways to separate it from a touching neighbour so it can be grasped.
+
+    Centres the CLOSED gripper over the target block (calibration-free image servo, like
+    vision_grasp but no grasp), then lowers it beside the block and drives it through along
+    the EE direction that matches the image push vector `push_uv` — e.g. (target_pixel −
+    neighbour_pixel), to push the two apart. Learnt because a grasp on a clustered block gets
+    a fingertip blocked by the neighbour (Doug, 2026-06-28). `distance` = push length (m).
+    """
+    import numpy as np
+    panda = _extract(_context, "panda")
+    gripper = _extract(_context, "gripper")
+    cameras = _extract(_context, "cameras") or {}
+    if panda is None or gripper is None or not cameras:
+        time.sleep(0.05)
+        return {"_source": "mock", "note": "mock — no arm/gripper/camera"}
+    cam = _select_camera(cameras, camera)
+    if cam is None or target is None or push_uv is None:
+        return {"_source": "error", "note": "need target [u,v] + push_uv [du,dv]"}
+
+    gripper.move(width=0.0, speed=0.1)          # closed — the gripper is the pusher
+    approach_z, acquire_z = _VG_APPROACH_Z, _VG_ACQUIRE_Z
+    track = list(target)
+    pos = panda.get_position()
+    z = float(np.clip(acquire_z, approach_z, 0.45))
+    move_to_pose([float(pos[0]), float(pos[1]), z], _context=_context)
+    for _ in range(14):                         # servo the closed gripper over the target
+        seg = _nearest_instance(cam.capture(with_depth=False)["color"], color, track)
+        if seg is None:
+            break
+        u, v, _npx = seg
+        track = [u, v]
+        tu, tv = _vg_grasp_pixel(z)
+        du, dv = tu - u, tv - v
+        err = float(np.hypot(du, dv))
+        at_bottom = z <= approach_z + 1e-3
+        if at_bottom and err <= 4.0:
+            break
+        ji = _vg_jinv(z)
+        dex = float(np.clip(ji[0][0] * du + ji[0][1] * dv, -0.06, 0.06))
+        dey = float(np.clip(ji[1][0] * du + ji[1][1] * dv, -0.06, 0.06))
+        if err <= 22.0 and not at_bottom:
+            z = max(approach_z, z - 0.045)
+        p = panda.get_position()
+        move_to_pose([float(np.clip(p[0] + dex, 0.30, 0.60)),
+                      float(np.clip(p[1] + dey, -0.28, 0.28)), z], _context=_context)
+
+    # Image push vector → EE-xy unit direction. The image Jacobian centres a block by moving the
+    # CAMERA (block appears to move toward target); a physical push moves the block WITH the
+    # gripper, which projects the opposite way — so negate to make the block actually travel along
+    # push_uv (verified 2026-06-28: push_uv +v had moved the block −v before this flip).
+    ji = _vg_jinv(approach_z)
+    ex = -(ji[0][0] * push_uv[0] + ji[0][1] * push_uv[1])
+    ey = -(ji[1][0] * push_uv[0] + ji[1][1] * push_uv[1])
+    n = float(np.hypot(ex, ey)) or 1.0
+    ux, uy = ex / n, ey / n
+    p = panda.get_position()
+    bx, by = float(p[0]), float(p[1])
+    off = 0.034                                  # start just beside the block, on the origin side
+    sx, sy = bx - ux * off, by - uy * off
+    tx, ty = bx + ux * distance, by + uy * distance
+    cl = lambda x, lo, hi: float(np.clip(x, lo, hi))
+    move_to_pose([cl(sx, 0.30, 0.60), cl(sy, -0.28, 0.28), approach_z], _context=_context)
+    move_to_pose([cl(sx, 0.30, 0.60), cl(sy, -0.28, 0.28), z_push], _context=_context)
+    move_to_pose([cl(tx, 0.30, 0.60), cl(ty, -0.28, 0.28), z_push], _context=_context)  # push
+    move_to_pose([cl(tx, 0.30, 0.60), cl(ty, -0.28, 0.28), approach_z], _context=_context)
+    return {"_source": "live", "pushed": True,
+            "ee_dir": [round(ux, 3), round(uy, 3)], "distance": distance,
+            "from_xy": [round(sx, 4), round(sy, 4)], "to_xy": [round(tx, 4), round(ty, 4)]}
 
 
 def _relevel_base(onto, canon_uv, canon_xy, _context, drift_tol=22.0):
@@ -2424,6 +2512,26 @@ PRIMITIVE_SPECS = [
                 "open_width": {"type": "number", "minimum": 0.0, "maximum": 0.08, "default": 0.045},
                 "z_floor": {"type": "number", "minimum": 0.0, "maximum": 0.1, "default": 0.012},
                 "force_thresh": {"type": "number", "minimum": 1.0, "maximum": 20.0, "default": 5.0},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "shove",
+        "function_spec": "hebbot.skills.primitives:shove",
+        "params_schema": {
+            "type": "object",
+            "properties": {
+                "color": {"type": "string", "enum": ["blue", "green", "red"], "default": "blue"},
+                "target": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2,
+                           "description": "[u,v] pixel of the block to push (from find_blocks)"},
+                "push_uv": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2,
+                            "description": "image push direction [du,dv], e.g. target_pixel − neighbour_pixel (push apart)"},
+                "distance": {"type": "number", "minimum": 0.01, "maximum": 0.15, "default": 0.05,
+                             "description": "push length (m)"},
+                "z_push": {"type": "number", "minimum": 0.0, "maximum": 0.1, "default": 0.030,
+                           "description": "EE z to push at (closed gripper beside the block)"},
+                "camera": {"type": "string"},
             },
             "additionalProperties": False,
         },
