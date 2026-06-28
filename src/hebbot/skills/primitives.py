@@ -1794,6 +1794,120 @@ def _relevel_base(onto, canon_uv, canon_xy, _context, drift_tol=22.0):
     return "releveled"
 
 
+# ---------------------------------------------------------------------------
+# Persistent scene store — the arm's world model + predict-then-look change detection
+# ---------------------------------------------------------------------------
+# A small persistent map of the world: the table plane (table_z) is the immovable substrate;
+# blocks are movable objects, each tracked by identity + pose. v1 lives in the OBSERVE-pose
+# image frame (calibration-free, and directly actionable — grasps target pixels), enriched
+# with the block's pixel geometry. `scene_sync` re-perceives and compares to the stored model:
+# a block whose pixel has shifted past `moved_px` since the last sync — with no action of mine
+# in between — was moved by an EXTERNAL force (a hand, gravity, a knocked neighbour). The
+# prediction error IS the alarm that the world changed without me (lab notebook: world-model).
+
+def _scene_path(_store):
+    from pathlib import Path
+    if _store is not None and getattr(_store, "db_path", None):
+        return str(Path(_store.db_path).parent / "scene.json")
+    return "/tmp/hebbot_scene.json"
+
+
+def _load_scene(path):
+    import json, os
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"frame": "wrist@observe", "ts": 0, "next_id": 1, "objects": []}
+
+
+def _save_scene(path, scene):
+    import json
+    with open(path, "w") as f:
+        json.dump(scene, f, indent=2)
+
+
+def scene_sync(
+    *,
+    moved_px: float = 9.0,
+    gate_px: float = 200.0,
+    min_npix: int = 400,
+    _store: Optional[Any] = None,
+    _context: Optional[Any] = None,
+) -> dict:
+    """Predict-then-look world-model update + external-move detector. Goes to the overhead
+    observe pose, re-perceives every block, associates each to the stored model (same colour,
+    nearest within `gate_px`), and classifies it: stable / moved (pixel shift ≥ moved_px) /
+    appeared / disappeared. Persists the refreshed model to data_dir/scene.json. Called when
+    no action of mine has touched the scene, a `moved` result means an EXTERNAL force shifted
+    that block — the prediction error is the alarm. (moved_px ≈ 9 px ≈ 1 cm at the observe
+    height — above the ~1–2 mm perception noise and the ±1.4 mm FK error.)
+    """
+    cameras = _extract(_context, "cameras") or {}
+    panda = _extract(_context, "panda")
+    if panda is None or not cameras:
+        time.sleep(0.02)
+        return {"_source": "mock", "note": "no arm/camera"}
+    move_to_pose(list(_OBSERVE_POSE), _context=_context)
+    fresh = [b for b in find_blocks(_context=_context).get("blocks", []) if b["npix"] >= min_npix]
+    path = _scene_path(_store)
+    prior = _load_scene(path)
+    prior_objs = prior.get("objects", [])
+    next_id = prior.get("next_id", 1)
+    ts = prior.get("ts", 0) + 1
+
+    used = [False] * len(fresh)
+    stable, moved, disappeared = [], [], []
+    new_objs = []
+    for o in prior_objs:
+        best, bestd = -1, gate_px + 1.0
+        for i, b in enumerate(fresh):
+            if used[i] or b["color"] != o["color"]:
+                continue
+            d = ((b["u"] - o["u"]) ** 2 + (b["v"] - o["v"]) ** 2) ** 0.5
+            if d < bestd:
+                bestd, best = d, i
+        if best >= 0:
+            used[best] = True
+            b = fresh[best]
+            new_objs.append({"id": o["id"], "color": b["color"], "u": b["u"], "v": b["v"],
+                             "ang": b["ang"], "L": b["L"], "W": b["W"], "aspect": b["aspect"],
+                             "npix": b["npix"], "shape": b["shape"], "ts": ts, "missing": 0})
+            if bestd >= moved_px:
+                moved.append({"id": o["id"], "color": o["color"], "residual_px": round(bestd, 1),
+                              "from": [o["u"], o["v"]], "to": [b["u"], b["v"]]})
+            else:
+                stable.append({"id": o["id"], "color": o["color"], "residual_px": round(bestd, 1)})
+        else:
+            miss = int(o.get("missing", 0)) + 1
+            disappeared.append({"id": o["id"], "color": o["color"], "last": [o["u"], o["v"]],
+                                "missing": miss})
+            if miss <= 3:                 # keep an occluded/removed object for a few syncs
+                new_objs.append({**o, "missing": miss, "ts": ts})
+
+    appeared = []
+    for i, b in enumerate(fresh):
+        if used[i]:
+            continue
+        oid = f"{b['color']}-{next_id}"
+        next_id += 1
+        new_objs.append({"id": oid, "color": b["color"], "u": b["u"], "v": b["v"], "ang": b["ang"],
+                         "L": b["L"], "W": b["W"], "aspect": b["aspect"], "npix": b["npix"],
+                         "shape": b["shape"], "ts": ts, "missing": 0})
+        appeared.append({"id": oid, "color": b["color"], "at": [b["u"], b["v"]]})
+
+    _save_scene(path, {"frame": "wrist@observe", "ts": ts, "next_id": next_id, "objects": new_objs})
+    return {"_source": "live", "scene_ts": ts, "n_objects": len([o for o in new_objs if not o.get("missing")]),
+            "moved": moved, "appeared": appeared, "disappeared": disappeared, "stable": stable}
+
+
+def scene_show(*, _store: Optional[Any] = None, _context: Optional[Any] = None) -> dict:
+    """Return the current persistent world model (the stored scene) without re-perceiving."""
+    return {"_source": "live", **_load_scene(_scene_path(_store))}
+
+
 def practice(
     *,
     pick: str = "green",
@@ -2239,6 +2353,27 @@ PRIMITIVE_SPECS = [
             },
             "additionalProperties": False,
         },
+    },
+    {
+        "name": "scene_sync",
+        "function_spec": "hebbot.skills.primitives:scene_sync",
+        "params_schema": {
+            "type": "object",
+            "properties": {
+                "moved_px": {"type": "number", "minimum": 1.0, "maximum": 100.0, "default": 9.0,
+                             "description": "pixel shift that counts as 'moved' (~9 px ≈ 1 cm at observe height)"},
+                "gate_px": {"type": "number", "minimum": 10.0, "maximum": 400.0, "default": 200.0,
+                            "description": "max pixel distance to associate a detection with a stored object (a move ≤ this reads as 'moved'; beyond it splits to disappeared+appeared)"},
+                "min_npix": {"type": "integer", "minimum": 20, "default": 400,
+                             "description": "ignore detections smaller than this (edge glare/slivers)"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "scene_show",
+        "function_spec": "hebbot.skills.primitives:scene_show",
+        "params_schema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
         "name": "practice",
