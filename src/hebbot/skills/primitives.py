@@ -753,7 +753,10 @@ def grasp_at(
     gripper.move(width=ow, speed=0.1)
     pos0 = panda.get_position()
     X, Y = float(pos0[0]), float(pos0[1])
-    quat = panda.get_orientation()      # hold current (gripper-down) orientation
+    # Hold the current orientation, with the calibrated finger-leveling offset applied (in the
+    # gripper's local frame, so it's correct at any yaw) — both fingertips meet the block level
+    # instead of one tapping first and nudging/stalling it high (Doug, 2026-06-27).
+    quat = _level_quat(panda.get_orientation())
     q0 = np.array(panda.get_state().q)
 
     ctrl = controllers.CartesianImpedance()
@@ -1656,6 +1659,141 @@ def stand_on_end(
             "grip_w": round(w, 4), "yaw_deg": round(math.degrees(phi))}
 
 
+# Gripper-leveling offset (rad): small wrist roll/pitch added to every grasp orientation so
+# the FINGERS' closing plane is level, not just the flange. The flange comes down vertical
+# (~0.1°), but the fingers sit with a tiny mechanical tilt, so one fingertip lands first —
+# nudging the block and stalling the grasp a few mm high (Doug, watching, 2026-06-27).
+# Calibrated 2026-06-27 by lowering the open fingers to the table under teleop and leveling by
+# eye (the force estimate was too noisy at fingertip contact): the left/+Y tip sat ~3 mm low,
+# nulled by a −1° roll about the gripper's local x-axis (both tips then met the table together).
+_GRIP_LEVEL_ROLL = -0.01745   # rad (−1°)
+_GRIP_LEVEL_PITCH = 0.0
+
+# Tabletop surface in EE-z (where the open fingertips press the flat table), mapped with
+# probe_table 2026-06-27. The tabletop is PHYSICALLY FLAT (Doug), so the ~±1.4 mm variation
+# across the workspace is the robot's forward-kinematics z-error — this plane (origin 0.46,0)
+# encodes "what EE-z really puts the fingertip on the surface here", so referencing it per-xy
+# compensates the FK error for grasp/place floors. Fit from 5 pressed points (|ΔFz| > 1.5 N).
+_TABLE_PLANE = (0.0165, 0.01313, 0.00885, 0.46, 0.0)   # z0, dz/dx, dz/dy, x0, y0
+
+
+def table_z(x, y):
+    """FK-compensated tabletop EE-z at world (x, y) — the height the open fingertips touch the
+    flat table, accounting for the robot's position-dependent kinematic error."""
+    z0, gx, gy, x0, y0 = _TABLE_PLANE
+    return z0 + gx * (float(x) - x0) + gy * (float(y) - y0)
+
+
+def _level_quat(q):
+    """Apply the calibrated gripper-leveling roll/pitch offset to a grasp orientation `q`
+    ([w,x,y,z]). Rotates about the gripper's own x (roll) then y (pitch) axes."""
+    import math
+    if _GRIP_LEVEL_ROLL == 0.0 and _GRIP_LEVEL_PITCH == 0.0:
+        return q
+    r, p = _GRIP_LEVEL_ROLL / 2.0, _GRIP_LEVEL_PITCH / 2.0
+    qr = [math.cos(r), math.sin(r), 0.0, 0.0]
+    qp = [math.cos(p), 0.0, math.sin(p), 0.0]
+    return _qmul(q, _qmul(qr, qp))
+
+
+def probe_table(
+    *,
+    x: float = 0.45,
+    y: float = 0.0,
+    orientation: Optional[list] = None,
+    open_width: float = 0.045,
+    descent_speed: float = 0.02,
+    z_floor: float = 0.008,
+    force_thresh: float = 6.0,
+    _context: Optional[Any] = None,
+) -> dict:
+    """Compliant downward probe to calibrate gripper leveling. Opens the fingers, descends
+    over a bare patch of table until the vertical force rises, and reports the contact height
+    and external wrench — Fz plus the horizontal torques Mx, My (in the EE frame). A level
+    finger pair loads evenly (Mx, My ≈ 0); a mechanical finger tilt shows up as a horizontal
+    torque. Iterate `orientation` (small roll/pitch) until the torque nulls → that's level.
+    Read-only characterisation: it does NOT grasp. Use a bare table spot (no block under it).
+    """
+    panda = _extract(_context, "panda")
+    gripper = _extract(_context, "gripper")
+    if panda is None or gripper is None:
+        time.sleep(0.05)
+        return {"_source": "mock", "note": "mock — no arm/gripper"}
+    import numpy as np
+    from panda_py import controllers
+    q = orientation or [0.0, 1.0, 0.0, 0.0]
+    move_to_pose([x, y, 0.16], orientation=q, _context=_context)
+    gripper.move(width=open_width, speed=0.1)
+    quat = panda.get_orientation()
+    q0 = np.array(panda.get_state().q)
+    ctrl = controllers.CartesianImpedance()
+    # Stiff in Z so it presses firmly into the table (clean contact signal), and ZERO nullspace
+    # stiffness so the arm can REconfigure its joints to reach low — the 1.0 nullspace pull back
+    # toward the high starting config was what stalled the descent ~4 mm above the table.
+    ctrl.set_impedance(np.diag([600.0, 600.0, 600.0, 40.0, 40.0, 40.0]))
+    ctrl.set_nullspace_stiffness(0.0)
+    panda.start_controller(ctrl)
+    dt = 0.01
+    z_start = float(panda.get_position()[2])
+    tz = z_start
+    fz0 = float(panda.get_state().O_F_ext_hat_K[2])
+    contact_z, wrench = None, None
+    try:
+        with panda.create_context(frequency=100, max_runtime=14.0) as cx:
+            while cx.ok():
+                tz = max(z_floor, tz - descent_speed * dt)
+                ctrl.set_control(np.array([x, y, tz]), quat, q0)
+                az = float(panda.get_position()[2])
+                fz = float(panda.get_state().O_F_ext_hat_K[2])
+                # Now that the arm actually REACHES the table and presses (nullspace freed, stiff
+                # Z), contact is clean: the actual z stalls on the surface while the commanded z
+                # keeps sinking below it, so (actual − commanded) opens up past the moving lag,
+                # AND the press force rises. Gate on real downward progress (10 mm) first.
+                if (z_start - az) > 0.010 and ((az - tz) > 0.010 or abs(fz - fz0) > force_thresh):
+                    contact_z = az
+                    wrench = [float(v) for v in panda.get_state().O_F_ext_hat_K]
+                    break
+                if tz <= z_floor + 1e-4:
+                    contact_z = az
+                    wrench = [float(v) for v in panda.get_state().O_F_ext_hat_K]
+                    break
+    finally:
+        panda.stop_controller()
+    if wrench is None:
+        wrench = [float(v) for v in panda.get_state().O_F_ext_hat_K]
+        contact_z = float(panda.get_position()[2])
+    p = panda.get_position()
+    move_to_pose([float(p[0]), float(p[1]), 0.20], orientation=q, _context=_context)
+    # `contacted`: did it actually PRESS the table (real contact) vs stall in mid-air? At hard
+    # corners the descent can't reach the surface and stalls with ~0 force — only a real press
+    # (|ΔFz| ≳ 1.5 N) certifies the contact_z is the true surface (lab notebook 2026-06-27).
+    contacted = bool(abs(wrench[2] - fz0) > 1.5)
+    return {"_source": "live", "contact_z": round(contact_z, 4), "contacted": contacted,
+            "Fz": round(wrench[2], 2), "dFz": round(wrench[2] - fz0, 2),
+            "Mx": round(wrench[3], 3), "My": round(wrench[4], 3), "Mz": round(wrench[5], 3),
+            "orientation": [round(float(v), 4) for v in q]}
+
+
+def _relevel_base(onto, canon_uv, canon_xy, _context, drift_tol=22.0):
+    """Re-home the base block to its canonical lying pose if it has drifted past drift_tol px
+    (measured at the overhead observe pose). A lying base placed back stays lying, so catching
+    drift EARLY — every cycle — is what stops it accumulating into a tip, the loop's #142
+    frontier; no lay-flat reorient needed. Returns a status string."""
+    import math
+    fb = _observe([onto], _context)
+    cand = [b for b in fb.get("blocks", []) if b["color"] == onto]
+    if not cand:
+        return "base_lost"
+    b = max(cand, key=lambda x: x["npix"])
+    if math.hypot(b["u"] - canon_uv[0], b["v"] - canon_uv[1]) <= drift_tol:
+        return "in_place"
+    g = vision_grasp(color=onto, target=[b["u"], b["v"]], _context=_context)
+    if not g.get("grasped"):
+        return "regrasp_failed"
+    place_block(target_xy=list(canon_xy), place_z=0.05, lift_z=0.30, _context=_context)
+    return "releveled"
+
+
 def practice(
     *,
     pick: str = "green",
@@ -1664,6 +1802,7 @@ def practice(
     onto_height: float = 0.024,
     reset_xy: Optional[list] = None,
     contact_force: float = 4.0,
+    relevel: bool = True,
     camera: Optional[str] = None,
     _context: Optional[Any] = None,
 ) -> dict:
@@ -1682,13 +1821,40 @@ def practice(
     rx = reset_xy or [0.45, 0.12]
     log = []
     fails = 0
+    # Establish the base's canonical lying pose: grasp it, record its world xy, place it back,
+    # and record its overhead pixel. Each cycle then re-homes the base to this pose if it has
+    # drifted, so drift can't accumulate into a tip (#142).
+    canon_uv = canon_xy = None
+    if relevel:
+        fb0 = _observe([onto], _context)
+        ob0 = [b for b in fb0.get("blocks", []) if b["color"] == onto]
+        if ob0:
+            bc0 = max(ob0, key=lambda x: x["npix"])
+            g0 = vision_grasp(color=onto, target=[bc0["u"], bc0["v"]], _context=_context)
+            if g0.get("grasped"):
+                p0 = panda.get_position()
+                canon_xy = [float(p0[0]), float(p0[1])]
+                place_block(target_xy=canon_xy, place_z=0.05, lift_z=0.30, _context=_context)
+                fb1 = _observe([onto], _context)
+                ob1 = [b for b in fb1.get("blocks", []) if b["color"] == onto]
+                if ob1:
+                    canon_uv = [max(ob1, key=lambda x: x["npix"])["u"],
+                                max(ob1, key=lambda x: x["npix"])["v"]]
     for t in range(trials):
-        # NB 2026-06-27: lowering this to 2.5 N to be gentle on the base BROKE contact
+        # Re-home the base to its canonical lying pose before stacking, so drift can't pile up
+        # into a tip (#142). No-op when it hasn't moved past the drift tolerance.
+        relevel_status = _relevel_base(onto, canon_uv, canon_xy, _context) \
+            if (relevel and canon_uv is not None) else None
+        # NB 2026-06-27: lowering contact_force to 2.5 N to be gentle on the base BROKE contact
         # detection (most stacks aborted no_contact, two false-tripped at 0.19 m) — 4 N is
-        # load-bearing for reliable slip-immune detection. Base drift/tip needs a different
-        # lever (re-canonicalise the base), not a softer press.
+        # load-bearing for reliable slip-immune detection; re-leveling (above) is the right
+        # lever for base drift, not a softer press.
+        # z_floor 0.045 (was 0.06): blue is held a touch high in the gripper, so onto a 29 mm
+        # base it first-contacts right AT the old 0.06 floor and often aborted no_contact a few
+        # mm above the block (Doug, watching: "slightly above the green block"). A lower floor
+        # lets the descent reach the base — the grasp's "go lower" lesson, applied to the stack.
         s = stack_on(pick=pick, onto=onto, onto_top=0.0, max_steps=16,
-                     contact_force=contact_force, _context=_context)
+                     contact_force=contact_force, z_floor=0.045, _context=_context)
         # verify from the wide overhead pose (robust re-location; #140).
         fb = _observe([pick, onto], _context)
         pk = [b for b in fb.get("blocks", []) if b["color"] == pick]
@@ -1706,7 +1872,8 @@ def practice(
         verified = bool(s.get("stacked")) and pc is not None and (oc is None or
                    ((pc["u"] - oc["u"]) ** 2 + (pc["v"] - oc["v"]) ** 2) < 60 ** 2)
         trial = {"trial": t, "attempt": s.get("stacked"), "stage": s.get("stage"),
-                 "contact_z": s.get("contact_z"), "verified": verified, "reset": None}
+                 "contact_z": s.get("contact_z"), "verified": verified, "reset": None,
+                 "relevel": relevel_status}
         # reset: lift pick off (elevated by onto_height when stacked) and set it aside; the
         # release height tracks the grasp height (an elevated grasp holds the block higher).
         if pc is not None:
@@ -2056,6 +2223,24 @@ PRIMITIVE_SPECS = [
         },
     },
     {
+        "name": "probe_table",
+        "function_spec": "hebbot.skills.primitives:probe_table",
+        "params_schema": {
+            "type": "object",
+            "properties": {
+                "x": {"type": "number", "default": 0.45},
+                "y": {"type": "number", "default": 0.0},
+                "orientation": {"type": "array", "items": {"type": "number"},
+                                "minItems": 4, "maxItems": 4,
+                                "description": "grasp quaternion [w,x,y,z] to test (default gripper-down)"},
+                "open_width": {"type": "number", "minimum": 0.0, "maximum": 0.08, "default": 0.045},
+                "z_floor": {"type": "number", "minimum": 0.0, "maximum": 0.1, "default": 0.012},
+                "force_thresh": {"type": "number", "minimum": 1.0, "maximum": 20.0, "default": 5.0},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "practice",
         "function_spec": "hebbot.skills.primitives:practice",
         "params_schema": {
@@ -2070,6 +2255,8 @@ PRIMITIVE_SPECS = [
                              "description": "[x,y] where the pick block is set aside between trials"},
                 "contact_force": {"type": "number", "minimum": 1.0, "maximum": 10.0, "default": 4.0,
                                   "description": "stack contact force (N); <4 breaks slip-immune contact detection"},
+                "relevel": {"type": "boolean", "default": True,
+                            "description": "re-home the base to its canonical lying pose each cycle (anti-drift/tip)"},
                 "camera": {"type": "string"},
             },
             "additionalProperties": False,
