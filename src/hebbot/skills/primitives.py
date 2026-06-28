@@ -2174,6 +2174,94 @@ def practice(
             "code_version": rec["code"]}
 
 
+def _declutter(color, target_uv, _context, clutter_px=52.0, distance=0.05):
+    """The grasp_in_clutter de-clutter step: if a different block sits within `clutter_px` of the
+    target, shove the target perpendicular to that neighbour (approaching from the clear +v side)
+    to open grasp clearance. Returns the target's pixel after the shove (or the original)."""
+    import math
+    fb = _observe([color], _context)
+    same = [b for b in fb.get("blocks", []) if b["npix"] >= 400]
+    if not same:
+        return target_uv
+    tgt = min(same, key=lambda b: (b["u"] - target_uv[0]) ** 2 + (b["v"] - target_uv[1]) ** 2)
+    others = [b for b in find_blocks(_context=_context).get("blocks", []) if b["npix"] >= 400
+              and abs(b["u"] - tgt["u"]) + abs(b["v"] - tgt["v"]) > 4]
+    if not others:
+        return [tgt["u"], tgt["v"]]
+    nb = min(others, key=lambda o: (o["u"] - tgt["u"]) ** 2 + (o["v"] - tgt["v"]) ** 2)
+    if math.hypot(nb["u"] - tgt["u"], nb["v"] - tgt["v"]) >= clutter_px:
+        return [tgt["u"], tgt["v"]]
+    ax, ay = nb["u"] - tgt["u"], nb["v"] - tgt["v"]       # toward the neighbour
+    perp = [-ay, ax]
+    if perp[1] < 0:                                        # prefer +v: clear approach from above
+        perp = [-perp[0], -perp[1]]
+    shove(color=color, target=[tgt["u"], tgt["v"]], push_uv=perp, distance=distance, _context=_context)
+    cand = [b for b in _observe([color], _context).get("blocks", []) if b["npix"] >= 400]
+    if cand:
+        moved = min(cand, key=lambda b: (b["u"] - tgt["u"] - perp[0]) ** 2 + (b["v"] - tgt["v"] - perp[1]) ** 2)
+        return [moved["u"], moved["v"]]
+    return [tgt["u"], tgt["v"]]
+
+
+def stack_all(
+    *,
+    order: Optional[list] = None,
+    block_h: float = 0.028,
+    declutter: bool = True,
+    _context: Optional[Any] = None,
+) -> dict:
+    """Goal-directed PLAN: stack the given blocks into a tower, base-first (see docs/planning.md).
+
+    v1 composes the validated pieces — perceive → de-clutter (`shove`) → `stack_on` with a
+    growing `onto_top` → predict-then-look verify — over distinct calibrated colours (one
+    instance each). Runs failure-driven: remaining gaps (same-colour instances, reorientation,
+    side-view perception, tower stability) surface as failed steps in the returned log, exactly
+    the pattern that grows the next round of primitives.
+    """
+    panda = _extract(_context, "panda")
+    cameras = _extract(_context, "cameras") or {}
+    if panda is None or not cameras:
+        time.sleep(0.05)
+        return {"_source": "mock", "tower_height": 0, "log": []}
+    order = order or ["red", "blue", "green"]
+    base = order[0]
+    log = [{"step": "base", "color": base}]
+    height = 1                                            # tower height in blocks (base = 1)
+    for pick in order[1:]:
+        if declutter:
+            fb = _observe([pick], _context)
+            pk = [b for b in fb.get("blocks", []) if b["npix"] >= 400]
+            if pk:
+                p0 = max(pk, key=lambda b: b["npix"])
+                _declutter(pick, [p0["u"], p0["v"]], _context)
+        # onto_top = elevation of the surface the onto SITS ON (0 for the base cube on the table,
+        # block_h once it's on the 1st block, ...). NOT the onto's own top — that off-by-one put a
+        # 28 mm phantom elevation into the parallax and mis-centred the pick off the base. z_floor
+        # rises with the tower so a taller stack's higher contact is still reached.
+        ot = (height - 1) * block_h
+        # z_floor sits just below the onto's TOP SURFACE (ot + block_h): the low body-grip means
+        # the pick's bottom hangs only ~12 mm under the fingertips, so contact is ~12 mm above the
+        # onto's top — the old 0.06 floor aborted 4 mm short of it. This floor reaches the contact
+        # yet still stops on the onto's top on a genuine miss.
+        s = stack_on(pick=pick, onto=base, onto_top=ot, z_floor=ot + block_h + 0.015,
+                     max_steps=16, _context=_context)
+        fb2 = _observe([pick, base], _context)
+        pk = [b for b in fb2.get("blocks", []) if b["color"] == pick and b["npix"] >= 400]
+        on = [b for b in fb2.get("blocks", []) if b["color"] == base and b["npix"] >= 400]
+        pc = max(pk, key=lambda b: b["npix"]) if pk else None
+        oc = max(on, key=lambda b: b["npix"]) if on else None
+        verified = bool(s.get("stacked")) and pc is not None and (oc is None or
+                   ((pc["u"] - oc["u"]) ** 2 + (pc["v"] - oc["v"]) ** 2) < 60 ** 2)
+        log.append({"step": "stack", "pick": pick, "onto_top": round(height * block_h, 3),
+                    "stacked": s.get("stacked"), "stage": s.get("stage"),
+                    "contact_z": s.get("contact_z"), "verified": verified})
+        if verified:
+            height += 1
+        else:
+            break                                         # can't build higher on a failed layer
+    return {"_source": "live", "tower_height": height, "order": order, "log": log}
+
+
 # ---------------------------------------------------------------------------
 # Bulk registration
 # ---------------------------------------------------------------------------
@@ -2580,6 +2668,22 @@ PRIMITIVE_SPECS = [
                 "relevel": {"type": "boolean", "default": True,
                             "description": "re-home the base to its canonical lying pose each cycle (anti-drift/tip)"},
                 "camera": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "stack_all",
+        "function_spec": "hebbot.skills.primitives:stack_all",
+        "params_schema": {
+            "type": "object",
+            "properties": {
+                "order": {"type": "array", "items": {"type": "string", "enum": ["blue", "green", "red"]},
+                          "description": "colours to stack, base first (e.g. ['red','blue','green']); distinct colours, one instance each"},
+                "block_h": {"type": "number", "minimum": 0.01, "maximum": 0.06, "default": 0.028,
+                            "description": "nominal block height (m) — sets the growing onto_top per layer"},
+                "declutter": {"type": "boolean", "default": True,
+                              "description": "shove a touching neighbour off each pick before grasping"},
             },
             "additionalProperties": False,
         },
