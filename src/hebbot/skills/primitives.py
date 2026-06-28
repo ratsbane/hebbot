@@ -1908,6 +1908,63 @@ def scene_show(*, _store: Optional[Any] = None, _context: Optional[Any] = None) 
     return {"_source": "live", **_load_scene(_scene_path(_store))}
 
 
+# ---------------------------------------------------------------------------
+# Self-improvement metrics — the rising success-rate curve (ENPIRE-style pass@k evidence)
+# ---------------------------------------------------------------------------
+# Every `practice` run appends a record to data_dir/practice_metrics.jsonl: success rate,
+# failure breakdown, and a content hash of THIS primitives.py (the policy version that ran).
+# Plotted over runs, that's the self-improvement curve — and each step is tied to the exact
+# policy code that produced it, the longitudinal evidence ENPIRE reports as pass@k.
+
+def _code_version():
+    """Short content hash of the running primitives.py = the policy version (more accurate than
+    git HEAD, which lags on the deployed copy). Ties each metrics row to the code that ran."""
+    try:
+        import hashlib, os
+        return hashlib.sha1(open(os.path.abspath(__file__), "rb").read()).hexdigest()[:10]
+    except Exception:
+        return None
+
+
+def _metrics_path(_store):
+    from pathlib import Path
+    if _store is not None and getattr(_store, "db_path", None):
+        return str(Path(_store.db_path).parent / "practice_metrics.jsonl")
+    return "/tmp/hebbot_practice_metrics.jsonl"
+
+
+def _append_metrics(_store, rec):
+    import json
+    try:
+        with open(_metrics_path(_store), "a") as f:
+            f.write(json.dumps(rec) + "\n")
+        return True
+    except Exception:
+        return False
+
+
+def practice_metrics(*, _store: Optional[Any] = None, _context: Optional[Any] = None) -> dict:
+    """Read the accumulated self-improvement curve: every `practice` run's success rate over
+    time, each tagged with the policy-code version that produced it. The trend IS the evidence
+    that the loop measurably improves (the ENPIRE-style pass@k curve)."""
+    import json, os
+    path = _metrics_path(_store)
+    runs = []
+    if os.path.exists(path):
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        runs.append(json.loads(line))
+                    except Exception:
+                        pass
+    return {"_source": "live", "n_runs": len(runs),
+            "trend": [r.get("success_rate") for r in runs],
+            "versions": [r.get("code") for r in runs],
+            "runs": runs[-20:]}
+
+
 def practice(
     *,
     pick: str = "green",
@@ -1918,6 +1975,7 @@ def practice(
     contact_force: float = 4.0,
     relevel: bool = True,
     camera: Optional[str] = None,
+    _store: Optional[Any] = None,
     _context: Optional[Any] = None,
 ) -> dict:
     """The self-improvement loop: repeatedly {attempt → verify → reset}, logging each
@@ -2007,9 +2065,25 @@ def practice(
         if fails >= 2:
             trial["stopped"] = "two consecutive failures"
             break
-    return {"_source": "live", "trials": log, "n": len(log),
-            "verified_count": sum(1 for l in log if l.get("verified")),
-            "reset_failures": sum(1 for l in log if l.get("reset") == "grasp_failed")}
+    # Self-improvement metric: log this run's success rate + failure breakdown, tagged with the
+    # policy-code version, so the curve over runs is the ENPIRE-style pass@k evidence.
+    n = len(log)
+    verified = sum(1 for l in log if l.get("verified"))
+    reset_fail = sum(1 for l in log if l.get("reset") == "grasp_failed")
+    stages = {}
+    for l in log:
+        s = l.get("stage")
+        if s:
+            stages[s] = stages.get(s, 0) + 1
+    rec = {"ts": time.time(), "pick": pick, "onto": onto, "requested": trials, "ran": n,
+           "verified": verified, "success_rate": round(verified / n, 3) if n else None,
+           "reset_failures": reset_fail, "fail_stages": stages,
+           "relevels": sum(1 for l in log if l.get("relevel") == "releveled"),
+           "stopped_early": any(l.get("stopped") for l in log), "code": _code_version()}
+    _append_metrics(_store, rec)
+    return {"_source": "live", "trials": log, "n": n, "verified_count": verified,
+            "success_rate": rec["success_rate"], "reset_failures": reset_fail,
+            "code_version": rec["code"]}
 
 
 # ---------------------------------------------------------------------------
@@ -2373,6 +2447,11 @@ PRIMITIVE_SPECS = [
     {
         "name": "scene_show",
         "function_spec": "hebbot.skills.primitives:scene_show",
+        "params_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "practice_metrics",
+        "function_spec": "hebbot.skills.primitives:practice_metrics",
         "params_schema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
