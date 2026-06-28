@@ -721,6 +721,7 @@ def grasp_at(
     force: float = _DEFAULT_GRIP_FORCE,
     descent_speed: float = 0.04,
     stall_guard: float = 0.068,
+    open_width: Optional[float] = None,
     _context: Optional[Any] = None,
 ) -> dict:
     """Compliant straight-down descent from the current (x, y) to grasp_z, then close.
@@ -745,10 +746,17 @@ def grasp_at(
     import numpy as np
     from panda_py import controllers
 
-    gripper.move(width=_GRIPPER_MAX_WIDTH, speed=0.1)  # open so the fingers straddle
+    # Open so the fingers straddle. A narrower pre-open (just wider than the object) makes
+    # the close a short, symmetric squeeze — a long light block can't be cammed/squirted out
+    # the way a full-80mm asymmetric close does (the elongated-block shove, lab 2026-06-27).
+    ow = _GRIPPER_MAX_WIDTH if open_width is None else float(np.clip(open_width, 0.02, _GRIPPER_MAX_WIDTH))
+    gripper.move(width=ow, speed=0.1)
     pos0 = panda.get_position()
     X, Y = float(pos0[0]), float(pos0[1])
-    quat = panda.get_orientation()      # hold current (gripper-down) orientation
+    # Hold the current orientation, with the calibrated finger-leveling offset applied (in the
+    # gripper's local frame, so it's correct at any yaw) — both fingertips meet the block level
+    # instead of one tapping first and nudging/stalling it high (Doug, 2026-06-27).
+    quat = _level_quat(panda.get_orientation())
     q0 = np.array(panda.get_state().q)
 
     ctrl = controllers.CartesianImpedance()
@@ -954,6 +962,84 @@ def _nearest_instance(bgr, color, track, min_px=80):
     return best
 
 
+# EE z at which the open fingertips touch the table (calibrated from the blue-cube grasp,
+# 2026-06-27: it bottomed out + gripped at actual_z 0.047). Lets us turn a depth-measured
+# block height (above the table) into a grasp_z: grasp_z = _TABLE_EE_Z + (fingertip height).
+_TABLE_EE_Z = 0.047
+_CAM_FX = 394.484   # wrist intrinsics fx (px) — metric extent = px * depth / fx
+
+
+def _perceive_pose_3d(cam, color, track, _context=None, min_px=120):
+    """Depth-derived 3-D pose of the tracked block — the geometry-true grasp perception.
+
+    The colour silhouette is a poor grasp cue: its principal axis is noisy (a small,
+    lit, partly-shadowed blob) and for a *standing* block its centroid is pulled toward
+    the lit side face. Depth is lighting-immune, so we segment by colour to find the
+    instance but read its pose from the depth points: isolate the TOP face (highest
+    points), take its centroid (the real grip target), its principal axis (the stable
+    long-edge direction → fingers go across the short axis), its metric short/long
+    extent, and its height above the table (→ grasp_z, and standing-vs-lying).
+
+    Returns {u, v (top-face centroid px), cu, cv (colour centroid px), ang (deg),
+    width_m, length_m, height_m, coverage, block_depth, table_depth} or None.
+    """
+    import numpy as np
+    cap = cam.capture(with_depth=True)
+    bgr, depth = cap["color"], cap.get("depth")
+    if depth is None:
+        return None
+    ds = cap.get("depth_scale") or 1e-4
+    rgb = bgr[:, :, ::-1].astype(int)
+    R, G, B = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
+    lab = _label_cc(_color_mask(R, G, B, color))
+    best, bestd = None, 1e18
+    for Ll in np.unique(lab):
+        if Ll == 0:
+            continue
+        ys, xs = np.where(lab == Ll)
+        if len(xs) < min_px:
+            continue
+        cu, cv = float(xs.mean()), float(ys.mean())
+        d = (cu - track[0]) ** 2 + (cv - track[1]) ** 2
+        if d < bestd:
+            bestd, best = d, (xs, ys, cu, cv)
+    if best is None:
+        return None
+    xs, ys, cu, cv = best
+    dm = depth.astype(np.float32) * ds
+    dvals = dm[ys, xs]
+    ok = dvals > 0.05
+    cov = float(ok.mean())
+    if int(ok.sum()) < 30:
+        return None
+    gx, gy, gd = xs[ok].astype(float), ys[ok].astype(float), dvals[ok]
+    # table depth: a ring of non-this-colour pixels around the instance
+    yy, xx = np.mgrid[0:dm.shape[0], 0:dm.shape[1]]
+    r = np.hypot(xx - cu, yy - cv)
+    rad = float(np.sqrt(len(xs) / np.pi))
+    ring = (r > rad * 1.6) & (r < rad * 3.4) & (lab == 0) & (dm > 0.05)
+    if int(ring.sum()) < 50:
+        ring = (r > rad * 1.6) & (lab == 0) & (dm > 0.05)
+    table_depth = float(np.median(dm[ring])) if int(ring.sum()) else float(np.percentile(gd, 90))
+    heights = table_depth - gd                      # m above the table (top is closest → tallest)
+    Hmax = float(np.percentile(heights, 92))
+    height_m = max(0.0, Hmax)
+    topf = heights >= (Hmax - 0.012)                # the top plate (within 12 mm of the top)
+    if int(topf.sum()) < 12:
+        topf = heights >= (Hmax - 0.020)
+    tx, ty = gx[topf], gy[topf]
+    u, v = float(tx.mean()), float(ty.mean())
+    block_depth = float(np.median(gd[topf])) if int(topf.sum()) else float(np.median(gd))
+    P = np.stack([tx - u, ty - v])
+    evals, evecs = np.linalg.eigh(P @ P.T / max(P.shape[1], 1))
+    ang = float(np.degrees(np.arctan2(evecs[1, -1], evecs[0, -1])))
+    Lp, Wp = 4 * np.sqrt(max(evals[-1], 1e-9)), 4 * np.sqrt(max(evals[0], 1e-9))
+    return {"u": u, "v": v, "cu": cu, "cv": cv, "ang": ang,
+            "length_m": Lp * block_depth / _CAM_FX, "width_m": Wp * block_depth / _CAM_FX,
+            "height_m": height_m, "coverage": cov,
+            "block_depth": block_depth, "table_depth": table_depth}
+
+
 def vision_grasp(
     *,
     color: str = "blue",
@@ -968,6 +1054,8 @@ def vision_grasp(
     z_step: float = 0.045,
     pick_top: float = 0.0,
     target: Optional[list] = None,
+    max_retry: int = 2,
+    geometry: bool = True,
     _context: Optional[Any] = None,
 ) -> dict:
     """Locate a block from the wrist camera and grasp it — no hand-eye calibration.
@@ -1011,93 +1099,184 @@ def vision_grasp(
     z = float(np.clip(acquire_z, approach_z, 0.45))
     move_to_pose([float(pos[0]), float(pos[1]), z], _context=_context)
 
+    import math
     history: list[dict] = []
     located = False
     track = list(target) if target else None   # lock onto one instance when given
-    for step in range(max_steps):
-        frame = cam.capture(with_depth=False)["color"]
-        seg = _nearest_instance(frame, color, track) if track else _segment(frame, color)
-        if seg is None:
-            return {"_source": "live", "located": located, "grasped": False,
-                    "note": "block not found in frame", "servo_steps": step,
-                    "history": history}
-        u, v, npix = seg
-        if track is not None:
-            track = [u, v]                     # follow the instance as the gripper moves
-        # pick_top elevates an already-stacked cube, so it sits at camera distance
-        # d = z − pick_top; evaluate the grasp-pixel/Jacobian/size-gate there (parallax,
-        # same as stack_on's onto_top). 0 for a cube on the table.
-        d = z - pick_top
-        # Plausibility gate (merged-colour path only): a compact cube's area scales as
-        # 1/d²; a blob far outside that band is glare/clutter. We DON'T apply it when
-        # tracking a specific instance — `_nearest_instance` already locked onto a real
-        # connected component, and a rect block legitimately exceeds the cube area
-        # (the gate wrongly rejected a lying rect, lab notebook #139).
-        if track is None:
-            expected = 5600.0 * (_VG_APPROACH_Z / d) ** 2
-            if not (0.2 * expected <= npix <= 4.0 * expected):
-                return {"_source": "live", "located": False, "grasped": False,
-                        "note": f"implausible blob npix={npix} (expected ~{expected:.0f} "
-                                f"at d={d:.2f}) — glare/clutter, not grasping",
-                        "servo_steps": step, "history": history}
-        located = True
-        tu, tv = _vg_grasp_pixel(d)
-        du, dv = tu - u, tv - v
-        err = float(np.hypot(du, dv))
-        at_bottom = z <= approach_z + 1e-3
-        history.append({"step": step, "z": round(z, 3), "u": round(u, 1),
-                        "v": round(v, 1), "pixel_err": round(err, 1), "npix": npix})
-        if at_bottom and err <= pixel_tol:
-            break
-        jinv = _vg_jinv(d)
-        dex = jinv[0][0] * du + jinv[0][1] * dv
-        dey = jinv[1][0] * du + jinv[1][1] * dv
-        # Clamp the step. When tracking ONE instance, keep steps small so the block
-        # can't jump far enough in the image for the tracker to re-lock onto a different
-        # same-colour region (lab #139: a big first step lost the block to a phantom).
-        clamp = 0.06 if track is not None else 0.15
-        dex = float(np.clip(dex, -clamp, clamp))
-        dey = float(np.clip(dey, -clamp, clamp))
-        # Drop a notch only once we're well-centred at this altitude.
-        if err <= descend_tol and not at_bottom:
-            z = max(approach_z, z - z_step)
-        p = panda.get_position()
-        # Final clamp into the reachable top-down workspace box.
-        tx = float(np.clip(float(p[0]) + dex, 0.30, 0.60))
-        ty = float(np.clip(float(p[1]) + dey, -0.28, 0.28))
-        move_to_pose([tx, ty, z], _context=_context)
 
-    # Shape-aware grip: when tracking an instance, re-perceive it and — if it's a rect
-    # block — yaw the fingers across its narrow (short) axis for a firm grip, instead of
-    # the fixed gripper-down yaw that assumes a cube (lab notebook #139). Cubes grip as-is.
-    grip_yaw = None
-    if track is not None:
-        import math
-        fb = find_blocks(colors=[color], _context=_context)
-        cand = [b for b in fb.get("blocks", [])]
-        if cand:
-            inst = min(cand, key=lambda b: (b["u"] - track[0]) ** 2 + (b["v"] - track[1]) ** 2)
-            if inst["aspect"] >= 1.3:   # yaw for any non-square block; a true cube (~1.1) grips as-is
-                phi = math.atan2(-math.cos(math.radians(inst["ang"])),
-                                 -math.sin(math.radians(inst["ang"])))
-                # normalise to ±90°: a parallel gripper is symmetric under a 180° yaw, so
-                # don't twist the wrist toward a joint limit for an equivalent grip.
-                phi = ((phi + math.pi / 2) % math.pi) - math.pi / 2
+    def _coarse_servo():
+        """Colour-centroid image-Jacobian servo from acquire_z down to approach_z over the
+        tracked instance — a coarse centre. Returns the last (u, v) pixel, or None if lost."""
+        nonlocal track, located
+        z = float(np.clip(acquire_z, approach_z, 0.45))
+        p0 = panda.get_position()
+        move_to_pose([float(p0[0]), float(p0[1]), z], _context=_context)
+        last = None
+        for step in range(max_steps):
+            frame = cam.capture(with_depth=False)["color"]
+            seg = _nearest_instance(frame, color, track) if track else _segment(frame, color)
+            if seg is None:
+                return None
+            u, v, npix = seg
+            if track is not None:
+                track = [u, v]
+            d = z - pick_top                   # parallax: a point pick_top above the table
+            if track is None:                  # plausibility gate (merged-colour path only)
+                expected = 5600.0 * (_VG_APPROACH_Z / d) ** 2
+                if not (0.2 * expected <= npix <= 4.0 * expected):
+                    return None
+            located = True
+            tu, tv = _vg_grasp_pixel(d)
+            du, dv = tu - u, tv - v
+            err = float(np.hypot(du, dv))
+            at_bottom = z <= approach_z + 1e-3
+            history.append({"step": step, "z": round(z, 3), "u": round(u, 1),
+                            "v": round(v, 1), "pixel_err": round(err, 1), "npix": npix})
+            last = (u, v)
+            if at_bottom and err <= pixel_tol:
+                break
+            jinv = _vg_jinv(d)
+            dex = jinv[0][0] * du + jinv[0][1] * dv
+            dey = jinv[1][0] * du + jinv[1][1] * dv
+            clamp = 0.06 if track is not None else 0.15
+            dex = float(np.clip(dex, -clamp, clamp))
+            dey = float(np.clip(dey, -clamp, clamp))
+            if err <= descend_tol and not at_bottom:
+                z = max(approach_z, z - z_step)
+            p = panda.get_position()
+            tx = float(np.clip(float(p[0]) + dex, 0.30, 0.60))
+            ty = float(np.clip(float(p[1]) + dey, -0.28, 0.28))
+            move_to_pose([tx, ty, z], _context=_context)
+        return last
+
+    def _recenter(u, v, tu, tv, d):
+        """Translate (gripper-down → image Jacobian valid) so the depth top-face centroid
+        (u, v) lands on the target grasp-pixel (tu, tv). Run before yawing. `d` is the top
+        face's camera distance so the Jacobian gain matches its height (parallax)."""
+        nonlocal track
+        jinv = _vg_jinv(d)
+        du, dv = tu - u, tv - v
+        dex = float(np.clip(jinv[0][0] * du + jinv[0][1] * dv, -0.05, 0.05))
+        dey = float(np.clip(jinv[1][0] * du + jinv[1][1] * dv, -0.05, 0.05))
+        p = panda.get_position()
+        # Hold the perceive height (pz, ~0.30) — NOT approach_z. Dropping to 0.20 here makes
+        # the re-perceive read close-range depth, which is unreliable (it inflated a cube to
+        # 60 mm and broke the grasp). pz resolves from the enclosing scope at call time.
+        move_to_pose([float(p[0]) + dex, float(p[1]) + dey, pz], _context=_context)
+        track = [u, v]
+
+    def _tilt_classify():
+        """Piece 3 — 'back off and view from another angle': a 35° side glance that resolves
+        the standing-vs-lying ambiguity a single top-down view cannot (it fooled me 3× in one
+        session). Returns 'standing'|'lying'|None and leaves the wrist back over the block."""
+        p = panda.get_position(); bx, by, bz = float(p[0]), float(p[1]), float(p[2])
+        cls = None
+        try:
+            move_to_pose([bx + 0.16, by, 0.28], orientation=[0.0, 0.954, 0.0, -0.301], _context=_context)
+            rgb = cam.capture(with_depth=False)["color"][:, :, ::-1].astype(int)
+            m = _color_mask(rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2], color)
+            ys, xs = np.where(m)
+            if len(xs) > 60:                   # side silhouette: standing → taller than wide
+                vh, uw = (ys.max() - ys.min()), (xs.max() - xs.min())
+                cls = "standing" if vh >= 1.15 * uw else "lying"
+        except Exception:
+            cls = None
+        move_to_pose([bx, by, bz], _context=_context)   # back over the block, same height
+        return cls
+
+    result = None
+    lower_bias = 0.0          # each missed grasp biases the next one lower (Doug: a miss is
+    for attempt in range(max_retry + 1):   # usually 'gripped too high' → open + go down + retry)
+        if _coarse_servo() is None:
+            result = {"_source": "live", "located": located, "grasped": False,
+                      "note": "block not found in frame", "servo_steps": len(history),
+                      "history": history, "attempt": attempt}
+            break
+
+        grip_yaw, geom = None, None
+        g_z, grip_w, s_guard = grasp_z + pick_top, width, 0.068 + pick_top
+        pz = approach_z
+        if geometry and track is not None:
+            # Perceive from 0.30 m, not the 0.20 m servo floor: close-range RealSense depth
+            # drops out below ~0.2 m, and metric pose (axis/width/height) is z-invariant.
+            pz = max(approach_z, 0.30)
+            p = panda.get_position()
+            move_to_pose([float(p[0]), float(p[1]), pz], _context=_context)
+            geom = _perceive_pose_3d(cam, color, track, _context=_context)
+        if geom is not None:
+            H = geom["height_m"]
+            # Re-centre on the TRUE top-face centroid. The grasp-pixel is parallax-corrected
+            # to the top face's height (d = pz − H), like an elevated/stacked pick.
+            d_face = max(0.05, pz - H)
+            tu, tv = _vg_grasp_pixel(d_face)
+            if float(np.hypot(geom["u"] - tu, geom["v"] - tv)) > pixel_tol:
+                _recenter(geom["u"], geom["v"], tu, tv, d_face)
+                geom = _perceive_pose_3d(cam, color, track, _context=_context) or geom
+                H = geom["height_m"]
+
+            # Piece 3: a tilt-glance only when the top-down height is ambiguous / sparse —
+            # it corrects H so a standing block isn't mistaken for a low one (and vice versa).
+            if 0.034 <= H <= 0.052 or geom["coverage"] < 0.40:
+                cls = _tilt_classify()
+                geom = _perceive_pose_3d(cam, color, track, _context=_context) or geom
+                H = geom["height_m"]
+                if cls == "standing" and H < 0.045:
+                    H = 0.058
+                elif cls == "lying" and H > 0.035:
+                    H = 0.029
+
+            grip_w = float(np.clip(geom["width_m"] - 0.004, 0.010, 0.05))
+            open_w = float(np.clip(grip_w + 0.028, 0.045, _GRIPPER_MAX_WIDTH))
+            # Grip height. A block that can reach the table is gripped at TABLE level — the
+            # proven cube/rect grip: descend until the fingertips stall on the table beside it
+            # (mid-height gripping fails — Doug saw it grip 'a little too high'). Only a clearly
+            # tall standing block (can't reach the table) is gripped low on its body. Retries
+            # bias lower, since a miss is usually 'too high'.
+            if H >= 0.050:
+                g_z = _TABLE_EE_Z + float(np.clip(0.40 * H, 0.010, 0.040)) - lower_bias
+                s_guard = g_z + 0.035
+            else:
+                g_z = grasp_z - lower_bias       # ~0.038 → descend & stall at the table
+                s_guard = 0.072
+            g_z = max(0.026, g_z)
+
+            # Piece 2: fingers parallel to the true long edges (across the short axis), using
+            # the STABLE depth principal axis. Skip the twist for near-square tops (cubes).
+            if geom["length_m"] / max(geom["width_m"], 1e-3) >= 1.25:
+                phi = math.atan2(-math.cos(math.radians(geom["ang"])),
+                                 -math.sin(math.radians(geom["ang"])))
+                phi = ((phi + math.pi / 2) % math.pi) - math.pi / 2   # ±90°: gripper is symmetric
                 q = _qmul([math.cos(phi / 2), 0, 0, math.sin(phi / 2)], [0.0, 1.0, 0.0, 0.0])
                 p = panda.get_position()
                 try:
-                    move_to_pose([float(p[0]), float(p[1]), approach_z], orientation=q, _context=_context)
+                    move_to_pose([float(p[0]), float(p[1]), pz], orientation=q, _context=_context)
                     grip_yaw = round(math.degrees(phi))
                 except Exception:
-                    grip_yaw = None   # unreachable yaw → grip gripper-down instead of crashing
-    # Raise the grasp + stall-guard heights by pick_top so an elevated cube is grasped
-    # at its real height (and grasp_at doesn't refuse it as a stalled-high descent).
-    g = grasp_at(grasp_z=grasp_z + pick_top, width=width,
-                 stall_guard=0.068 + pick_top, _context=_context)
-    return {"_source": "live", "located": located, "servo_steps": len(history),
-            "final_pixel_err": history[-1]["pixel_err"] if history else None,
-            "grip_yaw_deg": grip_yaw, "history": history, "grasped": g.get("grasped"),
-            "actual_z": g.get("actual_z"), "actual_width": g.get("actual_width")}
+                    grip_yaw = None
+
+        g = grasp_at(grasp_z=g_z, width=grip_w, stall_guard=s_guard,
+                     open_width=(open_w if geom is not None else None), _context=_context)
+        result = {"_source": "live", "located": located, "servo_steps": len(history),
+                  "final_pixel_err": history[-1]["pixel_err"] if history else None,
+                  "grip_yaw_deg": grip_yaw, "attempt": attempt,
+                  "geom": ({k: round(float(val), 4) for k, val in geom.items()} if geom else None),
+                  "grip_z": round(g_z, 4), "grip_width": round(grip_w, 4),
+                  "history": history, "grasped": g.get("grasped"),
+                  "actual_z": g.get("actual_z"), "actual_width": g.get("actual_width")}
+
+        # Piece 4: verify + retry. A failed grasp usually nudged the block, so lift, re-acquire
+        # near the last sighting, and try again.
+        if g.get("grasped"):
+            break
+        if attempt < max_retry:
+            lower_bias += 0.012          # open + go a notch lower on the next try
+            p = panda.get_position()
+            move_to_pose([float(p[0]), float(p[1]), acquire_z], _context=_context)
+            if track is not None:
+                seg = _nearest_instance(cam.capture(with_depth=False)["color"], color, track)
+                if seg is not None:
+                    track = [seg[0], seg[1]]
+    return result
 
 
 def place_block(
@@ -1480,6 +1659,312 @@ def stand_on_end(
             "grip_w": round(w, 4), "yaw_deg": round(math.degrees(phi))}
 
 
+# Gripper-leveling offset (rad): small wrist roll/pitch added to every grasp orientation so
+# the FINGERS' closing plane is level, not just the flange. The flange comes down vertical
+# (~0.1°), but the fingers sit with a tiny mechanical tilt, so one fingertip lands first —
+# nudging the block and stalling the grasp a few mm high (Doug, watching, 2026-06-27).
+# Calibrated 2026-06-27 by lowering the open fingers to the table under teleop and leveling by
+# eye (the force estimate was too noisy at fingertip contact): the left/+Y tip sat ~3 mm low,
+# nulled by a −1° roll about the gripper's local x-axis (both tips then met the table together).
+_GRIP_LEVEL_ROLL = -0.01745   # rad (−1°)
+_GRIP_LEVEL_PITCH = 0.0
+
+# Tabletop surface in EE-z (where the open fingertips press the flat table), mapped with
+# probe_table 2026-06-27. The tabletop is PHYSICALLY FLAT (Doug), so the ~±1.4 mm variation
+# across the workspace is the robot's forward-kinematics z-error — this plane (origin 0.46,0)
+# encodes "what EE-z really puts the fingertip on the surface here", so referencing it per-xy
+# compensates the FK error for grasp/place floors. Fit from 5 pressed points (|ΔFz| > 1.5 N).
+_TABLE_PLANE = (0.0165, 0.01313, 0.00885, 0.46, 0.0)   # z0, dz/dx, dz/dy, x0, y0
+
+
+def table_z(x, y):
+    """FK-compensated tabletop EE-z at world (x, y) — the height the open fingertips touch the
+    flat table, accounting for the robot's position-dependent kinematic error."""
+    z0, gx, gy, x0, y0 = _TABLE_PLANE
+    return z0 + gx * (float(x) - x0) + gy * (float(y) - y0)
+
+
+def _level_quat(q):
+    """Apply the calibrated gripper-leveling roll/pitch offset to a grasp orientation `q`
+    ([w,x,y,z]). Rotates about the gripper's own x (roll) then y (pitch) axes."""
+    import math
+    if _GRIP_LEVEL_ROLL == 0.0 and _GRIP_LEVEL_PITCH == 0.0:
+        return q
+    r, p = _GRIP_LEVEL_ROLL / 2.0, _GRIP_LEVEL_PITCH / 2.0
+    qr = [math.cos(r), math.sin(r), 0.0, 0.0]
+    qp = [math.cos(p), 0.0, math.sin(p), 0.0]
+    return _qmul(q, _qmul(qr, qp))
+
+
+def probe_table(
+    *,
+    x: float = 0.45,
+    y: float = 0.0,
+    orientation: Optional[list] = None,
+    open_width: float = 0.045,
+    descent_speed: float = 0.02,
+    z_floor: float = 0.008,
+    force_thresh: float = 6.0,
+    _context: Optional[Any] = None,
+) -> dict:
+    """Compliant downward probe to calibrate gripper leveling. Opens the fingers, descends
+    over a bare patch of table until the vertical force rises, and reports the contact height
+    and external wrench — Fz plus the horizontal torques Mx, My (in the EE frame). A level
+    finger pair loads evenly (Mx, My ≈ 0); a mechanical finger tilt shows up as a horizontal
+    torque. Iterate `orientation` (small roll/pitch) until the torque nulls → that's level.
+    Read-only characterisation: it does NOT grasp. Use a bare table spot (no block under it).
+    """
+    panda = _extract(_context, "panda")
+    gripper = _extract(_context, "gripper")
+    if panda is None or gripper is None:
+        time.sleep(0.05)
+        return {"_source": "mock", "note": "mock — no arm/gripper"}
+    import numpy as np
+    from panda_py import controllers
+    q = orientation or [0.0, 1.0, 0.0, 0.0]
+    move_to_pose([x, y, 0.16], orientation=q, _context=_context)
+    gripper.move(width=open_width, speed=0.1)
+    quat = panda.get_orientation()
+    q0 = np.array(panda.get_state().q)
+    ctrl = controllers.CartesianImpedance()
+    # Stiff in Z so it presses firmly into the table (clean contact signal), and ZERO nullspace
+    # stiffness so the arm can REconfigure its joints to reach low — the 1.0 nullspace pull back
+    # toward the high starting config was what stalled the descent ~4 mm above the table.
+    ctrl.set_impedance(np.diag([600.0, 600.0, 600.0, 40.0, 40.0, 40.0]))
+    ctrl.set_nullspace_stiffness(0.0)
+    panda.start_controller(ctrl)
+    dt = 0.01
+    z_start = float(panda.get_position()[2])
+    tz = z_start
+    fz0 = float(panda.get_state().O_F_ext_hat_K[2])
+    contact_z, wrench = None, None
+    try:
+        with panda.create_context(frequency=100, max_runtime=14.0) as cx:
+            while cx.ok():
+                tz = max(z_floor, tz - descent_speed * dt)
+                ctrl.set_control(np.array([x, y, tz]), quat, q0)
+                az = float(panda.get_position()[2])
+                fz = float(panda.get_state().O_F_ext_hat_K[2])
+                # Now that the arm actually REACHES the table and presses (nullspace freed, stiff
+                # Z), contact is clean: the actual z stalls on the surface while the commanded z
+                # keeps sinking below it, so (actual − commanded) opens up past the moving lag,
+                # AND the press force rises. Gate on real downward progress (10 mm) first.
+                if (z_start - az) > 0.010 and ((az - tz) > 0.010 or abs(fz - fz0) > force_thresh):
+                    contact_z = az
+                    wrench = [float(v) for v in panda.get_state().O_F_ext_hat_K]
+                    break
+                if tz <= z_floor + 1e-4:
+                    contact_z = az
+                    wrench = [float(v) for v in panda.get_state().O_F_ext_hat_K]
+                    break
+    finally:
+        panda.stop_controller()
+    if wrench is None:
+        wrench = [float(v) for v in panda.get_state().O_F_ext_hat_K]
+        contact_z = float(panda.get_position()[2])
+    p = panda.get_position()
+    move_to_pose([float(p[0]), float(p[1]), 0.20], orientation=q, _context=_context)
+    # `contacted`: did it actually PRESS the table (real contact) vs stall in mid-air? At hard
+    # corners the descent can't reach the surface and stalls with ~0 force — only a real press
+    # (|ΔFz| ≳ 1.5 N) certifies the contact_z is the true surface (lab notebook 2026-06-27).
+    contacted = bool(abs(wrench[2] - fz0) > 1.5)
+    return {"_source": "live", "contact_z": round(contact_z, 4), "contacted": contacted,
+            "Fz": round(wrench[2], 2), "dFz": round(wrench[2] - fz0, 2),
+            "Mx": round(wrench[3], 3), "My": round(wrench[4], 3), "Mz": round(wrench[5], 3),
+            "orientation": [round(float(v), 4) for v in q]}
+
+
+def _relevel_base(onto, canon_uv, canon_xy, _context, drift_tol=22.0):
+    """Re-home the base block to its canonical lying pose if it has drifted past drift_tol px
+    (measured at the overhead observe pose). A lying base placed back stays lying, so catching
+    drift EARLY — every cycle — is what stops it accumulating into a tip, the loop's #142
+    frontier; no lay-flat reorient needed. Returns a status string."""
+    import math
+    fb = _observe([onto], _context)
+    cand = [b for b in fb.get("blocks", []) if b["color"] == onto]
+    if not cand:
+        return "base_lost"
+    b = max(cand, key=lambda x: x["npix"])
+    if math.hypot(b["u"] - canon_uv[0], b["v"] - canon_uv[1]) <= drift_tol:
+        return "in_place"
+    g = vision_grasp(color=onto, target=[b["u"], b["v"]], _context=_context)
+    if not g.get("grasped"):
+        return "regrasp_failed"
+    place_block(target_xy=list(canon_xy), place_z=0.05, lift_z=0.30, _context=_context)
+    return "releveled"
+
+
+# ---------------------------------------------------------------------------
+# Persistent scene store — the arm's world model + predict-then-look change detection
+# ---------------------------------------------------------------------------
+# A small persistent map of the world: the table plane (table_z) is the immovable substrate;
+# blocks are movable objects, each tracked by identity + pose. v1 lives in the OBSERVE-pose
+# image frame (calibration-free, and directly actionable — grasps target pixels), enriched
+# with the block's pixel geometry. `scene_sync` re-perceives and compares to the stored model:
+# a block whose pixel has shifted past `moved_px` since the last sync — with no action of mine
+# in between — was moved by an EXTERNAL force (a hand, gravity, a knocked neighbour). The
+# prediction error IS the alarm that the world changed without me (lab notebook: world-model).
+
+def _scene_path(_store):
+    from pathlib import Path
+    if _store is not None and getattr(_store, "db_path", None):
+        return str(Path(_store.db_path).parent / "scene.json")
+    return "/tmp/hebbot_scene.json"
+
+
+def _load_scene(path):
+    import json, os
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"frame": "wrist@observe", "ts": 0, "next_id": 1, "objects": []}
+
+
+def _save_scene(path, scene):
+    import json
+    with open(path, "w") as f:
+        json.dump(scene, f, indent=2)
+
+
+def scene_sync(
+    *,
+    moved_px: float = 9.0,
+    gate_px: float = 200.0,
+    min_npix: int = 400,
+    _store: Optional[Any] = None,
+    _context: Optional[Any] = None,
+) -> dict:
+    """Predict-then-look world-model update + external-move detector. Goes to the overhead
+    observe pose, re-perceives every block, associates each to the stored model (same colour,
+    nearest within `gate_px`), and classifies it: stable / moved (pixel shift ≥ moved_px) /
+    appeared / disappeared. Persists the refreshed model to data_dir/scene.json. Called when
+    no action of mine has touched the scene, a `moved` result means an EXTERNAL force shifted
+    that block — the prediction error is the alarm. (moved_px ≈ 9 px ≈ 1 cm at the observe
+    height — above the ~1–2 mm perception noise and the ±1.4 mm FK error.)
+    """
+    cameras = _extract(_context, "cameras") or {}
+    panda = _extract(_context, "panda")
+    if panda is None or not cameras:
+        time.sleep(0.02)
+        return {"_source": "mock", "note": "no arm/camera"}
+    move_to_pose(list(_OBSERVE_POSE), _context=_context)
+    fresh = [b for b in find_blocks(_context=_context).get("blocks", []) if b["npix"] >= min_npix]
+    path = _scene_path(_store)
+    prior = _load_scene(path)
+    prior_objs = prior.get("objects", [])
+    next_id = prior.get("next_id", 1)
+    ts = prior.get("ts", 0) + 1
+
+    used = [False] * len(fresh)
+    stable, moved, disappeared = [], [], []
+    new_objs = []
+    for o in prior_objs:
+        best, bestd = -1, gate_px + 1.0
+        for i, b in enumerate(fresh):
+            if used[i] or b["color"] != o["color"]:
+                continue
+            d = ((b["u"] - o["u"]) ** 2 + (b["v"] - o["v"]) ** 2) ** 0.5
+            if d < bestd:
+                bestd, best = d, i
+        if best >= 0:
+            used[best] = True
+            b = fresh[best]
+            new_objs.append({"id": o["id"], "color": b["color"], "u": b["u"], "v": b["v"],
+                             "ang": b["ang"], "L": b["L"], "W": b["W"], "aspect": b["aspect"],
+                             "npix": b["npix"], "shape": b["shape"], "ts": ts, "missing": 0})
+            if bestd >= moved_px:
+                moved.append({"id": o["id"], "color": o["color"], "residual_px": round(bestd, 1),
+                              "from": [o["u"], o["v"]], "to": [b["u"], b["v"]]})
+            else:
+                stable.append({"id": o["id"], "color": o["color"], "residual_px": round(bestd, 1)})
+        else:
+            miss = int(o.get("missing", 0)) + 1
+            disappeared.append({"id": o["id"], "color": o["color"], "last": [o["u"], o["v"]],
+                                "missing": miss})
+            if miss <= 3:                 # keep an occluded/removed object for a few syncs
+                new_objs.append({**o, "missing": miss, "ts": ts})
+
+    appeared = []
+    for i, b in enumerate(fresh):
+        if used[i]:
+            continue
+        oid = f"{b['color']}-{next_id}"
+        next_id += 1
+        new_objs.append({"id": oid, "color": b["color"], "u": b["u"], "v": b["v"], "ang": b["ang"],
+                         "L": b["L"], "W": b["W"], "aspect": b["aspect"], "npix": b["npix"],
+                         "shape": b["shape"], "ts": ts, "missing": 0})
+        appeared.append({"id": oid, "color": b["color"], "at": [b["u"], b["v"]]})
+
+    _save_scene(path, {"frame": "wrist@observe", "ts": ts, "next_id": next_id, "objects": new_objs})
+    return {"_source": "live", "scene_ts": ts, "n_objects": len([o for o in new_objs if not o.get("missing")]),
+            "moved": moved, "appeared": appeared, "disappeared": disappeared, "stable": stable}
+
+
+def scene_show(*, _store: Optional[Any] = None, _context: Optional[Any] = None) -> dict:
+    """Return the current persistent world model (the stored scene) without re-perceiving."""
+    return {"_source": "live", **_load_scene(_scene_path(_store))}
+
+
+# ---------------------------------------------------------------------------
+# Self-improvement metrics — the rising success-rate curve (ENPIRE-style pass@k evidence)
+# ---------------------------------------------------------------------------
+# Every `practice` run appends a record to data_dir/practice_metrics.jsonl: success rate,
+# failure breakdown, and a content hash of THIS primitives.py (the policy version that ran).
+# Plotted over runs, that's the self-improvement curve — and each step is tied to the exact
+# policy code that produced it, the longitudinal evidence ENPIRE reports as pass@k.
+
+def _code_version():
+    """Short content hash of the running primitives.py = the policy version (more accurate than
+    git HEAD, which lags on the deployed copy). Ties each metrics row to the code that ran."""
+    try:
+        import hashlib, os
+        return hashlib.sha1(open(os.path.abspath(__file__), "rb").read()).hexdigest()[:10]
+    except Exception:
+        return None
+
+
+def _metrics_path(_store):
+    from pathlib import Path
+    if _store is not None and getattr(_store, "db_path", None):
+        return str(Path(_store.db_path).parent / "practice_metrics.jsonl")
+    return "/tmp/hebbot_practice_metrics.jsonl"
+
+
+def _append_metrics(_store, rec):
+    import json
+    try:
+        with open(_metrics_path(_store), "a") as f:
+            f.write(json.dumps(rec) + "\n")
+        return True
+    except Exception:
+        return False
+
+
+def practice_metrics(*, _store: Optional[Any] = None, _context: Optional[Any] = None) -> dict:
+    """Read the accumulated self-improvement curve: every `practice` run's success rate over
+    time, each tagged with the policy-code version that produced it. The trend IS the evidence
+    that the loop measurably improves (the ENPIRE-style pass@k curve)."""
+    import json, os
+    path = _metrics_path(_store)
+    runs = []
+    if os.path.exists(path):
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        runs.append(json.loads(line))
+                    except Exception:
+                        pass
+    return {"_source": "live", "n_runs": len(runs),
+            "trend": [r.get("success_rate") for r in runs],
+            "versions": [r.get("code") for r in runs],
+            "runs": runs[-20:]}
+
+
 def practice(
     *,
     pick: str = "green",
@@ -1487,7 +1972,10 @@ def practice(
     trials: int = 3,
     onto_height: float = 0.024,
     reset_xy: Optional[list] = None,
+    contact_force: float = 4.0,
+    relevel: bool = True,
     camera: Optional[str] = None,
+    _store: Optional[Any] = None,
     _context: Optional[Any] = None,
 ) -> dict:
     """The self-improvement loop: repeatedly {attempt → verify → reset}, logging each
@@ -1505,8 +1993,40 @@ def practice(
     rx = reset_xy or [0.45, 0.12]
     log = []
     fails = 0
+    # Establish the base's canonical lying pose: grasp it, record its world xy, place it back,
+    # and record its overhead pixel. Each cycle then re-homes the base to this pose if it has
+    # drifted, so drift can't accumulate into a tip (#142).
+    canon_uv = canon_xy = None
+    if relevel:
+        fb0 = _observe([onto], _context)
+        ob0 = [b for b in fb0.get("blocks", []) if b["color"] == onto]
+        if ob0:
+            bc0 = max(ob0, key=lambda x: x["npix"])
+            g0 = vision_grasp(color=onto, target=[bc0["u"], bc0["v"]], _context=_context)
+            if g0.get("grasped"):
+                p0 = panda.get_position()
+                canon_xy = [float(p0[0]), float(p0[1])]
+                place_block(target_xy=canon_xy, place_z=0.05, lift_z=0.30, _context=_context)
+                fb1 = _observe([onto], _context)
+                ob1 = [b for b in fb1.get("blocks", []) if b["color"] == onto]
+                if ob1:
+                    canon_uv = [max(ob1, key=lambda x: x["npix"])["u"],
+                                max(ob1, key=lambda x: x["npix"])["v"]]
     for t in range(trials):
-        s = stack_on(pick=pick, onto=onto, onto_top=0.0, max_steps=16, _context=_context)
+        # Re-home the base to its canonical lying pose before stacking, so drift can't pile up
+        # into a tip (#142). No-op when it hasn't moved past the drift tolerance.
+        relevel_status = _relevel_base(onto, canon_uv, canon_xy, _context) \
+            if (relevel and canon_uv is not None) else None
+        # NB 2026-06-27: lowering contact_force to 2.5 N to be gentle on the base BROKE contact
+        # detection (most stacks aborted no_contact, two false-tripped at 0.19 m) — 4 N is
+        # load-bearing for reliable slip-immune detection; re-leveling (above) is the right
+        # lever for base drift, not a softer press.
+        # z_floor 0.045 (was 0.06): blue is held a touch high in the gripper, so onto a 29 mm
+        # base it first-contacts right AT the old 0.06 floor and often aborted no_contact a few
+        # mm above the block (Doug, watching: "slightly above the green block"). A lower floor
+        # lets the descent reach the base — the grasp's "go lower" lesson, applied to the stack.
+        s = stack_on(pick=pick, onto=onto, onto_top=0.0, max_steps=16,
+                     contact_force=contact_force, z_floor=0.045, _context=_context)
         # verify from the wide overhead pose (robust re-location; #140).
         fb = _observe([pick, onto], _context)
         pk = [b for b in fb.get("blocks", []) if b["color"] == pick]
@@ -1516,10 +2036,16 @@ def practice(
         # strict — a sliver of the lower block peeks out at close range.)
         pc = max(pk, key=lambda b: b["npix"]) if pk else None
         oc = max(on, key=lambda b: b["npix"]) if on else None
-        verified = pc is not None and (oc is None or
+        # Verify requires the stack to have ACTUALLY happened (stack_on reported contact) AND
+        # the centroids to coincide. Without the stacked() gate, a no_contact abort still
+        # passed on centroid-coincidence — the loop reporting success it never achieved
+        # (2026-06-27: 10/12 'verified' were no-contact non-stacks). Honest failure detection
+        # is the whole point of a self-improvement loop.
+        verified = bool(s.get("stacked")) and pc is not None and (oc is None or
                    ((pc["u"] - oc["u"]) ** 2 + (pc["v"] - oc["v"]) ** 2) < 60 ** 2)
         trial = {"trial": t, "attempt": s.get("stacked"), "stage": s.get("stage"),
-                 "contact_z": s.get("contact_z"), "verified": verified, "reset": None}
+                 "contact_z": s.get("contact_z"), "verified": verified, "reset": None,
+                 "relevel": relevel_status}
         # reset: lift pick off (elevated by onto_height when stacked) and set it aside; the
         # release height tracks the grasp height (an elevated grasp holds the block higher).
         if pc is not None:
@@ -1539,9 +2065,25 @@ def practice(
         if fails >= 2:
             trial["stopped"] = "two consecutive failures"
             break
-    return {"_source": "live", "trials": log, "n": len(log),
-            "verified_count": sum(1 for l in log if l.get("verified")),
-            "reset_failures": sum(1 for l in log if l.get("reset") == "grasp_failed")}
+    # Self-improvement metric: log this run's success rate + failure breakdown, tagged with the
+    # policy-code version, so the curve over runs is the ENPIRE-style pass@k evidence.
+    n = len(log)
+    verified = sum(1 for l in log if l.get("verified"))
+    reset_fail = sum(1 for l in log if l.get("reset") == "grasp_failed")
+    stages = {}
+    for l in log:
+        s = l.get("stage")
+        if s:
+            stages[s] = stages.get(s, 0) + 1
+    rec = {"ts": time.time(), "pick": pick, "onto": onto, "requested": trials, "ran": n,
+           "verified": verified, "success_rate": round(verified / n, 3) if n else None,
+           "reset_failures": reset_fail, "fail_stages": stages,
+           "relevels": sum(1 for l in log if l.get("relevel") == "releveled"),
+           "stopped_early": any(l.get("stopped") for l in log), "code": _code_version()}
+    _append_metrics(_store, rec)
+    return {"_source": "live", "trials": log, "n": n, "verified_count": verified,
+            "success_rate": rec["success_rate"], "reset_failures": reset_fail,
+            "code_version": rec["code"]}
 
 
 # ---------------------------------------------------------------------------
@@ -1869,6 +2411,50 @@ PRIMITIVE_SPECS = [
         },
     },
     {
+        "name": "probe_table",
+        "function_spec": "hebbot.skills.primitives:probe_table",
+        "params_schema": {
+            "type": "object",
+            "properties": {
+                "x": {"type": "number", "default": 0.45},
+                "y": {"type": "number", "default": 0.0},
+                "orientation": {"type": "array", "items": {"type": "number"},
+                                "minItems": 4, "maxItems": 4,
+                                "description": "grasp quaternion [w,x,y,z] to test (default gripper-down)"},
+                "open_width": {"type": "number", "minimum": 0.0, "maximum": 0.08, "default": 0.045},
+                "z_floor": {"type": "number", "minimum": 0.0, "maximum": 0.1, "default": 0.012},
+                "force_thresh": {"type": "number", "minimum": 1.0, "maximum": 20.0, "default": 5.0},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "scene_sync",
+        "function_spec": "hebbot.skills.primitives:scene_sync",
+        "params_schema": {
+            "type": "object",
+            "properties": {
+                "moved_px": {"type": "number", "minimum": 1.0, "maximum": 100.0, "default": 9.0,
+                             "description": "pixel shift that counts as 'moved' (~9 px ≈ 1 cm at observe height)"},
+                "gate_px": {"type": "number", "minimum": 10.0, "maximum": 400.0, "default": 200.0,
+                            "description": "max pixel distance to associate a detection with a stored object (a move ≤ this reads as 'moved'; beyond it splits to disappeared+appeared)"},
+                "min_npix": {"type": "integer", "minimum": 20, "default": 400,
+                             "description": "ignore detections smaller than this (edge glare/slivers)"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "scene_show",
+        "function_spec": "hebbot.skills.primitives:scene_show",
+        "params_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "practice_metrics",
+        "function_spec": "hebbot.skills.primitives:practice_metrics",
+        "params_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
         "name": "practice",
         "function_spec": "hebbot.skills.primitives:practice",
         "params_schema": {
@@ -1881,6 +2467,10 @@ PRIMITIVE_SPECS = [
                                 "description": "height (m) of the onto block (for the un-stack grasp)"},
                 "reset_xy": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2,
                              "description": "[x,y] where the pick block is set aside between trials"},
+                "contact_force": {"type": "number", "minimum": 1.0, "maximum": 10.0, "default": 4.0,
+                                  "description": "stack contact force (N); <4 breaks slip-immune contact detection"},
+                "relevel": {"type": "boolean", "default": True,
+                            "description": "re-home the base to its canonical lying pose each cycle (anti-drift/tip)"},
                 "camera": {"type": "string"},
             },
             "additionalProperties": False,
