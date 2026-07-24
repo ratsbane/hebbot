@@ -33,6 +33,7 @@ def test_all_skills_registered(substrate):
     assert "open_gripper" in names
     assert "close_gripper" in names
     assert "read_camera" in names
+    assert "compliant_hold" in names
     assert "teleop_xbox" in names
     assert "home" in names
 
@@ -48,6 +49,21 @@ def test_get_state_mock(substrate):
     out = substrate.call("get_state")
     assert out["success"]
     assert out["result"]["_source"] == "mock"
+
+
+def test_compliant_hold_mock(substrate):
+    out = substrate.call("compliant_hold", params={"duration_s": 0.25})
+    assert out["success"]
+    assert out["result"]["completed"] is True
+    assert out["result"]["max_position_drift_m"] == 0.0
+
+
+def test_descent_runtime_scales_with_distance_and_speed():
+    from hebbot.skills.primitives import _descent_context_runtime
+
+    assert _descent_context_runtime(0.20, 0.026, 0.02) == pytest.approx(10.1)
+    assert _descent_context_runtime(0.04, 0.026, 0.02) == pytest.approx(2.1)
+    assert _descent_context_runtime(0.026, 0.026, 0.02) == pytest.approx(2.0)
 
 
 def test_read_camera_mock(substrate):
@@ -94,6 +110,256 @@ def test_read_camera_writes_frame_row(substrate):
     for r in rows:
         ep = substrate.store.get_episode(r["episode_id"])
         assert ep is not None and ep["skill_name"] == "read_camera"
+
+
+def test_read_camera_internal_tags_preserve_multiple_checkpoints(substrate):
+    pytest.importorskip("PIL")
+    import numpy as np
+    from hebbot.skills.primitives import read_camera
+
+    class FakeCamera:
+        name = "wrist"
+
+        def capture(self, with_depth=True):
+            return {
+                "color": np.zeros((8, 8, 3), dtype=np.uint8),
+                "depth": np.ones((8, 8), dtype=np.uint16) if with_depth else None,
+                "depth_scale": 0.001,
+                "width": 8,
+                "height": 8,
+            }
+
+    ep = substrate.store.start_episode("vision_grasp", body_type_used="classical")
+    ctx = {"cameras": {"wrist": FakeCamera()}}
+    read_camera(_context=ctx, _store=substrate.store, _episode_id=ep,
+                _frame_tag="before", _t=1.0)
+    read_camera(_context=ctx, _store=substrate.store, _episode_id=ep,
+                _frame_tag="after", _t=2.0)
+    rows = substrate.store.conn.execute(
+        "SELECT camera, t, file_path FROM frames WHERE episode_id=? ORDER BY t, camera", (ep,)
+    ).fetchall()
+    assert len(rows) == 4
+    assert {r["t"] for r in rows} == {1.0, 2.0}
+    assert any("before" in r["file_path"] for r in rows)
+    assert any("after" in r["file_path"] for r in rows)
+
+
+def test_read_camera_can_persist_exact_injected_capture(substrate):
+    pytest.importorskip("PIL")
+    import numpy as np
+    from hebbot.skills.primitives import read_camera
+
+    class NoCaptureCamera:
+        name = "wrist"
+
+        def capture(self, with_depth=True):
+            raise AssertionError("read_camera recaptured instead of persisting injected evidence")
+
+    cap = {
+        "color": np.zeros((8, 8, 3), dtype=np.uint8),
+        "depth": np.full((8, 8), 777, dtype=np.uint16),
+        "depth_scale": 0.001,
+        "width": 8,
+        "height": 8,
+    }
+    ep = substrate.store.start_episode("vision_grasp", body_type_used="classical")
+    out = read_camera(
+        _context={"cameras": {"wrist": NoCaptureCamera()}},
+        _store=substrate.store, _episode_id=ep, _frame_tag="verified",
+        _capture=cap,
+    )
+    assert out["center_depth_m"] == pytest.approx(0.777)
+    assert "verified" in out["color_path"]
+    assert "verified" in out["depth_path"]
+
+
+def test_relational_grasp_recall_only_uses_task_verified_episodes(substrate):
+    from hebbot.skills.primitives import (
+        _grasp_relational_state, _grasp_state_similarity, _recall_grasp_experiences,
+    )
+
+    geom = {
+        "u": 350.0, "v": 340.0, "length_m": 0.065, "width_m": 0.031,
+        "height_m": 0.029, "ang": 80.0,
+    }
+    state = _grasp_relational_state("green", geom, [0.45, 0.0, 0.30])
+    nearby = _grasp_relational_state(
+        "green", {**geom, "u": 354.0, "ang": 84.0}, [0.46, 0.01, 0.30]
+    )
+    wrong_color = _grasp_relational_state("red", geom, [0.45, 0.0, 0.30])
+    assert _grasp_state_similarity(state, nearby) > 0.8
+    assert _grasp_state_similarity(state, wrong_color) == 0.0
+
+    def add_episode(verified, rel_state, grip_z):
+        ep = substrate.store.start_episode(
+            "vision_grasp", params={"experience_mode": "record"},
+            body_type_used="classical",
+        )
+        substrate.store.end_episode(ep, success=True, outcome={
+            "success": True,
+            "result": {
+                "task_verified_success": verified,
+                "verification_method": "test",
+                "experience": {
+                    "relational_state": rel_state,
+                    "action": {
+                        "grip_z": grip_z, "grip_width": 0.027,
+                        "open_width": 0.043, "grip_yaw_deg": 10,
+                    },
+                },
+            },
+        })
+        return ep
+
+    rejected = add_episode(False, state, 0.099)
+    accepted = add_episode(True, nearby, 0.026)
+    recalled = _recall_grasp_experiences(substrate.store, state)
+    assert [r["episode_id"] for r in recalled] == [accepted]
+    assert rejected not in [r["episode_id"] for r in recalled]
+    assert recalled[0]["action"]["grip_z"] == 0.026
+
+
+def test_aligned_depth_gate_rejects_flat_color_shadow():
+    import numpy as np
+    from hebbot.skills.primitives import _nearest_raised_instance
+
+    # BGR frame with two red components. The closer component to `track` is a flat red
+    # artifact at table depth; the farther component is a physical block 30 mm high.
+    color = np.zeros((100, 100, 3), dtype=np.uint8)
+    color[15:30, 15:30] = [0, 0, 200]       # flat shadow/reflection
+    color[55:75, 60:80] = [0, 0, 200]       # real raised block
+    depth = np.full((100, 100), 1000, dtype=np.uint16)
+    depth[55:75, 60:80] = 970
+    cap = {"color": color, "depth": depth, "depth_scale": 0.001}
+
+    found = _nearest_raised_instance(
+        cap, "red", track=[20, 20], min_px=100, min_height_m=0.008,
+    )
+    assert found is not None
+    u, v, npix, height = found
+    assert (u, v) == pytest.approx((69.5, 64.5))
+    assert npix == 400
+    assert height == pytest.approx(0.03)
+
+
+def test_aligned_depth_gate_rejects_missing_depth():
+    import numpy as np
+    from hebbot.skills.primitives import _nearest_raised_instance
+
+    color = np.zeros((40, 40, 3), dtype=np.uint8)
+    color[10:30, 10:30] = [0, 0, 200]
+    cap = {
+        "color": color,
+        "depth": np.zeros((40, 40), dtype=np.uint16),
+        "depth_scale": 0.001,
+    }
+    assert _nearest_raised_instance(cap, "red", [20, 20], min_px=100) is None
+
+
+def test_held_red_verifier_accepts_dim_clipped_near_gripper_region():
+    import numpy as np
+    from hebbot.skills.primitives import _held_color_evidence
+
+    color = np.zeros((100, 120, 3), dtype=np.uint8)
+    color[82:100, 45:75] = [28, 36, 99]  # BGR for dim held RGB=(99,36,28)
+    found = _held_color_evidence(color, "red", min_px=200)
+    assert found is not None
+    u, v, npix, cue = found
+    assert (u, v) == pytest.approx((59.5, 90.5))
+    assert npix == 18 * 30
+    assert cue == "held_dim_red"
+
+
+def test_held_red_verifier_keeps_relaxed_cue_out_of_upper_scene():
+    import numpy as np
+    from hebbot.skills.primitives import _held_color_evidence
+
+    color = np.zeros((100, 120, 3), dtype=np.uint8)
+    color[10:35, 45:75] = [28, 36, 99]
+    assert _held_color_evidence(color, "red", min_px=200) is None
+
+
+def test_aligned_depth_gate_unifies_fragmented_color_on_one_object():
+    import numpy as np
+    from hebbot.skills.primitives import _nearest_raised_instance
+
+    color = np.zeros((140, 160, 3), dtype=np.uint8)
+    # One physical rectangle, but illumination leaves two disconnected red patches.
+    color[48:68, 62:82] = [0, 0, 200]
+    color[72:92, 88:108] = [0, 0, 200]
+    # A flat red artifact is closer to the old tracked pixel.
+    color[15:30, 15:30] = [0, 0, 200]
+    depth = np.full((140, 160), 1000, dtype=np.uint16)
+    depth[45:95, 58:112] = 970
+    cap = {"color": color, "depth": depth, "depth_scale": 0.001}
+
+    found = _nearest_raised_instance(
+        cap, "red", track=[20, 20], min_px=100, min_height_m=0.008,
+    )
+    assert found is not None
+    u, v, npix, height = found
+    assert (u, v) == pytest.approx((84.5, 69.5))
+    assert npix == 50 * 54
+    assert height == pytest.approx(0.03)
+
+
+def test_depth_object_reacquires_after_transient_dropout():
+    import numpy as np
+    from hebbot.skills.primitives import _reacquire_raised_instance
+
+    invalid = {
+        "color": np.zeros((100, 100, 3), dtype=np.uint8),
+        "depth": np.zeros((100, 100), dtype=np.uint16),
+        "depth_scale": 0.001,
+    }
+    color = np.zeros((100, 100, 3), dtype=np.uint8)
+    color[35:65, 35:65] = [0, 0, 200]
+    depth = np.full((100, 100), 1000, dtype=np.uint16)
+    depth[35:65, 35:65] = 970
+    valid = {"color": color, "depth": depth, "depth_scale": 0.001}
+
+    class SequenceCamera:
+        def __init__(self, frames):
+            self.frames = iter(frames)
+            self.calls = 0
+
+        def capture(self, with_depth=True):
+            self.calls += 1
+            return next(self.frames)
+
+    cam = SequenceCamera([invalid, invalid, valid])
+    found, rejected = _reacquire_raised_instance(
+        cam, "red", [50, 50], min_px=100, max_retries=2,
+    )
+    assert found is not None
+    assert rejected == 2
+    assert cam.calls == 3
+
+
+def test_depth_object_reacquisition_is_bounded():
+    import numpy as np
+    from hebbot.skills.primitives import _reacquire_raised_instance
+
+    invalid = {
+        "color": np.zeros((40, 40, 3), dtype=np.uint8),
+        "depth": np.zeros((40, 40), dtype=np.uint16),
+        "depth_scale": 0.001,
+    }
+
+    class CountingCamera:
+        calls = 0
+
+        def capture(self, with_depth=True):
+            self.calls += 1
+            return invalid
+
+    cam = CountingCamera()
+    found, rejected = _reacquire_raised_instance(
+        cam, "red", [20, 20], min_px=100, max_retries=2,
+    )
+    assert found is None
+    assert rejected == 3
+    assert cam.calls == 3
 
 
 def test_move_to_joints_mock(substrate):

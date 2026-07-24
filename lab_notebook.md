@@ -538,3 +538,750 @@ Turned finding #137's reasoning into two primitives (the high-cognition→reflex
 - **The explicit high↔low layering thesis** ("do it with high cognition, then make it reflexive") as the organizing principle, vs ENPIRE's flatter agent-edits-policy framing.
 
 **Roadmap to a credible follow-on** (priority): (1) the success-rate **curve** (`practice_metrics`, just built) — make improvement *visible*; (2) **unified rollout records** (state/action/video/result) so PI can read traces without a human watching; (3) **auto/multi-view verification** (our tilt-cam is the seed of their camera fusion); (4) an **evolution tree** (branch-per-hypothesis) layered on git; (5) eventually scene randomization + a second task. The writeup ("a follow-on to ENPIRE, with the code and transcripts they didn't release") is the through-line that ties the artifacts together.
+
+---
+
+## 2026-07-24 — Codex audit: automation is real; Hebbian compression is the missing link
+
+> **Authorship note:** This entry was written by **Codex** after inspecting the repository, live
+> skill store, episode database, and robot/camera state. Previous notebook entries were written by
+> **Claude**. Claude will return at times to review, comment on, and contribute to the work; future
+> entries should retain their author attribution where it is useful.
+
+### Concise model of the project
+
+Hebbot is a plain-Python substrate between a deliberate foundation-model orchestrator and isolated
+hardware processes. Its intended learning arc is:
+
+`deliberate choice → recorded episode → retrieval/replay → adaptation → verified repetition → reflexive policy`
+
+The layer boundary is important:
+
+- **Deliberate foundation-model layer:** chooses skills, reasons about goals and surprises, and
+  currently performs most policy improvement by inspecting results and editing code.
+- **Hebbot substrate and skill records:** SQLite-backed skill/episode/decision records, dispatcher,
+  expectation checks, dynamic MCP exposure, frames, and the intended retrieval/compression seams.
+- **Reflexive or learned execution:** currently classical visual servoing, impedance/contact
+  behavior, cuRobo-assisted motion, and local retry/recovery logic. A distilled learned policy does
+  not yet exist.
+- **Hardware processes:** Franka FCI/panda-py, the wrist RealSense D405, and the persistent cuRobo
+  service. These provide actuation, sensing, real-time control, and GPU planning; they are not the
+  deliberate or memory layers.
+
+The motion stack is genuinely capable. The learning/compression stack is still mostly architectural
+scaffolding.
+
+### Repository and live-system evidence
+
+- The pre-existing uncommitted `src/hebbot/skills/primitives.py` diff was preserved. It is a large,
+  coherent experimental branch (`+1098/−49` at inspection time), not a stray edit. Its purpose is
+  to harden geometry-aware manipulation: deeper-grip retry telemetry, the corrected table-contact
+  datum, elevated/cluttered grasps, instance-targeted stacking, scene survey, reorientation,
+  decluttering, tidying, tower construction, teardown, and verification.
+- The live MCP store exposed **27 skills: 26 `classical`, one `composition`** (`home`). The `script`,
+  `trajectory`, `learned_policy`, and `vlm_grounded` body types exist in the schema but have no
+  dispatcher implementation.
+- All **21** mock/substrate tests passed.
+- The live Franka was healthy at its home pose with the gripper open. The wrist D405 returned live
+  aligned RGB-D metadata at **640×480**, center depth **0.4801 m**, and depth coverage **65.9%**.
+- The persisted scene model contained four tracked rectangular-block records, one marked missing.
+- The episode database contained **878 episodes**, **161 frame rows**, and **zero state rows**.
+- All **814 routing decisions** were `orchestrator`; none contained relational-state vectors or
+  retrieval candidates.
+- The only persisted `practice_metrics` run requested 10 blue-on-green trials, stopped after 2,
+  verified 0, and reported a **0% task-success rate**.
+
+These counts expose an important labeling distinction: a stored episode's `success` often means
+that the Python body completed mechanically, not that the embodied task was perceptually verified.
+For example, the top-level `practice` call can be stored as successful while its internal verified
+trial rate is zero. Mechanical, proprioceptive, and perceptual outcomes must remain separate if the
+episode corpus is to support retrieval or distillation.
+
+### Current experimental frontier
+
+The active manipulation frontier is robust, geometry-aware work with multiple rectangular blocks:
+multi-instance perception, depth-derived shape and orientation, visual-servoed grasping,
+force/contact-aware stacking, reorientation, decluttering, reset loops, and simple persistent scene
+tracking. This is meaningful embodied progress, and the classical routines already contain useful
+reflex-like behavior.
+
+However, later work described inside the uncommitted diff (comments refer to experiments after the
+last numbered notebook finding) has not been consolidated into the notebook. The code and live
+skill versions have advanced beyond the written experimental record. That gap should be repaired
+before interpreting the current routines as a stable baseline.
+
+### Most important unresolved scientific/technical question
+
+**Can repeated experience change subsequent execution automatically, without a foundation model
+manually editing `primitives.py`?**
+
+Not yet. Episodes are written, but there is no implemented relational retrieval, automatic replay,
+trajectory-body execution, policy promotion, or distillation runtime. No recorded decision has
+selected `replay` or `policy`. State trajectories are not being stored. Most task-level plans are
+large `classical` Python functions rather than data-defined compositions or promoted skill bodies.
+
+Hebbot therefore currently demonstrates **foundation-model-guided iterative robot automation plus
+classical reflexive controllers**, not yet Hebbian compression. The key missing causal link is:
+past experience does not presently alter the next execution through the substrate.
+
+### Three candidate experiments
+
+1. **Complete-rollout instrumentation.** Run a small set of `vision_grasp` trials while recording
+   before/after RGB-D, time-aligned robot states, perceived geometry, parameters, retry telemetry,
+   deliberate context, and strong post-lift verification. This repairs the corpus but does not yet
+   make experience affect behavior.
+2. **Relational nearest-neighbor replay.** For one narrow `vision_grasp` case, store a compact
+   relational state and successful execution parameters. On a later trial, retrieve the nearest
+   successful episode, adapt/reuse its grasp yaw, width, height, and servo settings, and log the
+   candidate scores plus a real `replay` decision. Compare it with the current fixed heuristic.
+3. **Trajectory-body promotion.** Record successful approach/grasp/lift waypoints, implement the
+   `trajectory` body runner, adapt a stored trajectory to a translated object pose, and verify it
+   across several placements. This reaches further along the thesis but confounds retrieval,
+   correspondence, trajectory execution, and verification in one experiment.
+
+### Recommendation
+
+Run **relational nearest-neighbor replay for one narrow `vision_grasp` task**.
+
+This is the smallest experiment that makes repeated experience causally affect a later physical
+action. Keep the initial version narrow: one block class and pose family, a few low-speed training
+placements, one held-out nearby placement, the existing classical controller as executor, and the
+current heuristic as baseline/fallback. The retrieved episode should choose or adapt parameters,
+and success must require independent post-lift verification rather than only
+`gripper.grasp() == True`.
+
+This would not yet be learned-policy distillation, but it would close the load-bearing missing link
+between stored experience and future behavior. Trajectory replay and eventual policy promotion can
+then be evaluated on top of an evidence-producing retrieval path rather than built speculatively.
+
+## 2026-07-24 — Codex hypothesis review: make compression falsifiable
+
+> **Authorship note:** This entry was written by **Codex** in discussion with Doug. It proposes a
+> refinement of the project's hypothesis and evaluation criteria, not a replacement for the
+> architectural commitments in `docs/foundations.md`.
+
+### Sharpened hypothesis
+
+> **Repeated foundation-model-directed execution can produce structured embodied experience that
+> enables increasingly autonomous selection and execution of skills, while preserving deliberate
+> oversight and recovery. Compared with repeated stateless deliberation, retrieval, replay, and
+> eventual distillation should reduce deliberate intervention and execution cost without
+> materially reducing verified task success under familiar conditions.**
+
+This formulation makes compression observable: fewer model decisions, lower latency/cost, and
+larger execution chunks beneath the deliberate layer. It keeps task-level verification
+load-bearing, preserves the foundation model's role in novelty and surprise, supplies stateless
+deliberation as a baseline, and permits the hypothesis to fail.
+
+### Three learning loops that must not be conflated
+
+1. **An agent improves source code.** Claude or Codex reads failures and edits `primitives.py`.
+   This is valuable agentic robotics research, close to ENPIRE, but it is not by itself Hebbian
+   compression inside the substrate.
+2. **The substrate retrieves and adapts experience.** A current situation recalls past episodes
+   and reuses successful parameters or trajectories. This is the first genuine
+   experience-dependent behavior within Hebbot.
+3. **The substrate distills a reflexive policy.** Repeated verified episodes train or promote a
+   lower-level controller. This is the strongest form of the thesis.
+
+All three belong in the project, but every experimental result should identify which loop improved.
+Otherwise strong progress in agent-authored automation can make retrieval and distillation appear
+more mature than they are.
+
+### Operational definition of compression
+
+A skill should count as **compressed** only when:
+
+- its public task contract remains stable;
+- execution moves from a more deliberative route to a less deliberative route;
+- the promotion is based on recorded embodied experience;
+- the new route is evaluated against a baseline;
+- task-level verification remains acceptable;
+- novelty or low confidence returns control upward; and
+- the provenance of the selected experience or policy remains inspectable.
+
+A large hand-written Python routine may execute reflexively, but it was not *compressed from
+experience*. This distinction should be explicit in claims and notebook entries.
+
+### Primary evaluation curve
+
+Task success alone cannot distinguish Hebbot from a well-scripted automation system. The primary
+curve should be:
+
+> **Verified task success versus deliberate interventions per episode.**
+
+Supporting measurements:
+
+- foundation-model calls and tokens per successful episode;
+- wall-clock time;
+- recovery and escalation frequency;
+- replay coverage;
+- success conditioned on replay confidence;
+- familiar-state versus novel-state performance;
+- false-confidence rate (automatic executions that should have escalated); and
+- data efficiency (verified episodes required before promotion).
+
+The desired result is not undifferentiated autonomy. It is that familiar cases migrate downward
+while unfamiliar or surprising cases reliably move upward.
+
+### Verification labels are training data
+
+Mechanical, proprioceptive, and perceptual outcomes should be stored separately rather than
+overloaded into one `success` field:
+
+- `mechanical_success`
+- `proprioceptive_success`
+- `task_verified_success`
+- `verification_method`
+- `surprise_type`
+- `confidence`
+- `human_override`
+
+The current `practice` evidence—mechanically completed calls with zero verified task successes—
+shows why this separation matters. Incorrect or weak labels would train the reflex to repeat the
+wrong behavior.
+
+### A narrower first scientific claim
+
+Do not initially claim general continuous robot learning. A more credible first claim is:
+
+> **In a bounded manipulation task, relational retrieval of verified episodes reduces deliberate
+> parameter selection while preserving success across nearby scene variations.**
+
+Evidence can then advance through a falsifiable ladder:
+
+1. Experience is recorded completely.
+2. A relevant episode can be retrieved.
+3. Retrieval changes the next execution.
+4. Replay succeeds under small variation.
+5. Confidence predicts replay success.
+6. Failures correctly escalate.
+7. Repeated replay supports policy distillation.
+8. The distilled policy generalizes within a measured competence region.
+9. Deliberation re-enters outside that region.
+
+Each rung is useful evidence and exposes the precise point at which the thesis fails.
+
+### Test relational state rather than assuming it
+
+The commitment to relational rather than raw pixel state is plausible and well motivated, but it
+should be evaluated empirically. Compare whether replay success is best predicted by:
+
+- raw visual similarity;
+- object and gripper geometry;
+- relational geometry; or
+- relational geometry plus semantic/object features.
+
+The useful representation may be task-specific and partially learned rather than one universal
+state vector.
+
+### Refine “skills are records, not code”
+
+The experimental history shows that executable Python is an effective development medium. A more
+durable formulation is:
+
+> **Skill identity, contract, lineage, evaluation, and promotion state are records. Execution
+> bodies may reference code, compositions, trajectories, or policies.**
+
+The important invariant is not that code disappears. It is that the substrate can observe, compare,
+and replace the execution body behind a stable contract.
+
+### Promotion requires demotion and forgetting
+
+The substrate also needs:
+
+- confidence decay when the environment changes;
+- demotion after verified failures;
+- context-dependent competence regions;
+- preservation of failed episodes;
+- policy/version rollback; and
+- detection that old experience is no longer applicable.
+
+Compression is not only strengthening repeated pathways; it also requires contextual gating,
+inhibition, updating, and safe withdrawal of an obsolete reflex.
+
+### Failures as first-class experience
+
+For each failed or surprising execution, preserve:
+
+- where execution diverged;
+- observations immediately before and after;
+- whether the cause was perception, planning, control, verification, or recovery;
+- whether the failed action disturbed the scene; and
+- the recovery decision and its outcome.
+
+Successful episodes teach what to repeat. Failures and near-successes often define the competence
+boundary, which is essential for safe routing between reflexive and deliberate execution.
+
+### Refined overall goal
+
+> **Build and evaluate an open embodied-learning substrate in which a foundation model bootstraps
+> skills through deliberate interaction; verified experience is retained and reused; familiar
+> behavior progressively moves into faster, cheaper execution paths; and uncertainty, novelty, or
+> surprise reliably returns control to deliberate reasoning.**
+
+This preserves the piano analogy while turning it into an experimental program. Hebbot's distinct
+contribution is not simply capable robot automation or end-to-end policy learning, but the
+observable and reversible transfer of work between deliberate and reflexive cognitive layers.
+
+## 2026-07-24 — Codex experiment: retrieval path built; live baseline exposes RGB-only tracking gap
+
+> **Authorship note:** This entry was written by **Codex**. The experiment followed the explicit
+> pre-motion protocol: low speeds, state/camera observations between consequential actions,
+> preservation of failed attempts, and a two-failure stopping condition.
+
+### Hypothesis and implementation
+
+The intended experiment was the first narrow causal test of Hebbian compression:
+
+> For one familiar rectangular-block grasp family, relational nearest-neighbor retrieval can select
+> useful grasp parameters for a later trial, reducing deliberate parameter selection while
+> preserving independently verified success.
+
+An opt-in `vision_grasp(experience_mode="record"|"replay")` path was added without changing legacy
+call behavior. It:
+
+- records live robot-state snapshots;
+- saves initial, pre-close, and post-lift **paired RGB + aligned raw depth** checkpoints;
+- stores a compact relational state (object dimensions/orientation, EE pose, and image relation);
+- ranks only `task_verified_success=True` episodes;
+- logs candidates, thresholds, and a genuine `replay` decision when a candidate qualifies;
+- reuses grasp parameters only inside hard safety bounds, with the geometry heuristic as fallback;
+- separates mechanical, proprioceptive, and perceptual task verification; and
+- caps experimental point-to-point motion at speed factor 0.05 and compliant descent at 0.02 m/s.
+
+Offline coverage grew from 21 to 25 passing tests, including multi-checkpoint frame persistence,
+verified-only retrieval, relational similarity, and aligned-depth rejection of flat color
+artifacts.
+
+### Live attempt 1 — near-base reach saturation (failed, preserved)
+
+Target: red rectangle initially detected near wrist pixel `[439.0, 187.8]`.
+
+The block was physically too close to the Franka base. The coarse servo saturated at its configured
+`x=0.30 m` workspace boundary with image error plateaued near **137 px**. The old routine then
+continued despite non-convergence, and the depth-centroid recenter step lacked the same workspace
+clamp, allowing EE x to reach approximately **0.25 m**. The compliant descent stalled high at
+**EE z≈0.170 m** and did not close. Outcome was correctly stored as a surprise with:
+
+- `mechanical_success=false`
+- `proprioceptive_success=false`
+- `task_verified_success=false`
+- two state snapshots
+- two paired RGB-D checkpoints (four frame rows)
+- relational state and an `orchestrator` decision with no candidates
+
+No experience from this episode is eligible for retrieval.
+
+Two safety fixes followed offline:
+
+1. coarse servo now aborts unless it reaches the final approach height and pixel tolerance;
+2. depth-centroid recentering now enforces the same `[0.30, 0.60] × [-0.28, 0.28] m` workspace
+   bounds.
+
+Doug then redistributed the blocks farther from the base and separated them across the reachable
+table.
+
+### Live attempt 2 — same-color component jumping (failed safely, preserved)
+
+Target: isolated central red rectangle near `[424.2, 367.0]`.
+
+The corrected guard worked: the servo descended only to its **0.20 m approach height**, failed to
+converge, and aborted before any grasp/contact. The target initially converged well:
+
+- 158 px → 68.8 px → **7.1 px** at z=0.34 m
+- **6.6 px** at z=0.295 m
+
+At closer viewpoints, RGB component tracking alternated between the physical red block and small
+red shadow/reflection fragments. Component size oscillated:
+
+`2208 → 2283 → 2262 → 2157 → 1349 → 355 → 2269 → 3904 → 2088 → 372 → 2112 → 4685 px`
+
+Those false associations produced 80–130 px vertical jumps. The run stopped at final error
+**47.2 px at z=0.20 m**, with no close or contact. It stored one state snapshot and one paired
+initial RGB-D checkpoint; because geometry selection was never reached, it correctly contains no
+relational state and cannot become a replay candidate.
+
+### Z-calibration conclusion
+
+Doug correctly observed that the arm never approached the table. The logs show why: the safety
+guard aborted at the deliberately high servo approach pose, **EE z=0.20 m**. The measured
+finger/table contact datum is approximately **EE z=0.016 m**, and the planned compliant grasp
+descent toward roughly **0.026 m** never began. This experiment therefore provides no evidence that
+the Z/table calibration is wrong; it failed earlier in visual association.
+
+### Aligned depth promoted into the tracking loop
+
+The failed servo was RGB-only even though aligned depth was already saved and later used for
+top-face geometry. That was the important architectural surprise: depth participated after
+tracking, but not in deciding *which colored component was physical*.
+
+`vision_grasp` now captures aligned RGB-D at every tracked servo step. A color component is accepted
+only when:
+
+- enough aligned depth is valid inside it; and
+- its median depth is measurably closer than a local ring of surrounding table pixels.
+
+A flat same-color shadow/reflection has table depth and is rejected. A physical block has positive
+height above the local table and remains eligible. Synthetic tests confirm that a closer flat red
+artifact is rejected while a farther 30 mm raised red block is selected.
+
+### Result and next condition
+
+The retrieval/storage path exists and produced inspectable failure episodes, but the scientific
+hypothesis was **not yet tested**: neither live baseline was task-verified, so there is no legitimate
+experience to replay. In accordance with the predeclared stopping condition, no third physical
+attempt was made.
+
+Next live work should begin with a fresh observation and one aligned-depth-gated baseline. Only
+after it yields a post-lift, perceptually verified episode should a nearby held-out placement be
+attempted in `replay` mode.
+
+## 2026-07-24 — Codex continuation: aligned depth validates the object, but not a stable image part
+
+> **Authorship note:** This entry was written by **Codex**. Claude may later review, comment on,
+> or extend it. The predeclared limit of two failed physical attempts was respected.
+
+Doug asked to proceed after aligned depth had been added to the servo association loop. The target
+was the separated central red rectangular block, initially near wrist pixel `[423.9, 367.4]`.
+Both trials used the low-speed experimental settings, inspected state and paired RGB-D observations
+between consequential actions, and aborted before closing the gripper because the final image
+tolerance was not met.
+
+### Trial 1 — depth-gated, original close-range gain
+
+The arm descended only to the guarded approach height, **EE z=0.20 m**, and made no contact. The
+aligned-depth gate consistently classified the selected red components as raised by approximately
+**20–29 mm** above their local surround. This is important positive evidence: the tracker was no
+longer locking onto flat red shadows or reflections.
+
+Nevertheless, the vertical image coordinate oscillated strongly at close range. Representative
+transitions included `v=281 → 380` at z=0.25 m and
+`285 → 412 → 400 → 291 → 418` around z=0.205 m. The attempt failed safely before grasping.
+
+The immediate control hypothesis was that close-range image feedback was too aggressive. Offline,
+the lateral servo gain below z=0.29 m was reduced to **0.35×**, while retaining full gain at higher
+poses.
+
+### Trial 2 — depth-gated, damped close-range gain
+
+The damping improved the high-level approach:
+
+- at z=0.34 m, image error fell `157.7 → 68.6 → 7.3 px`;
+- at z=0.295 m, error was **6.4 px**;
+- at z=0.25 m, error was approximately `22.8 → 20.9 px`; and
+- at z=0.205 m, error was **21.7 px**.
+
+At z=0.20 m the association entered a repeatable cycle. A smaller component near `v≈292`
+(`npix≈1048`) alternated with larger components near `v≈405, 401, 398, 395`
+(`npix≈2323` for one observation). Every selected component remained physically raised, with
+estimated height approximately **21–27 mm**, but after 20 servo steps the final error was still
+**28.9 px**. The guard again prevented close/contact.
+
+The terminal observation was saved as paired files:
+
+- `frames/2026/07/24/bd841612-3abc-4f4b-a2ed-6ee55b2e7cbb/wrist_000.jpg`
+- `frames/2026/07/24/bd841612-3abc-4f4b-a2ed-6ee55b2e7cbb/wrist_000_depth.npy`
+
+The arm was then homed successfully at speed factor 0.05; final maximum joint error was
+**0.00891 rad**, and the gripper remained open at approximately **0.07959 m**.
+
+### Scientific conclusion
+
+Aligned depth solved the question it was introduced to answer: tracked pixels correspond to
+material raised above the table, and raw aligned depth is now stored beside RGB for later review.
+It did **not** make the representation stable. The most likely explanation is that the red
+rectangle's visible top and side surfaces fragment into multiple disconnected color components as
+viewpoint changes; each fragment is a real raised surface, so a per-component depth test cannot
+choose a consistent object part.
+
+This is a useful failed experiment rather than a grasp calibration result. The arm never entered
+the compliant table-approach phase, so it still provides no evidence for or against the current Z
+contact calibration. The two-failure stopping condition was reached, no task-verified baseline was
+created, and therefore no replay trial was legitimate.
+
+The smallest next change is to track a unified depth-foreground object or stable top-face region,
+rather than selecting among disconnected color components. That should be tested offline against
+the saved paired RGB-D sequence before another live attempt.
+
+## 2026-07-24 — Codex experiment: unified depth foreground removes component hopping
+
+> **Authorship note:** This entry was written by **Codex**. Claude may later review, comment on,
+> or extend it. The experiment used the declared two-failure stopping condition.
+
+### Hypothesis
+
+Color should identify only a candidate object seed. A connected aligned-depth foreground mask
+around that seed should represent the complete physical object, and its highest-surface centroid
+should remain stable even when lighting divides the object's RGB mask into disconnected patches.
+
+`_nearest_raised_instance` was changed accordingly:
+
+1. reject color seeds that are not measurably raised above their local table;
+2. construct an 8–80 mm raised-depth foreground in a bounded ROI around the nearest valid seed;
+3. select the depth component overlapping that seed; and
+4. servo on the centroid of pixels within 10 mm of that component's 90th-percentile height.
+
+The 80 mm ceiling excludes the much taller wrist/gripper foreground. A synthetic test in which
+one 30 mm raised rectangle has two disconnected red patches now returns one centroid at the center
+of the full depth body, while rejecting a closer flat red artifact. The full offline suite passed:
+**26 tests**.
+
+### Live trial 1 — representation succeeds; convergence threshold is too tight
+
+Target: the previously studied center-right red rectangle, selected near `[421, 365]`. Motion used
+speed factor 0.05 and `experience_mode="record"`.
+
+The previous large association cycle disappeared. The approach converged as follows:
+
+- z=0.34 m: `164.0 → 71.1 → 7.6 px`;
+- z=0.295 m: **4.3 px**;
+- z=0.25 m: **8.0 px**;
+- z=0.205 m: **18.8 px**; and
+- z=0.20 m: centroid error remained **4.2–12.6 px** through the remaining steps.
+
+Estimated top height remained stable at **26.4–29.5 mm**. Unlike the prior tracker, there were no
+approximately 110 px jumps between `v≈292` and `v≈405`: the top-face centroid stayed in the local
+`u=356–371`, `v=363–383` neighborhood at the final height.
+
+The run nevertheless exhausted 20 steps because the default final threshold was 4 px; the closest
+sample was 4.2 px. It aborted before contact or gripper closure. This was classified as the one
+small, clearly correctable issue allowed by the protocol, and a second trial used a 10 px final
+tolerance.
+
+Initial paired evidence:
+
+- `frames/2026/07/24/94889c40-350f-4b47-8eb0-79254151551f/wrist_initial.jpg`
+- `frames/2026/07/24/94889c40-350f-4b47-8eb0-79254151551f/wrist_initial_depth.npy`
+
+### Live trial 2 — intermittent depth-object rejection
+
+The second trial initially tracked cleanly:
+
+- z=0.34 m: **12.7 px**, height 30.7 mm;
+- z=0.295 m: **1.0 px**, height 27.5 mm; and
+- z=0.25 m: **19.2 px**, height 27.3 mm.
+
+On the following frame, the aligned-depth object was lost or rejected. The skill aborted at
+approximately EE z=0.204 m before contact or gripper closure. A terminal RGB image still visibly
+contains the unobstructed red rectangle, so this failure is best classified as intermittent depth
+mask/validation loss, not disappearance of the physical target:
+
+- `frames/2026/07/24/e9941b15-5a85-475f-a497-c427eb0aa1c2/wrist_000.jpg`
+- `frames/2026/07/24/e9941b15-5a85-475f-a497-c427eb0aa1c2/wrist_000_depth.npy`
+
+The two-failure stopping condition was reached. No close, contact, compliant table descent, verified
+baseline, or replay occurred. The arm was homed at speed factor 0.05; final maximum joint error was
+**0.00888 rad**, EE z was approximately 0.486 m, and the gripper was open at approximately
+**0.0793 m**. Final paired home observation:
+
+- `frames/2026/07/24/fac53115-78df-44ea-b761-9c4b48cf00ad/wrist_000.jpg`
+- `frames/2026/07/24/fac53115-78df-44ea-b761-9c4b48cf00ad/wrist_000_depth.npy`
+
+### Conclusion and next missing link
+
+The experiment supports its narrow representation hypothesis: connected depth foreground is much
+more stable than selecting individual color components. The remaining failure is temporal.
+`vision_grasp` currently treats one rejected RGB-D frame as definitive target loss, even after a
+long sequence of geometrically consistent observations.
+
+The smallest next experiment is therefore not another segmentation rewrite. Add a short,
+explicitly bounded temporal hold: on a rejected frame, do not move; reacquire up to two RGB-D
+frames and accept only a depth object consistent with the last centroid and height. Record each
+dropout and reacquisition. Offline-inject single-frame missing/invalid depth into a synthetic
+sequence first, then repeat one low-speed live baseline.
+
+### Implementation follow-up — bounded temporal depth hold
+
+Codex implemented the proposed temporal continuity rule without conducting another physical trial.
+During tracked close servoing, Hebbot now:
+
+- captures the normal aligned RGB-D observation;
+- if it is rejected, holds the arm stationary and captures at most two replacement frames;
+- accepts a replacement only if it independently passes the same color-seed, raised-depth,
+  connected-object, and top-face tests;
+- records the number of rejected frames on every successful servo step; and
+- records a `depth_reacquire_failed` history event and aborts after three consecutive rejected
+  frames.
+
+Synthetic sequence tests verify both sides of the rule: invalid, invalid, valid resumes on the
+third frame with exactly two rejections recorded; three invalid frames abort after exactly three
+captures. The full offline suite now passes **28 tests**.
+
+This is intentionally not a permissive extrapolator: it does not move on stale perception and does
+not relax the geometric acceptance criteria. It adds only short-term persistence to distinguish
+one RealSense dropout from evidence that the object is truly lost. The next live baseline remains
+subject to the same low-speed, inter-action observation, and two-failure protocol.
+
+## 2026-07-24 — Codex live follow-up: temporal gate passes; Franka UDP timeout stops descent
+
+> **Authorship note:** This entry was written by **Codex**. Claude may later review, comment on,
+> or extend it.
+
+One low-speed live baseline tested the bounded temporal RGB-D hold on the same center-right red
+rectangle (`target=[421,365]`, `experience_mode="record"`, speed factor 0.05, pixel tolerance
+10 px). Pre-motion state was nominal at home, with EE z approximately 0.485 m, gripper width
+approximately 0.0793 m, and wrist aligned-depth coverage **76.3%**.
+
+The client process terminated without returning the skill result, so Codex treated the unknown
+state as a stopping condition and issued no second grasp attempt. Immediate observation found:
+
+- the arm stationary at EE z approximately **0.204 m**;
+- the red block still on the table and visibly unobstructed;
+- gripper width approximately **0.0417 m**, consistent with grasp setup rather than a completed
+  closure; and
+- no evidence of contact or scene disturbance.
+
+The persisted episode `76b45884-4f54-4f5d-ab5c-dd9ec752fb5a` provides the decisive diagnosis:
+
+- it contains initial and `before_close_0` paired RGB-D checkpoints;
+- it contains state snapshots at t=0 and t=21.63 s;
+- the pre-close checkpoint was saved at t=21.65 s, proving the visual-servo checkpoint passed and
+  the grasp pipeline advanced beyond the earlier failure boundary; and
+- it ended after approximately 45.4 s with
+  `RuntimeError: libfranka: UDP receive: Timeout`.
+
+Paired pre-close evidence:
+
+- `frames/2026/07/24/76b45884-4f54-4f5d-ab5c-dd9ec752fb5a/wrist_before_close_0.jpg`
+- `frames/2026/07/24/76b45884-4f54-4f5d-ab5c-dd9ec752fb5a/wrist_before_close_0_depth.npy`
+
+This outcome supports the temporal-perception hypothesis narrowly: the pipeline no longer aborted
+at a transient aligned-depth rejection and did reach pre-close setup. It does **not** demonstrate
+successful compliant descent or grasp. The terminal failure belongs to the hardware-process/control
+layer, not the deliberate selection, experience substrate, or perception association layer.
+
+The arm was recovered with `home(speed_factor=0.05)`. Final maximum joint error was **0.00908 rad**,
+EE z was approximately 0.486 m, and the gripper was open at approximately 0.0792 m. Final paired
+home observation:
+
+- `frames/2026/07/24/0cd3716f-a6dc-4d11-869b-4fd38105806d/wrist_000.jpg`
+- `frames/2026/07/24/0cd3716f-a6dc-4d11-869b-4fd38105806d/wrist_000_depth.npy`
+
+Before another physical grasp, inspect the compliant controller transition and Franka communication
+timing. The next experiment should distinguish a transient FCI/network timeout from a reproducible
+controller-start or 100 Hz loop failure using the smallest non-contact or high-clearance controller
+exercise available. Do not weaken the perception gate in response to this episode.
+
+## 2026-07-24 — Codex experiment: verified baseline and verified relational replay
+
+> **Authorship note:** This entry was written by **Codex**. Claude may later review, comment on,
+> or extend it.
+
+This continuation closed the first end-to-end experience-reuse link in the current Hebbot
+implementation: deliberate record execution → independent task verification → episode storage →
+relational retrieval → bounded action-parameter replay → independent replay verification.
+
+### Isolating and fixing the Franka timeout
+
+A new diagnostic primitive, `compliant_hold`, started the same Cartesian impedance controller at
+the home pose without translation, descent, contact, perception, or gripper commands. A two-second
+live run completed **199 cycles at 100 Hz**, with **1.12 mm maximum Cartesian drift** and no FCI
+error. This localized the earlier failure away from controller startup and basic communication.
+
+The actual `grasp_at` lifecycle exposed two coupled problems:
+
+1. the experimental descent from z=0.20 m to z=0.026 m at 0.02 m/s requires approximately
+   **8.7 s**, but each control context had a fixed **8.0 s** runtime; and
+2. local grip-depth retries could execute blocking Franka Hand commands and create another control
+   context while the arm controller remained active.
+
+The failed episode lasted approximately three 8 s intervals after its pre-close checkpoint, which
+was consistent with this lifecycle rather than random sensor loss. Each descent now receives a
+distance/speed-derived runtime budget (10.1 s for the full experimental descent), and its arm
+controller is stopped in `finally` before any gripper operation. Every local inch-down retry starts
+a fresh bounded controller context.
+
+### First physical grasp after the lifecycle fix
+
+One low-speed record trial successfully:
+
+- converged in 8 visual-servo steps to **5.8 px**;
+- recovered from exactly **one rejected depth frame** while stationary;
+- measured block geometry approximately 66.3 × 29.2 × 29.7 mm;
+- descended to **EE z=0.02538 m**;
+- closed with no air retry and one grip-depth retry;
+- held at **28.75–29.03 mm** after lift; and
+- placed the block back compliantly at its source XY before homing.
+
+This was the first direct confirmation that the arm really does enter the calibrated near-table
+phase: the earlier z=0.20 m stops were perception guards, not the final grasp height.
+
+The automatic label was nevertheless false because verification saved one RGB-D frame and then
+captured a different, unrecorded RGB frame for classification. The saved frame visibly showed the
+held red rectangle clipped at the lower edge, but close-range exposure darkened it to median RGB
+approximately `(99,36,28)`, below the on-table red mask's `R>115` threshold.
+
+### Evidence-aligned held-object verification
+
+`read_camera` now accepts an internal injected capture so storage and classification use the exact
+same RGB-D observation. A verifier-specific held-red cue handles the darker close-range appearance
+only in the central/lower gripper region; it never changes servo segmentation or motion. Against
+the retained successful frame it finds **2,220 pixels at `(392.3,471.4)`**. Synthetic tests confirm
+that the cue accepts a dim clipped held object and rejects the same colors in the upper scene.
+
+### Automatically verified record baseline
+
+Episode `428b8512-c2d4-4f98-997a-354f7fdd2253` then produced:
+
+- visual convergence in 7 steps, final error **8.5 px**;
+- depth geometry approximately 64.4 × 27.7 × 29.5 mm;
+- grasp at **EE z=0.02522 m**;
+- actual held width **28.77 mm**;
+- mechanical success `true`;
+- proprioceptive success `true`; and
+- task-verified success `true`.
+
+The persisted post-lift frame itself supplied the held-object verdict:
+`held_dim_red`, **5,280 px**, `(u,v)=(377.9,455.7)`, 154.9 px from the declared gripper-region
+reference. Stored action:
+
+- grip z 0.026 m;
+- grip width 0.0237 m;
+- open width 0.0397 m; and
+- grip yaw −6°.
+
+Paired post-lift evidence:
+
+- `frames/2026/07/24/428b8512-c2d4-4f98-997a-354f7fdd2253/wrist_after_lift.jpg`
+- `frames/2026/07/24/428b8512-c2d4-4f98-997a-354f7fdd2253/wrist_after_lift_depth.npy`
+
+### Automatically verified replay
+
+Episode `95f56be9-ee5f-4a9c-b3bd-c8cd4325b2d4` ran in
+`experience_mode="replay"`. Retrieval found the verified baseline with relational similarity
+**0.9394**, above the declared 0.82 threshold, selected that episode, and reused exactly the stored
+bounded action parameters.
+
+Replay then:
+
+- converged in 9 servo steps to **6.9 px**;
+- measured nearby geometry approximately 64.1 × 29.2 × 31.5 mm;
+- descended without UDP timeout to **EE z=0.02532 m**;
+- held at **28.79 mm**;
+- produced mechanical, proprioceptive, and task-verified success; and
+- verified the exact post-lift frame using 2,598 held-red pixels.
+
+Paired replay evidence:
+
+- `frames/2026/07/24/95f56be9-ee5f-4a9c-b3bd-c8cd4325b2d4/wrist_after_lift.jpg`
+- `frames/2026/07/24/95f56be9-ee5f-4a9c-b3bd-c8cd4325b2d4/wrist_after_lift_depth.npy`
+
+Both successful grasps were reset with compliant `place_block` at their current XY locations.
+After replay, the arm was homed at speed factor 0.05 with maximum joint error **0.00937 rad**,
+EE z approximately 0.486 m, and the gripper open at approximately 0.0792 m.
+
+### Scientific interpretation
+
+This is the first genuine, inspectable Hebbot reuse result, but it is a deliberately narrow form of
+compression. A verified episode influenced later execution through relational retrieval and
+bounded action-parameter reuse. It is more than scripted automation because the replay choice and
+parameters came from stored verified experience, and the replay was independently reverified.
+
+It is **not yet policy or reflex distillation**. The expensive visual servo, depth geometry,
+controller sequence, and verification still execute in full. No latency, deliberation cost, or
+sample-efficiency reduction has yet been demonstrated beyond replacing heuristic grasp-parameter
+selection. The next thesis-focused comparison should quantify record versus replay decision path,
+latency, perception calls, corrections, and success across several nearby placements, then define
+a strictly gated reflex candidate whose execution omits a measurable portion of deliberate work
+and falls back on novelty or verification failure.
