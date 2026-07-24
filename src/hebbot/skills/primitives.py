@@ -1126,15 +1126,25 @@ def _nearest_raised_instance(cap, color, track, min_px=80, min_height_m=0.008):
     if bgr is None or depth is None or scale <= 0.0:
         return None
     rgb = bgr[:, :, ::-1].astype(int)
-    lab = _label_cc(_color_mask(rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2], color))
+    R, G, B = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
+    lab = _label_cc(_color_mask(R, G, B, color))
+    # Local-table support must exclude every calibrated object colour, not just the target.
+    # Otherwise a nearby green/blue block can dominate the ring and make a valid red target look
+    # flat or implausibly tall (live warm-start collection, 2026-07-24).
+    any_object_color = np.zeros(lab.shape, dtype=bool)
+    for known_color in _SEGMENT_COLORS:
+        any_object_color |= _color_mask(R, G, B, known_color)
     dm = depth.astype(np.float32) * scale
     yy, xx = np.mgrid[0:dm.shape[0], 0:dm.shape[1]]
     seeds = []
+    seed_min_px = max(80, int(min_px) // 3)
     for label in np.unique(lab):
         if label == 0:
             continue
         ys, xs = np.where(lab == label)
-        if len(xs) < min_px:
+        # Color only seeds the unified depth object. Requiring every illuminated top/side patch
+        # to meet the final object's area threshold defeats unification when the mask fragments.
+        if len(xs) < seed_min_px:
             continue
         vals = dm[ys, xs]
         valid = vals > 0.05
@@ -1144,7 +1154,7 @@ def _nearest_raised_instance(cap, color, track, min_px=80, min_height_m=0.008):
         rad = max(4.0, float(np.sqrt(len(xs) / np.pi)))
         rr = np.hypot(xx - cu, yy - cv)
         ring = ((rr > 1.4 * rad) & (rr < 3.2 * rad)
-                & (lab == 0) & (dm > 0.05))
+                & ~any_object_color & (dm > 0.05))
         if int(ring.sum()) < 40:
             continue
         object_depth = float(np.median(vals[valid]))

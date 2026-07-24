@@ -256,6 +256,24 @@ def test_aligned_depth_gate_rejects_missing_depth():
     assert _nearest_raised_instance(cap, "red", [20, 20], min_px=100) is None
 
 
+def test_aligned_depth_table_ring_ignores_nearby_colored_object():
+    import numpy as np
+    from hebbot.skills.primitives import _nearest_raised_instance
+
+    color = np.zeros((140, 140, 3), dtype=np.uint8)
+    color[55:85, 55:85] = [0, 0, 200]       # red target
+    # A large green neighbor fills much of the target's old local-table ring.
+    color[35:105, 88:125] = [35, 95, 65]
+    depth = np.full((140, 140), 1000, dtype=np.uint16)
+    depth[55:85, 55:85] = 970
+    depth[35:105, 88:125] = 965
+    cap = {"color": color, "depth": depth, "depth_scale": 0.001}
+
+    found = _nearest_raised_instance(cap, "red", [70, 70], min_px=300)
+    assert found is not None
+    assert found[3] == pytest.approx(0.03)
+
+
 def test_held_red_verifier_accepts_dim_clipped_near_gripper_region():
     import numpy as np
     from hebbot.skills.primitives import _held_color_evidence
@@ -301,6 +319,22 @@ def test_aligned_depth_gate_unifies_fragmented_color_on_one_object():
     assert (u, v) == pytest.approx((84.5, 69.5))
     assert npix == 50 * 54
     assert height == pytest.approx(0.03)
+
+
+def test_depth_object_threshold_applies_after_small_color_seeds_are_unified():
+    import numpy as np
+    from hebbot.skills.primitives import _nearest_raised_instance
+
+    color = np.zeros((140, 160, 3), dtype=np.uint8)
+    color[45:65, 55:75] = [0, 0, 200]   # 400 px seed, below final 600 px gate
+    color[70:90, 85:105] = [0, 0, 200]  # another 400 px seed
+    depth = np.full((140, 160), 1000, dtype=np.uint16)
+    depth[42:94, 50:110] = 970           # unified physical body: 3120 px
+    cap = {"color": color, "depth": depth, "depth_scale": 0.001}
+
+    found = _nearest_raised_instance(cap, "red", [65, 55], min_px=600)
+    assert found is not None
+    assert found[2] == 52 * 60
 
 
 def test_depth_object_reacquires_after_transient_dropout():

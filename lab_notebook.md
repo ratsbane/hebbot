@@ -1285,3 +1285,105 @@ selection. The next thesis-focused comparison should quantify record versus repl
 latency, perception calls, corrections, and success across several nearby placements, then define
 a strictly gated reflex candidate whose execution omits a measurable portion of deliberate work
 and falls back on novelty or verification failure.
+
+## 2026-07-24 — Codex: warm-start distillation pipeline and first batch boundary
+
+> **Authorship note:** This entry was written by **Codex** while Doug was temporarily detached.
+> Claude may later review, comment on, or extend it.
+
+### Smallest reflex target
+
+The next compression target is a learned warm start:
+
+`acquisition observation + initial EE pose → predicted successful pre-close EE xy`
+
+The candidate does not own grasping, contact, or verification. If promoted, it may propose one
+bounded approach pose; aligned-depth confirmation, workspace checks, compliant descent,
+independent verification, and deliberate fallback remain mandatory. The measurable intended
+benefit is fewer RGB-D captures and visual-servo corrections, not merely different parameter
+selection.
+
+### Offline distillation implementation
+
+A new `hebbot.learning.warm_start` module now:
+
+- extracts only `task_verified_success=true` `vision_grasp` episodes;
+- pairs the first servo observation with the state snapshot nearest the persisted pre-close frame;
+- fits a small ridge-regression policy rather than a neural network;
+- performs leave-one-out shadow evaluation;
+- measures spatial diversity and deliberate servo-step cost;
+- records source episode IDs, feature normalization, weights, training bounds, metrics, and
+  promotion thresholds in a versioned JSON artifact; and
+- returns an explicit orchestrator fallback unless the artifact is promoted, the query lies inside
+  its normalized training domain, and predicted XY remains inside `[0.30,0.60] × [-0.28,0.28] m`.
+
+The substrate store gained public episode-state and episode-frame readers so training code does not
+reach through the SQLite connection. Synthetic tests cover insufficient-data rejection,
+low-error/diverse promotion, out-of-domain fallback, and state/frame extraction.
+
+The first real artifact, trained from the two prior verified episodes, correctly refused promotion:
+
+- **2 examples < 6 minimum**;
+- only **8.7 mm** pre-close XY span < 60 mm minimum; and
+- too few examples for leave-one-out evaluation.
+
+Artifact:
+`/home/doug/hebbot-data/policies/vision_grasp_warm_start_231950c4ca0c.json`
+
+### Live collection cycle 1 — verified
+
+The isolated right-hand red rectangle was deliberately grasped from target `[443,359]`:
+
+- 8 servo steps, final error **5.1 px**;
+- geometry approximately 61.2 × 29.3 × 28.9 mm;
+- grasp EE z **0.02543 m**;
+- held width **28.84 mm**;
+- mechanical, proprioceptive, and task-verified success; and
+- no depth reacquisition during servoing.
+
+Episode `99abf39a-4810-4b52-8e9c-0d5aaa0e8960` was reset compliantly to
+`[0.47,0.12]` and the arm homed at speed factor 0.05.
+
+With three verified examples, the second candidate still correctly refused promotion:
+
+- **3 examples < 6 minimum**;
+- **17.1 mm** pre-close XY span < 60 mm minimum; and
+- leave-one-out RMSE **13.4 mm**, inside the provisional 15 mm accuracy gate.
+
+Artifact:
+`/home/doug/hebbot-data/policies/vision_grasp_warm_start_afb458bc1cdc.json`
+
+This is encouraging but not evidence of a useful policy: the dataset is still too small and
+spatially narrow.
+
+### Live collection cycle 2 — safe failure exposes seed/object threshold coupling
+
+At the new placement, the target appeared near `[444.5,418.3]`. The deliberate servo progressed
+from 210.8 px to 13.0 px through z=0.295 m, then rejected three stationary RGB-D frames at z=0.25 m
+and aborted before contact or closing. The batch stopping condition was honored and the arm homed.
+
+Terminal paired evidence:
+
+- `frames/2026/07/24/8b10d922-c706-46d2-a17d-673ee3dc160b/wrist_000.jpg`
+- `frames/2026/07/24/8b10d922-c706-46d2-a17d-673ee3dc160b/wrist_000_depth.npy`
+
+Offline replay revealed the exact cause. Close-range illumination split the valid red mask into two
+real components of **538 and 587 px**. The unified physical depth body was large enough, but the
+code applied the final **600 px object threshold to each color seed before depth unification**.
+
+Color now serves as a weaker seed (`max(80, final_min_px/3)`), while the unified connected-depth
+body must still satisfy the full 600 px threshold. The preserved failure frame now resolves to one
+**5,132 px** depth object at `(353.2,343.4)`, height **26.4 mm**. A regression test preserves this
+behavior. Local-table rings also exclude all calibrated object colors, preventing adjacent
+green/blue objects from masquerading as table support.
+
+### Status
+
+The training and promotion machinery exists and fails closed. No learned candidate has controlled
+the robot. Live collection stopped after the first failed cycle, as declared. The offline suite
+passes **38 tests**.
+
+The next session should restart the MCP server so the seed-threshold fix is live, then continue the
+spatially diverse record batch. Promotion still requires at least six verified examples, at least
+60 mm pre-close XY span, leave-one-out RMSE at or below 15 mm, a bounded workspace prediction, and
+an in-domain query.

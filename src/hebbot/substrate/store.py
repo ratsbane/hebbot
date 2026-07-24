@@ -253,6 +253,18 @@ class Store:
             ),
         )
 
+    def episode_states(self, episode_id: str) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM states WHERE episode_id = ? ORDER BY t", (episode_id,)
+        ).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            for key in ("joints", "ee_pose", "force"):
+                item[key] = _unjsonify(item[key])
+            out.append(item)
+        return out
+
     # -----------------------------------------------------------------------
     # Frames (image references)
     # -----------------------------------------------------------------------
@@ -276,6 +288,14 @@ class Store:
             (frame_id, episode_id, camera, t, file_path, width, height),
         )
         return frame_id
+
+    def episode_frames(self, episode_id: str) -> list[dict]:
+        return [
+            dict(row) for row in self.conn.execute(
+                "SELECT * FROM frames WHERE episode_id = ? ORDER BY t, camera",
+                (episode_id,),
+            ).fetchall()
+        ]
 
     # -----------------------------------------------------------------------
     # Decisions
