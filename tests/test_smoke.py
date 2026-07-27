@@ -66,6 +66,104 @@ def test_descent_runtime_scales_with_distance_and_speed():
     assert _descent_context_runtime(0.026, 0.026, 0.02) == pytest.approx(2.0)
 
 
+def test_persistent_high_contact_requires_air_close_above_target():
+    from hebbot.skills.primitives import _persistent_high_contact
+
+    assert _persistent_high_contact(0.0437, 0.026, False, 0.006)
+    assert not _persistent_high_contact(0.030, 0.026, False, 0.006)
+    assert not _persistent_high_contact(0.0437, 0.026, True, 0.006)
+
+
+def test_alignment_depth_update_preserves_grasp_axis_geometry():
+    from hebbot.skills.primitives import _update_alignment_geometry
+
+    original = {
+        "u": 365.0, "v": 357.0, "height_m": 0.029,
+        "length_m": 0.057, "width_m": 0.028, "ang": 103.0,
+    }
+    updated = _update_alignment_geometry(
+        original, (350.0, 336.0, 5200, 0.027),
+    )
+    assert (updated["u"], updated["v"], updated["height_m"]) == (350.0, 336.0, 0.027)
+    assert updated["length_m"] == original["length_m"]
+    assert updated["width_m"] == original["width_m"]
+    assert updated["ang"] == original["ang"]
+
+
+def test_final_pose_tolerance_is_derived_from_per_side_jaw_clearance():
+    from hebbot.skills.primitives import _final_pose_alignment_tolerance_px
+
+    # The 2026-07-25 failed trial: 6 mm physical clearance on each side at
+    # 303.5 mm depth is 7.8 px; reserve 2 px for calibration/segmentation.
+    tol = _final_pose_alignment_tolerance_px(
+        open_width=0.0433,
+        object_width=0.0313,
+        object_depth=0.3035,
+        requested_tol=10.0,
+    )
+    assert tol == pytest.approx(5.8, abs=0.1)
+    assert _final_pose_alignment_tolerance_px(
+        0.06, 0.02, 0.30, requested_tol=5.0,
+    ) == pytest.approx(5.0)
+    assert _final_pose_alignment_tolerance_px(
+        0.031, 0.030, 0.30, requested_tol=10.0,
+    ) == pytest.approx(3.0)
+
+
+def test_yawed_recenter_rotates_reference_planar_delta():
+    import math
+    from hebbot.skills.primitives import _rotate_planar_delta
+
+    assert _rotate_planar_delta(0.01, 0.0, 0.0) == pytest.approx((0.01, 0.0))
+    assert _rotate_planar_delta(0.01, 0.0, math.pi / 2) == pytest.approx(
+        (0.0, 0.01), abs=1e-9,
+    )
+    assert _rotate_planar_delta(0.0, 0.01, -math.pi / 2) == pytest.approx(
+        (0.01, 0.0), abs=1e-9,
+    )
+
+
+def test_servo_prediction_uses_clamped_cartesian_command():
+    from hebbot.skills.primitives import _predict_servo_pixel
+
+    # 1 mm/px diagonal inverse Jacobian: a desired 200 px correction clamped to
+    # 60 mm must predict 60 px of image motion, not the unreachable target pixel.
+    predicted = _predict_servo_pixel(
+        140, 330, [[0.001, 0.0], [0.0, 0.001]], 0.060, -0.020,
+    )
+    assert predicted == pytest.approx([200, 310])
+
+
+def test_vision_grasp_probe_forces_recorded_no_descent_episode(monkeypatch):
+    import hebbot.skills.primitives as primitives
+
+    called = {}
+
+    def fake_vision_grasp(**kwargs):
+        called.update(kwargs)
+        return {"dry_run": kwargs["dry_run"], "safe_to_descend": True}
+
+    monkeypatch.setattr(primitives, "vision_grasp", fake_vision_grasp)
+    out = primitives.vision_grasp_probe(
+        color="red", target=[320, 330], speed_factor=0.2,
+    )
+    assert out["dry_run"]
+    assert called["experience_mode"] == "record"
+    assert called["max_retry"] == 0
+    assert called["speed_factor"] == pytest.approx(0.05)
+
+    monkeypatch.setattr(
+        primitives, "vision_grasp",
+        lambda **kwargs: {"located": False, "note": "coarse servo failed"},
+    )
+    failed = primitives.vision_grasp_probe(color="red")
+    assert failed["dry_run"]
+    assert not failed["safe_to_descend"]
+
+    invalid = primitives.vision_grasp_probe(color="red", instance="middle")
+    assert not invalid["safe_to_descend"]
+
+
 def test_read_camera_mock(substrate):
     # No camera in context -> mock mode, no file written.
     out = substrate.call("read_camera")
@@ -256,6 +354,42 @@ def test_aligned_depth_gate_rejects_missing_depth():
     assert _nearest_raised_instance(cap, "red", [20, 20], min_px=100) is None
 
 
+def test_depth_identity_gate_rejects_height_change_and_large_track_jump():
+    import numpy as np
+    from hebbot.skills.primitives import _nearest_raised_instance
+
+    color = np.zeros((160, 180, 3), dtype=np.uint8)
+    color[55:85, 110:140] = [200, 80, 20]
+    depth = np.full((160, 180), 1000, dtype=np.uint16)
+    depth[55:85, 110:140] = 930  # robot-like blue structure, 70 mm relief
+    cap = {"color": color, "depth": depth, "depth_scale": 0.001}
+
+    assert _nearest_raised_instance(
+        cap, "blue", [125, 70], min_px=600, expected_height_m=0.028,
+    ) is None
+    assert _nearest_raised_instance(
+        cap, "blue", [20, 20], min_px=600, max_track_distance_px=80,
+    ) is None
+
+
+def test_canonical_wrist_self_mask_is_narrow_and_includes_observed_housing():
+    from hebbot.skills.primitives import _is_canonical_wrist_self_candidate
+
+    assert _is_canonical_wrist_self_candidate(620, 110)
+    assert _is_canonical_wrist_self_candidate(320, 40)
+    assert not _is_canonical_wrist_self_candidate(510, 270)
+    assert not _is_canonical_wrist_self_candidate(120, 350)
+
+
+def test_acquisition_rejects_edge_clipped_candidate_centroids():
+    from hebbot.skills.primitives import _is_frame_edge_candidate
+
+    assert _is_frame_edge_candidate(120, 467)
+    assert _is_frame_edge_candidate(8, 240)
+    assert not _is_frame_edge_candidate(120, 450)
+    assert not _is_frame_edge_candidate(320, 240)
+
+
 def test_aligned_depth_table_ring_ignores_nearby_colored_object():
     import numpy as np
     from hebbot.skills.primitives import _nearest_raised_instance
@@ -295,6 +429,27 @@ def test_held_red_verifier_keeps_relaxed_cue_out_of_upper_scene():
     color = np.zeros((100, 120, 3), dtype=np.uint8)
     color[10:35, 45:75] = [28, 36, 99]
     assert _held_color_evidence(color, "red", min_px=200) is None
+
+
+def test_post_lift_verifier_accepts_vacant_source_when_held_is_clipped():
+    import numpy as np
+    from hebbot.skills.primitives import _post_lift_visual_evidence
+
+    blank = np.zeros((100, 120, 3), dtype=np.uint8)
+    evidence = _post_lift_visual_evidence(blank, "red", [60, 75], min_px=200)
+    assert evidence["present"]
+    assert evidence["cue"] == "source_vacant"
+
+
+def test_post_lift_verifier_rejects_target_remaining_at_source():
+    import numpy as np
+    from hebbot.skills.primitives import _post_lift_visual_evidence
+
+    color = np.zeros((100, 120, 3), dtype=np.uint8)
+    color[60:80, 50:70] = [60, 70, 180]
+    evidence = _post_lift_visual_evidence(color, "red", [60, 70], min_px=200)
+    assert not evidence["present"]
+    assert evidence["cue"] == "target_remains_at_source"
 
 
 def test_aligned_depth_gate_unifies_fragmented_color_on_one_object():

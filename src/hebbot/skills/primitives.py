@@ -15,6 +15,7 @@ Context keys this module recognizes:
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Any, Optional
 
@@ -784,6 +785,59 @@ def _descent_context_runtime(start_z, target_z, descent_speed, settle_s=0.4):
     return max(2.0, travel_s + float(settle_s) + 1.0)
 
 
+def _persistent_high_contact(actual_z, target_z, grasped, tolerance):
+    """True when descent stalled high and the close confirmed no object was caught."""
+    return bool(
+        not grasped
+        and float(actual_z) > float(target_z) + float(tolerance)
+    )
+
+
+def _update_alignment_geometry(geom, raised):
+    """Update only depth-body alignment fields, preserving grasp-axis geometry."""
+    return {
+        **geom,
+        "u": float(raised[0]),
+        "v": float(raised[1]),
+        "height_m": float(raised[3]),
+    }
+
+
+def _final_pose_alignment_tolerance_px(
+    open_width, object_width, object_depth, requested_tol, uncertainty_px=2.0,
+):
+    """Centroid gate derived from the physical jaw clearance in the final wrist pose.
+
+    Each jaw has half of ``open_width - object_width`` available before its inner face
+    overlaps the target top. Convert that margin to image pixels and reserve a small amount
+    for segmentation/calibration uncertainty. This is intentionally conservative until the
+    final-pose RGB-D representation models the two finger corridors independently.
+    """
+    clearance_m = max(0.0, (float(open_width) - float(object_width)) / 2.0)
+    clearance_px = clearance_m * _CAM_FX / max(float(object_depth), 0.05)
+    return float(min(
+        float(requested_tol),
+        max(3.0, clearance_px - float(uncertainty_px)),
+    ))
+
+
+def _rotate_planar_delta(dx, dy, yaw):
+    """Rotate a reference gripper-down XY image-servo correction into a yawed wrist frame."""
+    c, s = math.cos(float(yaw)), math.sin(float(yaw))
+    return c * float(dx) - s * float(dy), s * float(dx) + c * float(dy)
+
+
+def _predict_servo_pixel(u, v, jinv, commanded_dx, commanded_dy):
+    """Predict the next centroid from the Cartesian correction actually commanded."""
+    import numpy as np
+
+    pixel_delta = np.linalg.solve(
+        np.asarray(jinv, dtype=float),
+        np.asarray([commanded_dx, commanded_dy], dtype=float),
+    )
+    return [float(u + pixel_delta[0]), float(v + pixel_delta[1])]
+
+
 def grasp_at(
     *,
     grasp_z: float = 0.038,
@@ -863,6 +917,7 @@ def grasp_at(
     actual_z = float(panda.get_position()[2])
     z_target = grasp_z
     air_retries, depth_retries = 0, 0     # telemetry: in-place inch-downs by cause
+    persistent_high_contact = False
     for _local in range(4):
         _descend_to(z_target)
         actual_z = float(panda.get_position()[2])
@@ -887,6 +942,13 @@ def grasp_at(
             gripper.move(width=ow, speed=0.1)
             z_target = max(0.012, z_target - 0.007)
             continue
+        if _persistent_high_contact(actual_z, z_target, grasped, grip_depth_tol):
+            # Closing on air after the EE physically stalled above its requested depth is a
+            # lateral-centering/contact failure, not a z-target error. Repeatedly commanding a
+            # lower target only presses the same fingertip harder onto the block top.
+            persistent_high_contact = True
+            gripper.move(width=ow, speed=0.1)
+            break
         # closed on air → reopen and step ~7 mm lower, then retry the close in place
         air_retries += 1
         gripper.move(width=ow, speed=0.1)
@@ -899,6 +961,11 @@ def grasp_at(
     return {"_source": "live", "grasped": bool(grasped), "actual_z": actual_z,
             "actual_width": float(gripper.read_once().width),
             "air_retries": air_retries, "depth_retries": depth_retries,
+            "persistent_high_contact": persistent_high_contact,
+            "note": (
+                "air-close after persistent high contact; lateral re-acquisition required"
+                if persistent_high_contact else None
+            ),
             "grip_high_mm": round(max(0.0, actual_z - grasp_z) * 1000, 1)}
 
 
@@ -1110,7 +1177,61 @@ def _held_color_evidence(bgr, color, min_px=200):
     return best
 
 
-def _nearest_raised_instance(cap, color, track, min_px=80, min_height_m=0.008):
+def _post_lift_visual_evidence(bgr, color, source_pixel, min_px=200):
+    """Verify a lifted target by held-object visibility or vacancy at its source.
+
+    At some workspace/yaw combinations the grasped block is clipped below the wrist frame.
+    A same-frame alternative is then available: a dropped/unmoved target would remain near its
+    height-corrected source pixel. This function supplies visual evidence only; the caller still
+    requires a mechanically successful grasp and nonzero gripper width.
+    """
+    import numpy as np
+
+    held = _held_color_evidence(bgr, color, min_px=min_px)
+    if held is not None:
+        u, v, npix, cue = held
+        source_distance = float(np.hypot(u - source_pixel[0], v - source_pixel[1]))
+        # The red near-field cue is specific to the dark, clipped held appearance. A normal
+        # table-calibrated component at the predicted source pixel is evidence that the target
+        # never left the table, not that it is held.
+        if cue == "held_dim_red":
+            return {
+                "present": True, "u": round(float(u), 1), "v": round(float(v), 1),
+                "npix": int(npix), "cue": cue,
+                "source_distance_px": round(source_distance, 1),
+            }
+        if source_distance <= 120.0:
+            return {
+                "present": False, "cue": "target_remains_at_source",
+                "observed_u": round(float(u), 1), "observed_v": round(float(v), 1),
+                "npix": int(npix), "source_distance_px": round(source_distance, 1),
+            }
+
+    source = _nearest_instance(bgr, color, source_pixel, min_px=120)
+    if source is None:
+        return {
+            "present": True, "cue": "source_vacant",
+            "source_u": round(float(source_pixel[0]), 1),
+            "source_v": round(float(source_pixel[1]), 1),
+        }
+    u, v, npix = source
+    distance = float(np.hypot(u - source_pixel[0], v - source_pixel[1]))
+    source_present = bool(distance <= 120.0)
+    return {
+        "present": not source_present,
+        "cue": "source_vacant" if not source_present else "target_remains_at_source",
+        "source_u": round(float(source_pixel[0]), 1),
+        "source_v": round(float(source_pixel[1]), 1),
+        "observed_u": round(float(u), 1), "observed_v": round(float(v), 1),
+        "npix": int(npix), "source_distance_px": round(distance, 1),
+    }
+
+
+def _nearest_raised_instance(
+    cap, color, track, min_px=80, min_height_m=0.008,
+    expected_height_m=None, max_height_delta_m=0.018,
+    max_track_distance_px=None,
+):
     """Nearest color-seeded, connected depth object above its local table.
 
     RGB shadows/reflections can satisfy the calibrated color masks, but their depth is the
@@ -1163,6 +1284,8 @@ def _nearest_raised_instance(cap, color, track, min_px=80, min_height_m=0.008):
         if not (min_height_m <= height <= 0.10):
             continue
         d = (cu - track[0]) ** 2 + (cv - track[1]) ** 2
+        if max_track_distance_px is not None and d > float(max_track_distance_px) ** 2:
+            continue
         seeds.append({
             "d": d, "xs": xs, "ys": ys, "cu": cu, "cv": cv,
             "table_depth": table_depth,
@@ -1206,6 +1329,12 @@ def _nearest_raised_instance(cap, color, track, min_px=80, min_height_m=0.008):
         return None
     object_heights = heights[oy, ox]
     top_height = float(np.percentile(object_heights, 90))
+    # Continuity must compare like with like. The public observation is the unified depth body's
+    # 90th-percentile top height; comparing it to the next frame's color-seed median made ordinary
+    # illumination changes look like a physical identity change (green trial, 2026-07-27).
+    if (expected_height_m is not None
+            and abs(top_height - float(expected_height_m)) > float(max_height_delta_m)):
+        return None
     top = object_heights >= top_height - 0.010
     if int(top.sum()) < 20:
         return None
@@ -1216,6 +1345,8 @@ def _nearest_raised_instance(cap, color, track, min_px=80, min_height_m=0.008):
 
 def _reacquire_raised_instance(
     cam, color, track, min_px=80, min_height_m=0.008, max_retries=2,
+    expected_height_m=None, max_height_delta_m=0.018,
+    max_track_distance_px=None,
 ):
     """Capture a raised object, holding still across a bounded transient dropout.
 
@@ -1223,16 +1354,54 @@ def _reacquire_raised_instance(
     `max_retries` replacements. Each frame must independently satisfy the depth-object gate.
     Returns (observation_or_none, rejected_frame_count).
     """
+    raised, rejected, _ = _reacquire_raised_capture(
+        cam, color, track, min_px=min_px, min_height_m=min_height_m,
+        max_retries=max_retries, expected_height_m=expected_height_m,
+        max_height_delta_m=max_height_delta_m,
+        max_track_distance_px=max_track_distance_px,
+    )
+    return raised, rejected
+
+
+def _reacquire_raised_capture(
+    cam, color, track, min_px=80, min_height_m=0.008, max_retries=2,
+    expected_height_m=None, max_height_delta_m=0.018,
+    max_track_distance_px=None,
+):
+    """As `_reacquire_raised_instance`, also returning the exact evaluated RGB-D capture."""
     rejected = 0
+    last_capture = None
     for _ in range(max_retries + 1):
+        last_capture = cam.capture(with_depth=True)
         raised = _nearest_raised_instance(
-            cam.capture(with_depth=True), color, track,
+            last_capture, color, track,
             min_px=min_px, min_height_m=min_height_m,
+            expected_height_m=expected_height_m,
+            max_height_delta_m=max_height_delta_m,
+            max_track_distance_px=max_track_distance_px,
         )
         if raised is not None:
-            return raised, rejected
+            return raised, rejected, last_capture
         rejected += 1
-    return None, rejected
+    return None, rejected, last_capture
+
+
+def _is_canonical_wrist_self_candidate(u, v, height_m=None):
+    """Conservative D405-view exclusion for visible wrist/arm structure.
+
+    This is deliberately narrow: the canonical gripper-down view can expose the wrist housing
+    in the upper-right corner. It is not a substitute for projecting robot geometry into the
+    camera; it only prevents the observed blue-housing failure from becoming a target seed.
+    """
+    return bool(float(v) < 60.0 or (float(u) > 540.0 and float(v) < 180.0))
+
+
+def _is_frame_edge_candidate(u, v, width=640, height=480, margin=20):
+    """True when a centroid is too near an image edge for complete-object geometry."""
+    return bool(
+        float(u) < margin or float(u) > float(width) - margin
+        or float(v) < margin or float(v) > float(height) - margin
+    )
 
 
 # EE z at which the fingertips touch the table — the base for turning a height above the table into
@@ -1553,6 +1722,7 @@ def vision_grasp(
     experience_mode: str = "off",
     replay_threshold: float = 0.82,
     speed_factor: float = 0.1,
+    dry_run: bool = False,
     _context: Optional[Any] = None,
     _store: Optional[Any] = None,
     _episode_id: Optional[str] = None,
@@ -1635,13 +1805,17 @@ def vision_grasp(
         move_to_pose([float(p0[0]), float(p0[1]), z], speed_factor=motion_speed,
                      _context=_context)
         last = None
+        expected_height_m = None
         for step in range(max_steps):
+            expected_track = list(track) if track else None
             if track:
                 # Hold position through a single-frame RealSense dropout. The bounded two-frame
                 # reacquisition is perception-only: no command is sent until a fresh observation
                 # independently passes the same raised-object gate.
-                raised, depth_rejections = _reacquire_raised_instance(
-                    cam, color, track, min_px=600, max_retries=2,
+                raised, depth_rejections, evaluated_cap = _reacquire_raised_capture(
+                    cam, color, track, min_px=600, max_retries=5,
+                    expected_height_m=expected_height_m,
+                    max_track_distance_px=95.0,
                 )
                 seg = raised[:3] if raised is not None else None
                 depth_height = raised[3] if raised is not None else None
@@ -1651,10 +1825,30 @@ def vision_grasp(
                 depth_height = None
                 depth_rejections = 0
             if seg is None:
-                history.append({
+                rejected = {
                     "step": step, "z": round(z, 3), "event": "depth_reacquire_failed",
                     "rejected_frames": depth_rejections,
-                })
+                    "expected_u": round(float(track[0]), 1) if track else None,
+                    "expected_v": round(float(track[1]), 1) if track else None,
+                    "expected_height_m": (
+                        round(float(expected_height_m), 4)
+                        if expected_height_m is not None else None
+                    ),
+                }
+                if track and evaluated_cap is not None:
+                    ungated = _nearest_raised_instance(
+                        evaluated_cap, color, track, min_px=600,
+                    )
+                    if ungated is not None:
+                        rejected["best_ungated_candidate"] = {
+                            "u": round(float(ungated[0]), 1),
+                            "v": round(float(ungated[1]), 1),
+                            "distance_px": round(float(np.hypot(
+                                ungated[0] - track[0], ungated[1] - track[1],
+                            )), 1),
+                            "height_m": round(float(ungated[3]), 4),
+                        }
+                history.append(rejected)
                 servo_stop_reason = (
                     "target lost or rejected by aligned-depth gate after "
                     f"{depth_rejections} stationary frames"
@@ -1663,6 +1857,8 @@ def vision_grasp(
             u, v, npix = seg
             if track is not None:
                 track = [u, v]
+                if expected_height_m is None:
+                    expected_height_m = float(depth_height)
             d = z - pick_top                   # parallax: a point pick_top above the table
             if track is None:                  # plausibility gate (merged-colour path only)
                 expected = 5600.0 * (_VG_APPROACH_Z / d) ** 2
@@ -1675,6 +1871,8 @@ def vision_grasp(
             at_bottom = z <= approach_z + 1e-3
             history.append({"step": step, "z": round(z, 3), "u": round(u, 1),
                             "v": round(v, 1), "pixel_err": round(err, 1), "npix": npix,
+                            "expected_u": round(float(expected_track[0]), 1),
+                            "expected_v": round(float(expected_track[1]), 1),
                             "depth_height_m": (
                                 round(float(depth_height), 4)
                                 if depth_height is not None else None
@@ -1698,23 +1896,39 @@ def vision_grasp(
             if err <= descend_tol and not at_bottom:
                 z = max(approach_z, z - z_step)
             p = panda.get_position()
-            tx = float(np.clip(float(p[0]) + dex, 0.30, 0.60))
-            ty = float(np.clip(float(p[1]) + dey, -0.28, 0.28))
+            px, py = float(p[0]), float(p[1])
+            tx = float(np.clip(px + dex, 0.30, 0.60))
+            ty = float(np.clip(py + dey, -0.28, 0.28))
             move_to_pose([tx, ty, z], speed_factor=motion_speed, _context=_context)
+            if track is not None:
+                # Predict where this same physical target should appear after the commanded
+                # correction. On a descent, the height-corrected grasp pixel is the stronger
+                # prediction; otherwise interpolate by the applied servo gain. This prevents
+                # nearest-colour reacquisition from jumping to robot self or a neighbour.
+                if history[-1]["z"] != round(z, 3):
+                    track = list(_vg_grasp_pixel(z - pick_top))
+                else:
+                    track = _predict_servo_pixel(u, v, jinv, tx - px, ty - py)
         servo_stop_reason = (
             f"coarse servo did not converge: final error {err:.1f}px at z={z:.3f}m"
         )
         return None
 
-    def _recenter(u, v, tu, tv, d):
+    def _recenter(u, v, tu, tv, d, yaw=0.0, gain=1.0):
         """Translate (gripper-down → image Jacobian valid) so the depth top-face centroid
-        (u, v) lands on the target grasp-pixel (tu, tv). Run before yawing. `d` is the top
-        face's camera distance so the Jacobian gain matches its height (parallax)."""
+        (u, v) lands on the target grasp-pixel (tu, tv). `d` is the top-face camera
+        distance. The calibrated Jacobian is expressed at zero wrist yaw; rotate its planar
+        correction when this is called from the final yawed pose."""
         nonlocal track
         jinv = _vg_jinv(d)
         du, dv = tu - u, tv - v
-        dex = float(np.clip(jinv[0][0] * du + jinv[0][1] * dv, -0.05, 0.05))
-        dey = float(np.clip(jinv[1][0] * du + jinv[1][1] * dv, -0.05, 0.05))
+        dex = float(gain) * float(np.clip(
+            jinv[0][0] * du + jinv[0][1] * dv, -0.05, 0.05,
+        ))
+        dey = float(gain) * float(np.clip(
+            jinv[1][0] * du + jinv[1][1] * dv, -0.05, 0.05,
+        ))
+        dex, dey = _rotate_planar_delta(dex, dey, yaw)
         p = panda.get_position()
         # Hold the perceive height (pz, ~0.30) — NOT approach_z. Dropping to 0.20 here makes
         # the re-perceive read close-range depth, which is unreliable (it inflated a cube to
@@ -1724,6 +1938,10 @@ def vision_grasp(
         move_to_pose([tx, ty, pz],
                      speed_factor=motion_speed, _context=_context)
         track = [u, v]
+        return {
+            "world_dx_m": dex, "world_dy_m": dey,
+            "yaw_rad": float(yaw), "gain": float(gain),
+        }
 
     def _tilt_classify():
         """Piece 3 — 'back off and view from another angle': a 35° side glance that resolves
@@ -1748,11 +1966,14 @@ def vision_grasp(
 
     result = None
     lower_bias = 0.0          # each missed grasp biases the next one lower (Doug: a miss is
+    geometry_alignment_history = []
     experience_state = None
     experience_candidates = []
     selected_experience = None
     decision_logged = False
     before_capture = None
+    final_pose_capture = None
+    final_pose_alignment = None
     for attempt in range(max_retry + 1):   # usually 'gripped too high' → open + go down + retry)
         if _coarse_servo() is None:
             result = {"_source": "live", "located": located, "grasped": False,
@@ -1774,14 +1995,74 @@ def vision_grasp(
             geom = _perceive_pose_3d(cam, color, track, _context=_context)
         if geom is not None:
             H = geom["height_m"]
-            # Re-centre on the TRUE top-face centroid. The grasp-pixel is parallax-corrected
-            # to the top face's height (d = pz − H), like an elevated/stacked pick.
-            d_face = max(0.05, pz - H)
-            tu, tv = _vg_grasp_pixel(d_face)
-            if float(np.hypot(geom["u"] - tu, geom["v"] - tv)) > pixel_tol:
+            # Re-centre on the TRUE top-face centroid. One pass is not sufficient at the edge of
+            # the workspace: the 2026-07-25 +y failure retained 11.9 px residual error, then a
+            # fingertip stalled 17.7 mm high on the block top. Re-perceive and recheck after every
+            # correction. Use the same physical jaw-clearance budget that the independent
+            # post-yaw guard will enforce; otherwise the legacy 10 px gate can accept a pose that
+            # the actual opening cannot safely straddle.
+            geometry_aligned = False
+            for align_pass in range(4):       # observation + at most three corrections
+                d_face = max(0.05, pz - H)
+                tu, tv = _vg_grasp_pixel(d_face)
+                align_error = float(np.hypot(geom["u"] - tu, geom["v"] - tv))
+                nominal_grip_w = float(np.clip(
+                    geom["width_m"] - 0.004, 0.010, 0.05,
+                ))
+                nominal_open_w = float(np.clip(
+                    nominal_grip_w + 0.016, 0.035, 0.065,
+                ))
+                alignment_tol = _final_pose_alignment_tolerance_px(
+                    nominal_open_w, geom["width_m"], geom["block_depth"], pixel_tol,
+                )
+                geometry_alignment_history.append({
+                    "pass": align_pass,
+                    "u": round(float(geom["u"]), 2),
+                    "v": round(float(geom["v"]), 2),
+                    "target_u": round(float(tu), 2),
+                    "target_v": round(float(tv), 2),
+                    "pixel_error": round(align_error, 2),
+                    "pixel_tolerance": round(alignment_tol, 2),
+                    "length_m": round(float(geom["length_m"]), 4),
+                    "width_m": round(float(geom["width_m"]), 4),
+                    "height_m": round(float(geom["height_m"]), 4),
+                })
+                if align_error <= alignment_tol:
+                    geometry_aligned = True
+                    break
+                if align_pass == 3:
+                    break
                 _recenter(geom["u"], geom["v"], tu, tv, d_face)
-                geom = _perceive_pose_3d(cam, color, track, _context=_context) or geom
+                # Geometry perception deliberately starts from color to estimate the grasp axis
+                # and width, but close-range illumination can split one physical rectangle into
+                # several color components. Do not chase those fragments during alignment. Use
+                # the same unified raised-depth body as coarse servoing, while retaining the
+                # initial object's width/length/yaw estimate.
+                raised, rejected = _reacquire_raised_instance(
+                    cam, color, [tu, tv], min_px=600, max_retries=2,
+                )
+                geometry_alignment_history[-1]["rejected_followup_frames"] = rejected
+                if raised is None:
+                    break
+                geom = _update_alignment_geometry(geom, raised)
+                track = [geom["u"], geom["v"]]
                 H = geom["height_m"]
+            if not geometry_aligned:
+                result = {
+                    "_source": "live", "located": located, "grasped": False,
+                    "note": (
+                        "depth top-face alignment did not converge before descent: "
+                        f"{geometry_alignment_history[-1]['pixel_error']:.1f}px > "
+                        f"{geometry_alignment_history[-1]['pixel_tolerance']:.1f}px "
+                        "jaw-clearance tolerance"
+                    ),
+                    "servo_steps": len(history), "history": history, "attempt": attempt,
+                    "geom": {
+                        k: round(float(val), 4) for k, val in geom.items()
+                    },
+                    "geometry_alignment_history": geometry_alignment_history,
+                }
+                break
 
             # Piece 3: a tilt-glance only when the top-down height is ambiguous / sparse —
             # it corrects H so a standing block isn't mistaken for a low one (and vice versa).
@@ -1886,6 +2167,7 @@ def vision_grasp(
 
             # Piece 2: fingers parallel to the true long edges (across the short axis), using
             # the STABLE depth principal axis. Skip the twist for near-square tops (cubes).
+            applied_yaw = 0.0
             if geom["length_m"] / max(geom["width_m"], 1e-3) >= 1.25:
                 if replay_yaw is not None:
                     phi = replay_yaw
@@ -1904,6 +2186,7 @@ def vision_grasp(
 
                 try:
                     q7 = _apply_yaw(phi)
+                    applied_yaw = phi
                     grip_yaw = round(math.degrees(phi))
                     # Exploit the gripper's 180° symmetry: yaw φ and φ±π are the IDENTICAL grasp, but
                     # at the workspace edge the arm's azimuth forces a big counter-rotation, driving
@@ -1912,10 +2195,131 @@ def vision_grasp(
                     # it's more comfortable (smaller |q7|), reverting if it isn't.
                     if abs(q7) > 2.5:
                         alt = phi - math.copysign(math.pi, phi)
-                        if abs(_apply_yaw(alt)) >= abs(q7):
+                        alt_q7 = _apply_yaw(alt)
+                        if abs(alt_q7) >= abs(q7):
                             _apply_yaw(phi)              # original was better — revert
+                        else:
+                            applied_yaw = alt
                 except Exception:
                     grip_yaw = None
+                    applied_yaw = 0.0
+
+            # Yaw is a consequential transform of the eye-in-hand system. The previous code
+            # aligned before yaw and then descended without observing again; a small tool/camera
+            # rotation offset can consume the few millimetres of physical jaw clearance. In
+            # clutter, neighbors can also enter a finger corridor only in this final pose.
+            #
+            # First establish the final-pose invariant we can test reliably today: the same
+            # raised depth body must remain centered within a tolerance derived from the actual
+            # jaw/object clearance. Save paired RGB-D at this boundary so later work can model
+            # the two finger corridors and neighboring bodies without changing the episode shape.
+            d_face = max(0.05, pz - H)
+            tu, tv = _vg_grasp_pixel(d_face)
+            final_tol = _final_pose_alignment_tolerance_px(
+                open_w, geom["width_m"], geom["block_depth"], pixel_tol,
+            )
+            final_pose_history = []
+            final_pose_cap = None
+            final_pose_alignment = None
+            for final_pass in range(3):       # observation + at most two yaw-aware corrections
+                raised, rejected, final_pose_cap = _reacquire_raised_capture(
+                    cam, color, [tu, tv], min_px=600, max_retries=2,
+                )
+                if raised is None:
+                    final_pose_alignment = {
+                        "pass": final_pass,
+                        "passed": False, "rejected_frames": rejected,
+                        "pixel_tolerance": round(final_tol, 2),
+                        "note": "target unavailable in final wrist pose",
+                    }
+                    final_pose_history.append(final_pose_alignment)
+                    break
+                final_error = float(np.hypot(raised[0] - tu, raised[1] - tv))
+                final_pose_alignment = {
+                    "pass": final_pass,
+                    "passed": bool(final_error <= final_tol),
+                    "u": round(float(raised[0]), 2),
+                    "v": round(float(raised[1]), 2),
+                    "target_u": round(float(tu), 2),
+                    "target_v": round(float(tv), 2),
+                    "pixel_error": round(final_error, 2),
+                    "pixel_tolerance": round(final_tol, 2),
+                    "object_pixels": int(raised[2]),
+                    "height_m": round(float(raised[3]), 4),
+                    "rejected_frames": rejected,
+                }
+                final_pose_history.append(final_pose_alignment)
+                track = [float(raised[0]), float(raised[1])]
+                if final_pose_alignment["passed"] or final_pass == 2:
+                    break
+                correction = _recenter(
+                    raised[0], raised[1], tu, tv, d_face,
+                    yaw=applied_yaw, gain=0.5,
+                )
+                final_pose_alignment["correction"] = {
+                    key: round(float(value), 6) for key, value in correction.items()
+                }
+            final_pose_alignment = {
+                **final_pose_alignment,
+                "history": final_pose_history,
+            }
+            try:
+                final_pose_capture = read_camera(
+                    camera=camera, with_depth=True, save=True, _context=_context,
+                    _store=_store, _episode_id=_episode_id,
+                    _frame_tag=f"final_pose_{attempt}",
+                    _t=time.monotonic() - started,
+                    _capture=final_pose_cap,
+                ) if experiment else None
+            except Exception:
+                final_pose_capture = None
+            if not final_pose_alignment["passed"]:
+                result = {
+                    "_source": "live", "located": located, "grasped": False,
+                    "note": "final-pose jaw-clearance alignment refused descent",
+                    "servo_steps": len(history),
+                    "final_pixel_err": history[-1]["pixel_err"] if history else None,
+                    "grip_yaw_deg": grip_yaw, "attempt": attempt,
+                    "geom": {
+                        k: round(float(val), 4) for k, val in geom.items()
+                    },
+                    "grip_z": round(g_z, 4),
+                    "grip_width": round(grip_w, 4),
+                    "open_width": round(open_w, 4),
+                    "history": history,
+                    "geometry_alignment_history": geometry_alignment_history,
+                    "final_pose_alignment": final_pose_alignment,
+                }
+                break
+
+        if dry_run:
+            result = {
+                "_source": "live",
+                "dry_run": True,
+                "safe_to_descend": bool(
+                    geom is not None
+                    and final_pose_alignment is not None
+                    and final_pose_alignment.get("passed")
+                ),
+                "located": located,
+                "grasped": None,
+                "note": "final-pose probe complete; no descent commanded",
+                "servo_steps": len(history),
+                "final_pixel_err": history[-1]["pixel_err"] if history else None,
+                "grip_yaw_deg": grip_yaw,
+                "attempt": attempt,
+                "geom": (
+                    {k: round(float(val), 4) for k, val in geom.items()}
+                    if geom else None
+                ),
+                "grip_z": round(g_z, 4),
+                "grip_width": round(grip_w, 4),
+                "open_width": round(open_w, 4) if geom is not None else None,
+                "history": history,
+                "geometry_alignment_history": geometry_alignment_history,
+                "final_pose_alignment": final_pose_alignment,
+            }
+            break
 
         # Open just past the target's width (open_w) — enough clearance to descend without a tip
         # clipping the block top, but not so wide it reaches into an adjacent block. The lower grip
@@ -1933,6 +2337,9 @@ def vision_grasp(
                   "history": history, "grasped": g.get("grasped"),
                   "actual_z": g.get("actual_z"), "actual_width": g.get("actual_width"),
                   "air_retries": g.get("air_retries"), "depth_retries": g.get("depth_retries"),
+                  "persistent_high_contact": g.get("persistent_high_contact"),
+                  "geometry_alignment_history": geometry_alignment_history,
+                  "final_pose_alignment": final_pose_alignment,
                   "grip_high_mm": g.get("grip_high_mm")}
 
         # Piece 4: verify + retry. A failed grasp usually nudged the block, so lift, re-acquire
@@ -1979,25 +2386,30 @@ def vision_grasp(
             except Exception:
                 after_capture = None
             # Perceptual check: a substantial target-colour component must remain near the
-            # gripper-centred region after the lift. For this first experiment the target is
-            # deliberately isolated; saved RGB-D remains available for deliberate review.
+            # gripper-centred region after the lift. When the held block is clipped below the
+            # image, combine proprioception with vacancy at the height-corrected source pixel.
+            # For this first experiment the target is deliberately isolated.
             frame = (
                 verification_cap["color"] if verification_cap is not None
                 else cam.capture(with_depth=False)["color"]
             )
             h, w = frame.shape[:2]
-            seg = _held_color_evidence(frame, color, min_px=200)
-            if seg is not None:
-                u, v, npix, cue = seg
+            lift_position = panda.get_position()
+            source_d = max(
+                0.05,
+                float(lift_position[2])
+                - float((geom or {}).get("height_m") or 0.03)
+                - float(pick_top),
+            )
+            source_pixel = _vg_grasp_pixel(source_d)
+            visual = _post_lift_visual_evidence(
+                frame, color, source_pixel, min_px=200,
+            )
+            if visual.get("u") is not None:
+                u, v = visual["u"], visual["v"]
                 distance = float(np.hypot(u - w * 0.5, v - h * 0.65))
-                visual = {
-                    "present": bool(distance <= 190.0 and npix >= 200),
-                    "u": round(float(u), 1), "v": round(float(v), 1),
-                    "npix": int(npix), "roi_distance_px": round(distance, 1),
-                    "cue": cue,
-                }
-            else:
-                visual = {"present": False, "note": "target colour absent after lift"}
+                visual["present"] = bool(visual["present"] and distance <= 190.0)
+                visual["roi_distance_px"] = round(distance, 1)
 
         task_ok = bool(result.get("proprioceptive_success")
                        and visual is not None and visual.get("present"))
@@ -2020,10 +2432,106 @@ def vision_grasp(
             "captures": {
                 "initial": initial_capture,
                 "before_close": before_capture,
+                "final_pose": final_pose_capture,
                 "after_lift": after_capture,
             },
         }
     return result
+
+
+def vision_grasp_probe(
+    *,
+    color: str = "blue",
+    camera: Optional[str] = None,
+    target: Optional[list] = None,
+    instance: Optional[str] = None,
+    acquire_z: float = _VG_ACQUIRE_Z,
+    approach_z: float = _VG_APPROACH_Z,
+    max_steps: int = 10,
+    pixel_tol: float = 4.0,
+    descend_tol: float = 22.0,
+    z_step: float = 0.045,
+    speed_factor: float = 0.05,
+    _context: Optional[Any] = None,
+    _store: Optional[Any] = None,
+    _episode_id: Optional[str] = None,
+    _log_decision: Optional[Any] = None,
+) -> dict:
+    """Observe and align a grasp through its final yawed RGB-D pose, without descending.
+
+    This is the safe data-collection boundary for calibrating finger-clearance and clutter
+    features. It deliberately creates a probe episode rather than a failed grasp episode.
+    """
+    resolved_target = target
+    if instance is not None:
+        if instance not in ("leftmost", "rightmost", "largest"):
+            return {
+                "_source": "error", "dry_run": True, "safe_to_descend": False,
+                "note": "instance must be leftmost|rightmost|largest",
+            }
+        panda = _extract(_context, "panda")
+        if panda is None:
+            return {
+                "_source": "mock", "dry_run": True, "safe_to_descend": False,
+                "note": "mock — no arm",
+            }
+        pos = panda.get_position()
+        move_to_pose(
+            [float(pos[0]), float(pos[1]), float(acquire_z)],
+            speed_factor=min(float(speed_factor), 0.05),
+            _context=_context,
+        )
+        candidates = find_blocks(
+            camera=camera, colors=[color], min_px=120, _context=_context,
+        ).get("blocks", [])
+        # The wrist carries a small red label near the top image edge. It is robot self,
+        # not a tabletop candidate; the raised-depth gate alone can accept its local housing.
+        candidates = [
+            b for b in candidates
+            if (not _is_canonical_wrist_self_candidate(b["u"], b["v"])
+                and not _is_frame_edge_candidate(b["u"], b["v"]))
+        ]
+        if not candidates:
+            return {
+                "_source": "live", "dry_run": True, "safe_to_descend": False,
+                "note": "no tabletop candidate at canonical acquisition pose",
+                "candidates": [],
+            }
+        if instance == "leftmost":
+            chosen = min(candidates, key=lambda b: float(b["u"]))
+        elif instance == "rightmost":
+            chosen = max(candidates, key=lambda b: float(b["u"]))
+        else:
+            chosen = max(candidates, key=lambda b: int(b["npix"]))
+        resolved_target = [float(chosen["u"]), float(chosen["v"])]
+
+    out = vision_grasp(
+        color=color,
+        camera=camera,
+        target=resolved_target,
+        acquire_z=acquire_z,
+        approach_z=approach_z,
+        max_steps=max_steps,
+        pixel_tol=pixel_tol,
+        descend_tol=descend_tol,
+        z_step=z_step,
+        max_retry=0,
+        experience_mode="record",
+        speed_factor=min(float(speed_factor), 0.05),
+        dry_run=True,
+        _context=_context,
+        _store=_store,
+        _episode_id=_episode_id,
+        _log_decision=_log_decision,
+    )
+    out.setdefault("dry_run", True)
+    out.setdefault("safe_to_descend", False)
+    if instance is not None:
+        out["instance_selection"] = {
+            "rule": instance,
+            "target": resolved_target,
+        }
+    return out
 
 
 def place_block(
@@ -3798,6 +4306,44 @@ PRIMITIVE_SPECS = [
                 "speed_factor": {"type": "number", "minimum": 0.01, "maximum": 0.2,
                                  "default": 0.1,
                                  "description": "motion speed; experience trials cap this at 0.05"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "vision_grasp_probe",
+        "function_spec": "hebbot.skills.primitives:vision_grasp_probe",
+        "expectations": {
+            "checks": [
+                {"name": "safe_final_pose", "field": "safe_to_descend",
+                 "op": "eq", "value": True},
+            ],
+        },
+        "params_schema": {
+            "type": "object",
+            "properties": {
+                "color": {"type": "string", "enum": ["blue", "green", "red"],
+                          "default": "blue"},
+                "camera": {"type": "string"},
+                "target": {"type": "array", "items": {"type": "number"},
+                           "minItems": 2, "maxItems": 2,
+                           "description": "[u,v] pixel of the specific instance to probe"},
+                "instance": {"type": "string",
+                             "enum": ["leftmost", "rightmost", "largest"],
+                             "description": "resolve a same-colour instance after moving to the "
+                                            "canonical acquisition pose"},
+                "acquire_z": {"type": "number", "minimum": 0.2, "maximum": 0.45,
+                              "default": 0.34},
+                "approach_z": {"type": "number", "minimum": 0.1, "maximum": 0.3,
+                               "default": 0.20},
+                "max_steps": {"type": "integer", "minimum": 1, "maximum": 20,
+                              "default": 10},
+                "pixel_tol": {"type": "number", "minimum": 0.5, "default": 4.0},
+                "descend_tol": {"type": "number", "minimum": 1.0, "default": 22.0},
+                "z_step": {"type": "number", "minimum": 0.01, "maximum": 0.1,
+                           "default": 0.045},
+                "speed_factor": {"type": "number", "minimum": 0.01, "maximum": 0.05,
+                                 "default": 0.05},
             },
             "additionalProperties": False,
         },

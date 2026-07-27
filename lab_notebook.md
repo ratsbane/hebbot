@@ -1387,3 +1387,721 @@ The next session should restart the MCP server so the seed-threshold fix is live
 spatially diverse record batch. Promotion still requires at least six verified examples, at least
 60 mm pre-close XY span, leave-one-out RMSE at or below 15 mm, a bounded workspace prediction, and
 an in-domain query.
+
+### Post-restart collection — perception passes; high contact stall prevents grasp
+
+After restarting Codex, the managed Hebbot MCP transport returned live at the updated skill
+versions and the seed-threshold fix was exercised on the same right-hand red rectangle near
+`[444,414]`.
+
+The perception hypothesis passed:
+
+- tracking crossed the former z=0.25 m failure point;
+- at z=0.25 m the unified depth object contained **5,436 px** with **0.8 px** image error;
+- it reached z=0.20 m with **7.7 px** final error; and
+- no aligned-depth reacquisition was required.
+
+The subsequent grasp failed safely for a different reason. The compliant descent stalled at
+**EE z=0.04371 m**, 17.7 mm above the intended 0.026 m grip height. Four local closes found air
+and reopened; terminal gripper width was approximately 0.040 m. Terminal force included
+approximately **−7.45 N** in z, and the saved wrist frame still showed the red rectangle directly
+beneath the wrist. This combination is most consistent with a fingertip landing on the block top:
+the current broad `stall_guard` permitted close attempts because z was below 0.068 m, but lowering
+the commanded target could not overcome the same physical contact.
+
+No fourth verified training example was created and the warm-start candidate remains at three
+examples. The single-attempt stopping condition was honored and the arm was homed at speed factor
+0.05 with maximum joint error **0.00983 rad**.
+
+Terminal paired evidence:
+
+- `frames/2026/07/25/4e3f49bc-af5f-48f0-9368-7c0e9ba4c3f5/wrist_000.jpg`
+- `frames/2026/07/25/4e3f49bc-af5f-48f0-9368-7c0e9ba4c3f5/wrist_000_depth.npy`
+
+The next change should distinguish “reached grip depth” from “persistent high contact” relative to
+the episode's intended `grasp_z`, and use the retained pre-close RGB-D/state evidence to determine
+whether the residual error comes from final centering, yaw/leveling geometry, or the contact
+classifier. Do not undo the seed-threshold fix; it worked as intended.
+
+### Alignment diagnosis and guarded validation
+
+Offline comparison with the nearby verified episode showed that both used −13° grasp yaw, while
+the failure retained **11.9 px** height-corrected top-face error after its sole geometry recenter.
+The routine did not recheck that correction before descent. Two bounded safety changes followed:
+
+1. geometry alignment now observes and corrects up to three times, and refuses to descend unless
+   the final top-face error is within the existing pixel tolerance; and
+2. an air-close after the EE physically stalls more than `grip_depth_tol` above its commanded
+   target is classified as persistent high contact, reopened, and returned for lateral
+   re-acquisition rather than commanding three further downward retries.
+
+A single live validation on the unchanged placement aborted safely **before descent or contact**,
+demonstrating that the new pre-descent guard works. It also exposed the next representation
+mismatch. Alignment errors oscillated:
+
+`28.37 → 53.23 → 34.16 → 25.58 px`
+
+and the reported geometry collapsed from the expected roughly 57 × 28 mm rectangle to
+**32.9 × 14.8 mm**. The reason is architectural: coarse servoing uses the unified connected-depth
+body, but `_perceive_pose_3d` still selected one illuminated color component. Repeated corrections
+therefore chased different real fragments of the same block.
+
+The post-correction alignment observation now uses `_reacquire_raised_instance`, the same unified
+depth body used by coarse servoing. It updates only top-face `(u,v,height)` while retaining the
+initial width, length, and grasp-axis estimate. Alignment telemetry now includes dimensions and
+rejected follow-up frame counts so another representation switch cannot remain hidden.
+
+The one-failure stopping condition was honored. No fourth verified example was added, no learned
+policy controlled the arm, and the arm was homed at speed factor 0.05 with maximum joint error
+**0.00939 rad**.
+
+Terminal paired evidence:
+
+- `frames/2026/07/25/add66e88-3ef0-4c57-8230-0b64e652bfe6/wrist_000.jpg`
+- `frames/2026/07/25/add66e88-3ef0-4c57-8230-0b64e652bfe6/wrist_000_depth.npy`
+
+The offline suite now passes **40 tests**. The next live session requires an MCP restart to load
+the unified-depth alignment fix, then one low-speed validation under the same guard.
+
+### Unified-depth validation succeeds; post-lift view clips the held block
+
+*Added by Codex. Earlier notebook entries were written by Claude; Claude may return to review,
+comment on, and contribute to this work.*
+
+After the MCP restart, one low-speed record-mode validation targeted the isolated left red
+rectangle near `[194,351]`. The unified-depth alignment change behaved as intended:
+
+- coarse servoing converged in **10 steps** to **3.7 px** error;
+- the first geometry observation was already within tolerance at **4.6 px**, so no corrective
+  oscillation occurred;
+- perceived geometry was approximately **68.7 × 32.6 × 29.3 mm** at **−1°** yaw;
+- the close retained an object at **29.2 mm** gripper width;
+- there were **zero air retries**, one depth retry, and no persistent-high-contact event; and
+- the final grasp depth was **EE z=0.02872 m**.
+
+Episode `46dc107e-17fe-4619-adb3-a03a88674c23` therefore passed the mechanical and
+proprioceptive checks. It did **not** pass the live task verifier: at this far-left pose and yaw,
+the held block was clipped below the post-lift wrist frame, so target color was absent. The stored
+episode remains unverified and is not retroactively relabeled; the warm-start training set remains
+at three verified examples.
+
+Saved paired post-lift evidence:
+
+- `frames/2026/07/25/46dc107e-17fe-4619-adb3-a03a88674c23/wrist_after_lift.jpg`
+- `frames/2026/07/25/46dc107e-17fe-4619-adb3-a03a88674c23/wrist_after_lift_depth.npy`
+
+Offline replay supports a narrow second visual cue. At the height-corrected predicted source pixel
+`(374.7,447.0)`, the saved post-lift frame contains no red target. The verifier can now combine
+this **source-vacant** observation with the existing mechanical/proprioceptive grasp requirement
+when the held object itself is out of view. A normal target-color component still near that source
+is explicitly rejected as `target_remains_at_source`; the existing dim-red held-object cue remains
+accepted.
+
+This is useful but not complete identity evidence: vacancy plus retained gripper width could be
+fooled if the target moved out of view while another object was caught. The experiment reduces
+that ambiguity by deliberately selecting an isolated target, and all RGB-D evidence remains
+stored for review. The next live record attempt can evaluate the cue prospectively; this episode
+must remain a documented verifier miss.
+
+The block was returned at low speed and the arm was homed. The offline suite passes **42 tests**.
+
+### Prospective verifier trial exposes stale MCP skill process
+
+*Added by Codex.*
+
+One prospective low-speed record trial targeted the sole detected red rectangle at
+`[321.2,326.5]`. The grasp was mechanically successful:
+
+- coarse servoing converged in **9 steps** to **5.8 px**;
+- initial geometry alignment passed at **8.09 px**, without recentering;
+- perceived geometry was approximately **68.3 × 32.1 × 29.0 mm** at **−21°** grasp yaw;
+- the close retained an object at **29.2 mm** width;
+- there were zero air retries, one depth retry, and no persistent-high-contact event; and
+- actual grasp depth was **EE z=0.02757 m**.
+
+The live result nevertheless returned the old verifier payload:
+
+`{"present": false, "note": "target colour absent after lift"}`
+
+That exact payload cannot be produced by the newly added `_post_lift_visual_evidence` path, which
+returns an explicit `cue`. The MCP connection had been restarted before that code was edited, but
+the serving Hebbot process had not subsequently reloaded it. This trial therefore tested the old
+verifier rather than the intended prospective hypothesis.
+
+Episode `91f09005-e9bf-4375-b294-0d1709c33ec8` remains unverified and must not enter the training
+set. Its initial, before-close, and after-lift observations all include paired RGB and aligned
+depth. An additional held-state RGB-D observation was stored under
+`frames/2026/07/25/91088b6b-b6a8-486d-9648-d50f83c75734/`.
+
+The declared single-attempt limit was honored. The block was replaced at approximately
+`[0.3715,-0.2025]`; the arm was homed at speed factor 0.05 with maximum joint error
+**0.00601 rad**.
+
+Before another physical trial, restart the actual Hebbot MCP server process and confirm that its
+registered `vision_grasp` implementation/version reflects the working tree. This process/code
+identity should eventually become explicit telemetry, since reconnecting a client is not evidence
+that a long-running hardware process loaded new skill code.
+
+### Fresh v124 prospective trial stops on persistent high contact
+
+*Added by Codex.*
+
+The stale MCP process (PID 46208) was terminated and the Codex MCP connection was restarted. The
+new process had PID 51077 and dynamic registration advanced `vision_grasp` from **v123 to v124**,
+demonstrating that the working-tree implementation, including the new post-lift verifier, was
+loaded before motion.
+
+One low-speed record attempt again targeted the red rectangle near `[321,327]`. Coarse visual
+servoing located the object and converged in **10 steps** to **9.0 px**. Geometry alignment passed
+the current 10 px gate on its initial observation at **9.19 px**. Perceived geometry was
+approximately **67.8 × 31.3 × 33.1 mm**, and the chosen grasp yaw was **+22°**.
+
+The grasp did not reach verification. Descent stopped at **EE z=0.05262 m**, 13.4 mm above the
+derived 0.0392 m grasp target. Closing at that pose found air at approximately 43.0 mm width, and
+the new persistent-high-contact classifier stopped immediately rather than commanding lower
+retries. No object was retained, no post-lift frame was generated, and no example entered the
+training set.
+
+Episode `4b3c3480-8b66-49ae-b553-caeb98c77ef6` retains paired RGB-D for the initial and
+before-close observations. The terminal contact-state RGB-D observation is stored under
+`frames/2026/07/25/7e418600-bcfd-46e4-a514-5005c2fd4f56/`.
+
+This result separates two questions that had been confounded:
+
+1. process identity is now confirmed and the new verifier is live; but
+2. a geometry observation barely inside the **10 px** alignment gate can still place a fingertip
+   on the block top at this pose/yaw, preventing the experiment from reaching that verifier.
+
+The single-attempt stopping rule was honored. The arm was homed at speed factor 0.05 with maximum
+joint error **0.00602 rad**. The failed episode remains explicit experience rather than being
+hidden or relabeled.
+
+### Final-pose clearance boundary for eventual clutter
+
+*Added by Codex.*
+
+Review of the saved before-close RGB frame showed that the failed target was isolated; no neighbor
+was close enough to explain the high contact. The 9.19 px alignment residual was also mostly along
+the rectangle's long axis, so replacing the existing gate with an unexplained global 5 px
+constant would discard useful geometry and would not address clutter.
+
+The more important architectural omission was temporal: target alignment was last checked before
+the wrist yawed to the chosen grasp axis. The eye-in-hand system then changed orientation and
+descended without another observation. Tool/camera rotation offsets can consume the small
+finger-clearance margin, and in future clutter a neighbor can enter a finger corridor only after
+this final orientation change.
+
+`vision_grasp` now establishes a fail-closed final-pose boundary after yaw and before descent:
+
+- it re-acquires the same color-seeded connected-depth body while stationary;
+- it derives the allowed image error from the physical per-side jaw clearance,
+  `(open_width - object_width) / 2`, projected through camera focal length and object depth;
+- it reserves 2 px for calibration/segmentation uncertainty and respects the caller's stricter
+  requested tolerance;
+- it refuses descent if the target is unavailable or outside that clearance-derived bound; and
+- it stores the exact RGB-D capture used for this decision as `final_pose`, rather than saving a
+  nearby but different frame.
+
+For the latest failure, 43.3 mm open width around a 31.3 mm object leaves 6.0 mm per side. At
+303.5 mm depth this is approximately 7.8 px; after the uncertainty reserve, the derived gate is
+approximately **5.8 px**, compared with the pre-yaw observation's 9.19 px error.
+
+This is deliberately only the first clutter-compatible representation. It treats centroid error
+conservatively and does not yet model the two finger swept volumes, target mask, neighboring depth
+bodies, or support relations separately. The stored final-pose RGB-D makes those extensions
+possible without changing what an episode must retain. `source_vacant` verification must remain
+restricted to deliberately isolated targets; clutter will require target-specific scene-change
+or held-object evidence.
+
+No live motion was performed for this change. The offline suite passes **43 tests**. The MCP server
+must be restarted again before a guarded live validation because the running v124 process predates
+this edit.
+
+### Live final-pose guard validation — safe refusal before contact
+
+*Added by Codex.*
+
+After a genuine process restart, the Hebbot MCP server ran as PID 55494 and dynamic registration
+reported `vision_grasp` **v127**, confirming that the final-pose implementation was live.
+
+One low-speed record attempt targeted the same red rectangle near `[321,327]`. Coarse servoing
+converged in **9 steps** to **9.4 px**. The existing pre-yaw geometry gate accepted its first
+observation at **8.68 px**. Perceived geometry was approximately **71.8 × 32.0 × 32.1 mm**, with
+a chosen grasp yaw of **+20°**.
+
+After yaw, the new stationary re-observation measured:
+
+- target top-face centroid: `(347.50, 328.59)`;
+- predicted grasp pixel: `(351.07, 337.88)`;
+- final-pose error: **9.95 px**;
+- physical clearance-derived tolerance: **5.71 px**;
+- unified connected-depth body: **5,799 px**, 29.3 mm high; and
+- zero rejected depth frames.
+
+The skill therefore refused descent with
+`final-pose jaw-clearance alignment refused descent`. There was no table approach, fingertip
+contact, close, lift, or retry. This is the intended fail-closed result and directly prevents the
+persistent-high-contact failure observed in the preceding live attempt.
+
+Episode `e461f126-6e61-4c55-88b8-b9756f2cbdb6` stores initial, before-close, and exact evaluated
+final-pose RGB-D. The arm was homed at speed factor 0.05 with maximum joint error
+**0.00624 rad**. No training example was added.
+
+The measurement also identifies the next bounded improvement. Pre-yaw alignment still uses the
+legacy 10 px threshold, so it accepted 8.68 px despite the physical jaw-clearance budget being
+5.71 px. Yaw changed the centroid residual by approximately 1.9 px, but most of the unsafe error
+already existed before yaw. The pre-yaw correction loop should use the same clearance-derived
+tolerance, while the post-yaw observation remains an independent final-pose safety check. A later
+clutter experiment can replace conservative centroid gating with explicit target and neighbor
+occupancy in the two finger swept volumes.
+
+### Pre-yaw correction adopts the physical clearance budget
+
+*Added by Codex.*
+
+The bounded geometry correction loop now derives its convergence threshold from the nominal
+object width, jaw opening, object depth, and the same 2 px uncertainty reserve used by the
+post-yaw guard. It records `pixel_tolerance` alongside every observed `pixel_error` and continues
+recentering when an observation satisfies the legacy caller tolerance but not the physical
+clearance budget.
+
+For the preceding live scene, this changes the decision at 8.68 px from “aligned” to “correct
+again,” because the predicted jaw-clearance tolerance was approximately 5.7 px. After the
+correction loop converges, wrist yaw still triggers a fresh, independently stored and evaluated
+RGB-D observation. A replay-selected action may later change the opening; the final-pose check
+uses that actual opening and remains the authoritative fail-closed boundary.
+
+This is still classical scaffolding, but its episode fields are deliberately learning-oriented:
+the sequence of requested corrections, changing alignment errors, physical tolerance, final-pose
+error, and contact/refusal outcome form supervised examples for a future correction or grasp-
+feasibility model. The hand-coded controller is therefore producing a dataset that can be
+evaluated for compression into a learned component rather than only accumulating more branches.
+
+No physical motion was performed for this edit. The offline suite remains at **43 passing tests**.
+
+### Two-stage live validation isolates yaw-induced displacement
+
+*Added by Codex.*
+
+After restarting the server as PID 59024, dynamic registration reported `vision_grasp` **v128**.
+One low-speed record attempt targeted the red rectangle near `[321,327]`.
+
+The clearance-consistent pre-yaw stage worked:
+
+- coarse servoing converged in 11 steps to **9.1 px**;
+- geometry observation measured **3.67 px** error against a **5.71 px** physical tolerance;
+- the stage passed without an unnecessary correction; and
+- perceived geometry was approximately **59.7 × 32.2 × 31.5 mm**.
+
+After applying the selected **+27°** wrist yaw, the independently observed error increased to
+**7.43 px**, outside the unchanged 5.71 px clearance budget. The connected-depth target remained
+healthy at 5,406 px with zero rejected frames, so this was not a perception dropout. The final-
+pose guard refused descent before contact.
+
+Episode `55e49787-a4b2-4076-a938-27ea4be641e9` stores the initial, before-close, and exact
+final-pose paired RGB-D observations. No grasp or training example occurred. The arm was homed at
+speed factor 0.05 with maximum joint error **0.00596 rad**.
+
+This is strong evidence that the remaining offset is introduced by the eye-in-hand orientation
+change rather than inherited from inadequate pre-yaw centering. The next bounded change should
+apply image-Jacobian recentering in the final yawed frame, rotating the planar correction into the
+current wrist orientation, then re-observe under the same clearance gate. The measured requested
+and realized corrections should be retained so a learned residual model can eventually replace
+or augment the nominal rotational transform.
+
+### Bounded yaw-aware final-pose correction
+
+*Added by Codex.*
+
+The final-pose stage now performs an observation followed by at most two translational corrections
+before refusing descent. The existing image Jacobian was calibrated in the reference gripper-down
+orientation; its planar world correction is rotated by the actually applied wrist yaw before the
+motion command. The code also distinguishes the canonical symmetric grasp yaw from an alternate
+180° wrist configuration when joint-7 comfort selects that equivalent pose.
+
+Every final-pose observation records error, physical tolerance, connected-body size and height,
+rejected depth frames, and—when a correction is attempted—the commanded world `dx`, `dy`, and yaw.
+The exact last evaluated RGB-D capture remains the stored `final_pose` evidence. Descent is still
+authorized only by a fresh observation inside the physical clearance budget.
+
+This nominal rotational model is intentionally small and interpretable. Its recorded correction
+and residual pairs provide direct supervised data for learning systematic eye-hand residuals as a
+function of wrist yaw, workspace pose, depth, and object geometry. A learned component can later
+predict a residual on top of the geometric transform and be evaluated against the unchanged
+fail-closed clearance gate.
+
+No additional physical motion was performed after the v128 safe-refusal trial. The offline suite
+passes **44 tests**.
+
+### Yaw-aware correction response — full gain oscillates
+
+*Added by Codex.*
+
+After restarting as PID 62694, `vision_grasp` registered as **v131**. One low-speed record trial
+again targeted the isolated red rectangle.
+
+Pre-yaw alignment passed at **4.15 px** against a **5.67 px** clearance-derived tolerance. After
+the selected +20° yaw, the initial final-pose error was **23.02 px**. The new correction loop then
+produced:
+
+| Pass | Error (px) | Commanded world correction (mm) |
+|---|---:|---:|
+| 0 | 23.02 | dx −14.61, dy −5.38 |
+| 1 | 25.99 | dx +13.59, dy +10.96 |
+| 2 | 11.45 | none; bounded stop |
+
+All three observations independently found a healthy connected-depth body with zero rejected
+frames. The guard refused descent; there was no contact, close, grasp, or training example.
+Episode `21a2c123-33b4-4aeb-92d9-6b672a5c2d66` retains initial, before-close, and final-pose
+paired RGB-D plus the complete correction/response history. The arm was homed with maximum joint
+error **0.00588 rad**.
+
+The rotational correction direction produced useful motion, but full gain was too aggressive and
+oscillated. Under a local linear approximation, half of the first measured image displacement
+would have left roughly 4–5 px residual, near or inside the 5.67 px gate. Yawed final-pose
+recentering now uses **0.5 gain**, retains the two-correction bound, and records the gain with every
+command. Pre-yaw correction remains at its established full gain.
+
+This is an early concrete example of experience improving execution parameters. It is not yet
+neural learning—the gain choice is deliberate analysis of one episode—but the stored input,
+command, and response tuples are exactly the data from which a learned local Jacobian or residual
+correction model can later be estimated and compared.
+
+### Damped correction converges; centroid clearance still permits top contact
+
+*Added by Codex.*
+
+After restart, `vision_grasp` registered as **v132** under PID 65122. The episode-derived 0.5
+yawed-recenter gain succeeded at its intended task:
+
+- pre-yaw geometry correction improved **6.03 → 1.20 px**;
+- after +24° yaw, final-pose error began at **10.62 px**;
+- one damped correction of dx −2.24 mm, dy −2.75 mm reduced it to **2.32 px**;
+- the physical clearance-derived tolerance was **5.67 px**; and
+- both observations found healthy connected-depth bodies with zero rejected frames.
+
+Despite this excellent centroid alignment, descent stalled at **EE z=0.04309 m**, 17.1 mm above
+the 0.026 m target, and closing found air at approximately 42.9 mm. The persistent-high-contact
+guard stopped without retry. Episode `1a75bf30-c117-4f37-9266-2e441e5f3d6e` remains failed and
+stores the full correction trajectory plus initial, before-close, and final-pose RGB-D. A terminal
+contact RGB-D pair is stored under
+`frames/2026/07/25/fb733ef9-fa14-4714-b4be-33a1571aa5bc/`. The arm was homed with maximum joint
+error **0.00634 rad**.
+
+This falsifies the working assumption that centroid error plus scalar jaw-opening margin is a
+sufficient grasp-clearance test. Historical verified episodes do not support simply flipping the
+yaw formula: successful examples used object axis 96.3° → grasp yaw −6° and 102.9° → −13°, the
+same `yaw ≈ 90° − object_axis` relationship as the current 65.9° → +24° selection.
+
+The next representation should explicitly project the target's oriented top mask and the two
+finger approach footprints in the final wrist RGB-D frame. It should separately answer:
+
+- does either finger footprint overlap the target top before the fingers can straddle it?
+- is elevated non-target geometry present in either finger swept corridor?
+- does the target width along the actual closing axis fit inside the measured opening?
+- how much uncertainty remains from depth edges, hand-eye calibration, and wrist leveling?
+
+This is the same representation required for adjacent blocks and clutter, so the failure marks a
+useful point to stop tuning scalar centroid thresholds. The successful damped correction remains
+valuable execution experience; the contact failure supplies the negative feasibility label.
+
+### Existing footprint dataset is confounded; add a no-contact final-pose probe
+
+*Added by Codex.*
+
+Offline comparison of the available labeled episodes found that the three verified grasps are all
+clustered near world y=+0.11 to +0.12 m with object angles 96–103° and grasp yaws −6° to −13°.
+The two persistent-high-contact episodes are clustered near y=−0.22 m with object angles 66–68°
+and grasp yaws +22° to +24°. The current five examples therefore cannot distinguish workspace
+kinematics, wrist yaw, hand-eye residual, and actual finger-footprint interference.
+
+The older verified episodes also predate storage of the exact post-yaw final-pose frame. It would
+be scientifically unsound to “calibrate” a footprint separator from pre-yaw success images and
+post-yaw failure images.
+
+A new classical skill, `vision_grasp_probe`, now runs the complete acquisition, depth geometry,
+pre-yaw alignment, yaw selection, damped final-pose correction, and clearance decision, then
+returns at the approximately 0.30 m observation height **without descending**. It:
+
+- caps motion speed at 0.05;
+- forces zero grasp retries and an internal recorded episode;
+- stores the exact evaluated final-pose RGB-D and all correction/response telemetry;
+- reports `safe_to_descend` under its own expectation, rather than masquerading as a failed grasp;
+  and
+- never calls `grasp_at`.
+
+This enables a safe calibration matrix across workspace position and object orientation before
+additional contact trials. The first dataset should deliberately cross the current confound:
+positive-y with a +20°-class object yaw, and negative-y with a near-zero yaw, followed by controlled
+two-block adjacency. Those final-pose observations can support an explicit finger-corridor model
+and later a learned feasibility predictor.
+
+No physical motion was performed for this addition. The offline suite passes **45 tests**. The
+running MCP process must be restarted to register the new probe skill.
+
+### First no-contact probe exposes observation-pose identity bug
+
+*Added by Codex.*
+
+After restart, `vision_grasp_probe` registered as v2 under PID 69841. The fresh home-pose RGB frame
+showed two red tabletop blocks, approximately at `[147,340]` and `[474,414]`, plus the robot's own
+small red wrist label near the top of the image. The legacy scene tracker nevertheless returned a
+stale single red target near `[321,327]`.
+
+The first probe used that stale pixel. After moving from home height to the 0.34 m acquisition
+height, it repeatedly tracked a red/depth component at `v=7–17`, corresponding to robot self near
+the top edge, rather than either tabletop block. It remained at the safe acquisition height for
+20 bounded servo observations and never descended. The arm was homed with maximum joint error
+**0.00412 rad**.
+
+Episode `b83d4dfe-27c8-442d-a3c4-a7f822403a65` is not a footprint-calibration example. It records
+a target-identity/observation-pose failure. The tool's top-level expectation also misleadingly
+reported success because the early exit lacked the `safe_to_descend` field.
+
+The probe now supports semantic same-colour selection—`leftmost`, `rightmost`, or `largest`—which
+is resolved only **after** moving to the canonical acquisition height. Candidates with `v<60`
+are excluded as wrist self. Every early return is normalized to `dry_run=true` and
+`safe_to_descend=false`, so expectation labeling fails closed.
+
+This matters beyond calibration: pixel identity from one eye-in-hand pose is not stable after a
+large camera-height change, and stale scene tracks become dangerous in clutter. Target selection
+must be attached to a defined observation pose or a 3-D/world relation, not treated as a timeless
+image coordinate. The offline suite remains at **45 passing tests**.
+
+### First valid semantic no-contact probe crosses yaw and workspace
+
+*Added by Codex.*
+
+After restart, `vision_grasp_probe` v3 ran under PID 71558. One `leftmost` red probe resolved its
+instance only after reaching the canonical 0.34 m acquisition height. It selected `[517.9,474.8]`
+and tracked that physical block to approximately world `[0.468,+0.161]`.
+
+The contact-free alignment sequence succeeded:
+
+- coarse servo converged in 9 steps to 8.0 px;
+- pre-yaw geometry error was **3.81 px** inside a **5.76 px** physical tolerance;
+- selected grasp yaw was **+23°**;
+- after yaw, error was **9.66 px**;
+- one damped correction (dx −1.81 mm, dy +2.58 mm) reduced it to **4.85 px**; and
+- the final connected-depth body contained 5,995 px with zero rejected frames.
+
+The probe returned `safe_to_descend=true`, stored exact final-pose RGB-D, and issued no descent,
+close, or grasp. Episode `8d9a4318-b8fd-4c61-b357-ef7b7438241e` is therefore a valid
+final-pose calibration example, not a manipulation-success label. The arm was homed at speed
+factor 0.05 with maximum joint error **0.00853 rad**.
+
+This crosses one important factor absent from the old dataset: a +23° grasp yaw at positive world
+y produced stable final-pose geometry. Compared with +22° to +24° high-contact trials at negative
+world y, yaw alone is now a weaker explanation; workspace-dependent kinematics, hand-eye residual,
+or finger geometry becomes more plausible.
+
+The next safe datum should probe the `rightmost` red instance from a wider 0.45 m acquisition view,
+aiming to sample the negative-y side without contact. Only after the probe matrix crosses yaw and
+workspace should another descent be authorized.
+
+### Wider-view semantic probe repeats the positive-y block
+
+*Added by Codex.*
+
+A no-contact `rightmost` red probe used a wider 0.45 m acquisition height. It selected
+`[481.8,438.9]` and converged to approximately world `[0.468,+0.160]`, the same positive-y block
+sampled by the preceding 0.34 m `leftmost` probe.
+
+Pre-yaw alignment passed at 3.63 px. After +27° yaw, the final-pose correction sequence was
+**6.93 → 9.88 → 9.60 px** against a 5.77 px tolerance, so the probe correctly returned
+`safe_to_descend=false`. No descent or contact occurred. Episode
+`8ce1819d-bd30-4cb9-aef1-f79d8a33787f` stores exact paired RGB-D and the complete correction
+response. The arm was homed with maximum joint error **0.00859 rad**.
+
+Inspection of the 0.45 m acquisition frame showed both tabletop red blocks: the unsampled block
+near image `[130,350]` and the already sampled positive-y block near `[484,440]`. At the narrower
+0.34 m view used previously, the `[130,350]` block was outside the field, so `leftmost` selected
+the only visible tabletop red—the same `[484,440]` block. Semantic ordering was internally
+correct; the field of view changed the candidate set.
+
+The next cross-workspace datum is therefore `leftmost` at `acquire_z=0.45`. No implementation
+change or MCP restart is needed. The different pass/fail correction outcomes on two observations
+of the same positive-y block also quantify substantial frame-to-frame response variability,
+which a future learned residual model must express as uncertainty rather than a deterministic
+point correction.
+
+### Negative-y no-contact probe passes; final mask alone does not separate contact
+
+*Added by Codex.*
+
+The 0.45 m `leftmost` probe selected `[126.3,355.2]` and converged to approximately world
+`[0.356,-0.264]`, crossing into the negative-y region of the prior persistent-high-contact
+episodes without descending.
+
+The probe returned `safe_to_descend=true`:
+
+- pre-yaw geometry correction improved **8.34 → 5.55 px** against a 5.71 px tolerance;
+- selected grasp yaw was **+15°**;
+- final-pose correction improved **11.43 → 9.25 → 2.87 px**;
+- every depth-body observation passed with zero rejected frames; and
+- exact initial, before-close, and final-pose RGB-D were stored in episode
+  `ca7daea1-d9d7-4bad-a0a9-722ebabb4246`.
+
+No contact or manipulation occurred. The arm was homed with maximum joint error **0.00610 rad**.
+
+Offline color-mask PCA on exact final-pose frames measured:
+
+| Episode class | Final red-mask angle | Pixel aspect |
+|---|---:|---:|
+| negative-y contact failure (+24° command) | 69.4° | 2.17 |
+| positive-y probe pass (+23°) | 65.6° | 2.16 |
+| positive-y probe refusal (+27°) | 65.1° | 2.12 |
+| negative-y probe pass (+15°) | 77.0° | 2.12 |
+
+The contact failure and positive-y probe pass have similar final mask orientation and aspect, so
+those image features alone do not separate physical feasibility. More importantly, probe
+`safe_to_descend` is a geometric authorization label, not a contact-ground-truth success label.
+The dataset still contains only one tightly aligned negative-y physical contact result.
+
+The next discriminating experiment is one guarded physical descent on the same semantic
+negative-y/+15°-class target that just passed the no-contact probe. If it succeeds, orientation-
+specific footprint geometry becomes more plausible; if it contacts high, the current geometric
+authorization is broadly inadequate at that workspace. Target identity must be resolved at the
+canonical acquisition pose exactly as in the probe.
+
+### Sunday no-contact showcase stops on blue robot-self tracking
+
+*Added by Codex.*
+
+Doug requested a visually active arm demonstration for visiting guests. Because physical grasp
+reliability remains under investigation, Codex chose a bounded no-contact showcase using only
+`vision_grasp_probe` at speed factor 0.05 and `home`, with an explicit stop on identity or
+perception anomalies.
+
+The first wide-view red probe completed safely. It selected acquisition pixel `[133.4,350.5]`,
+traversed the table, and converged near world `[0.399,+0.129]`. Pre-yaw geometry required three
+observations (**7.35 → 5.78 → 0.35 px**); the final −6° pose independently passed at
+**3.93 px** against a 5.71 px tolerance. No descent occurred. Episode
+`adfe73b2-c964-48f6-aae8-e1741a287330` stores paired RGB-D and telemetry.
+
+The second probe began on the largest blue tabletop candidate near `[574.6,364.1]`, but after
+several coarse motions its track jumped to a blue-lit component of the robot/wrist housing at the
+right image edge. The false body remained around `u=607–624`, `v=81–127` and reported implausible
+69–78 mm local height. It never converged and never descended. Episode
+`7b218c9d-d6ff-4bd6-9475-2a88b25000e3` is an explicit robot-self identity failure.
+
+The declared stopping condition was honored after that second cycle. The arm was homed with
+maximum joint error **0.00843 rad**.
+
+The existing `v<60` wrist-label exclusion is too narrow and color-specific. A clutter-capable
+system must exclude robot self using projected robot geometry and/or require continued tabletop
+support consistency, rather than relying on a fixed image strip. Until that exists, unattended
+multi-color showcase loops should not be run even in no-contact mode.
+
+### Monday target-persistence gate: implementation and offline qualification
+
+*Added by Codex.*
+
+The next experiment tests whether a selected tabletop block remains the same physical object
+through an eye-in-hand servo trajectory. The hypothesis is that combining the existing local
+table-relief check with predicted image motion and block-height continuity will prevent target
+switches to robot self or neighboring blocks without rejecting ordinary viewpoint variation.
+
+The smallest implementation adds three constraints to the raised-depth reacquisition path:
+
+- reject candidates more than 95 px from the pixel position predicted by the previous commanded
+  image-Jacobian correction;
+- after the first validated observation, require physical height to remain within 18 mm; and
+- at the canonical acquisition view, exclude the narrow upper-right region occupied by visible
+  wrist housing (explicitly a temporary approximation, not projected robot geometry).
+
+When a servo step descends, its next expected pixel is the height-corrected grasp pixel at the new
+camera distance. When it translates at constant height, the expectation interpolates the prior
+centroid toward the commanded target using the actual servo gain. Failed identity checks cause
+stationary bounded reacquisition and then a safe stop; they do not authorize motion toward a new
+component.
+
+Offline checks pass (**47 tests**). Saved RGB-D replay retained both real red targets at 30.1 mm
+relief and the green target at 28.2 mm. Synthetic tests reject both a 70 mm robot-like substitute
+for a 28 mm block and a candidate beyond the allowed track displacement. The live MCP process
+must be restarted before the bounded no-contact color/instance matrix can test the hypothesis on
+hardware.
+
+The first live red-leftmost control trial stopped safely after one commanded translation. It
+observed a valid 26.0 mm-high red body at `[146.7,328.0]`, then rejected all three stationary
+reacquisition frames. No descent or contact occurred; the arm homed with maximum joint error
+**0.00569 rad**.
+
+This failure exposed a predictor error: the expected pixel used the full desired image correction,
+while the actual Cartesian correction was capped at 60 mm. The gate therefore looked near an
+unreachable future pixel and rejected the same block. The predictor now inverts the image
+Jacobian using the Cartesian displacement actually commanded after both motion and workspace
+clamps. A regression test demonstrates that a desired 200 px correction capped to 60 mm predicts
+60 px rather than 200 px. Offline qualification now passes **48 tests**. A second MCP restart is
+required before repeating the control trial.
+
+After reloading, the repeated red-leftmost control retained the target for three observations
+before safely stopping: `[160.0,311.7]` at 31.6 mm relief, `[224.8,323.1]` at 41.2 mm, and
+`[218.5,340.4]` at 29.4 mm. It then rejected three stationary frames. No descent or contact
+occurred; homing completed with maximum joint error **0.00592 rad**. The corrected clamp-aware
+predictor therefore improved persistence but did not resolve it.
+
+The gate is not loosened yet because the episode output did not distinguish a pixel-distance
+rejection from a height-continuity rejection. Reacquisition telemetry now records the expected
+pixel and height plus the best ungated raised-depth candidate (centroid, distance, and height) on
+failure. This converts the next safe stop into a discriminating measurement. Tests remain **48
+passing**; another MCP reload is required for the diagnostic trial.
+
+The diagnostic trial expected the target at `[228.4,299.2]` after two validated observations
+(37.0 and 39.6 mm relief). Three stationary captures rejected it; the best ungated alternative
+was a different red body at `[581.7,297.6]`, **353.3 px** away and 52.1 mm high. The identity gate
+therefore correctly refused to switch objects. No descent or contact occurred, and homing ended
+with maximum joint error **0.00635 rad**.
+
+An immediately saved RGB-D frame at the unchanged pose visibly contains the intended red block.
+Offline application of the same raised-depth detector accepts it at `[223.3,305.5]`, about 8 px
+from the prediction, with 31.3 mm relief and a 2,325 px body. This identifies a short RealSense/
+segmentation dropout, not bad motion prediction or target absence. Coarse reacquisition is extended
+from three to six stationary frames; neither the 95 px identity radius nor the 18 mm height
+continuity threshold is weakened.
+
+With six-frame stationary reacquisition, the red-leftmost control completed successfully through
+15 coarse steps and final +11° wrist yaw. The final-pose guard passed at **3.32 px** against a
+5.62 px clearance tolerance. The trajectory did require several transient retries (including five
+on one acquisition-height step), confirming that the longer stationary window—not a looser
+identity radius—was material. Red-rightmost then also passed in 11 steps, with a +5° final pose
+passing at **4.02 px**. Both trials stored initial/before/final RGB-D; neither descended.
+
+Green-leftmost exposed a separate acquisition issue. Semantic selection chose a green centroid at
+`[119.5,467.7]`, clipped by the 480 px bottom boundary. Its partial local geometry reported 54.0 mm
+relief; after one motion, the best nearby body was only 51.5 px from prediction but measured 31.3
+mm, so height continuity correctly stopped the trial. No contact occurred; homing maximum error
+was **0.00574 rad**. Canonical semantic selection now excludes centroids within 20 px of any frame
+edge, because incomplete objects cannot supply trustworthy initial identity geometry. The height
+tolerance remains unchanged.
+
+After reload, green-leftmost selected the remaining in-frame candidate at `[505.7,267.7]`. After
+one motion the depth body appeared at `[465.8,291.9]`, only **2.2 px** from its predicted location,
+yet all six frames were rejected. The initial reported top height was 48.2 mm and the next best
+body top was 31.2 mm—within the declared 18 mm continuity bound. Inspection found that the early
+gate compared the prior unified body's 90th-percentile top height with the next color seed's median
+local relief, while failure telemetry reported the unified top height. Identity was therefore
+tested using unlike statistics. The continuity check now occurs after depth-body unification and
+compares top height to top height. Thresholds remain unchanged; no contact occurred.
+
+With consistent height statistics, green-leftmost retained the same 25–35 mm raised body for all
+20 coarse observations. It did not identity-switch, but plateaued near 30 px at `z=0.315 m` and
+was refused. The command-derived expected pixels show the controller had reached a workspace
+constraint and could no longer produce the needed image-v correction. This is a reachability/
+servo-stop-classification problem, separate from target persistence.
+
+The decisive blue-largest regression selected the tabletop block at `[579.6,367.3]` and retained
+it through 12 coarse steps. It never jumped to the blue-lit wrist housing seen in episode
+`7b218c9d-d6ff-4bd6-9475-2a88b25000e3`. Coarse alignment converged, followed by a +6° grasp yaw.
+The final jaw-clearance guard improved alignment but correctly refused descent at **7.22 px**
+against a **5.53 px** tolerance. Initial, before-close, and final-pose RGB-D were stored under
+frame episode directory `30657cb4-d8e7-46d1-9b09-5754ed5e8076`. No contact occurred. Final homing
+maximum joint error was **0.00844 rad**.
+
+Conclusion: predicted image motion plus consistent depth-body height is now demonstrably useful
+for preserving identity and prevented the known blue robot-self switch. The live sample is not yet
+a full 18-trial matrix: two red trials passed final authorization, green preserved identity but
+was unreachable under the current servo/workspace policy, and blue preserved identity but failed
+the independent final-clearance criterion. The next smallest improvement is explicit workspace-
+saturation detection and recovery (for example, re-home/reacquire from a shifted overview pose),
+not looser perception gates.
