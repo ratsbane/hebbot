@@ -134,6 +134,17 @@ def test_servo_prediction_uses_clamped_cartesian_command():
     assert predicted == pytest.approx([200, 310])
 
 
+def test_workspace_saturation_requires_meaningful_severe_clipping():
+    from hebbot.skills.primitives import _workspace_saturated
+
+    assert _workspace_saturated(0.0, 0.020, 0.0, 0.003)
+    assert not _workspace_saturated(0.0, 0.020, 0.0, 0.006)
+    assert not _workspace_saturated(0.0, 0.001, 0.0, 0.0)
+    assert not _workspace_saturated(0.020, 0.0, 0.020, 0.0)
+    # Retaining the smaller Y request does not help when dominant X is pinned.
+    assert _workspace_saturated(-0.030, 0.009, 0.0005, 0.009)
+
+
 def test_vision_grasp_probe_forces_recorded_no_descent_episode(monkeypatch):
     import hebbot.skills.primitives as primitives
 
@@ -162,6 +173,57 @@ def test_vision_grasp_probe_forces_recorded_no_descent_episode(monkeypatch):
 
     invalid = primitives.vision_grasp_probe(color="red", instance="middle")
     assert not invalid["safe_to_descend"]
+
+    invalid_memory = primitives.vision_grasp_probe(
+        color="red", feasibility_mode="invented",
+    )
+    assert not invalid_memory["safe_to_descend"]
+
+
+def test_saturation_memory_recall_is_scoped_by_color_and_acquisition_pose(
+    substrate, monkeypatch,
+):
+    import hebbot.skills.primitives as primitives
+    from hebbot.skills.primitives import _recall_saturation_memories
+
+    def add(color, acquire_z, target, note):
+        ep = substrate.store.start_episode(
+            "vision_grasp_probe", params={"color": color, "acquire_z": acquire_z},
+        )
+        substrate.store.end_episode(ep, success=False, outcome={
+            "success": False,
+            "result": {
+                "note": note,
+                "instance_selection": {"target": target},
+            },
+        })
+        return ep
+
+    match = add("green", 0.45, [501, 266], "workspace saturation: test")
+    add("red", 0.45, [501, 266], "workspace saturation: wrong color")
+    add("green", 0.34, [501, 266], "workspace saturation: wrong pose")
+    add("green", 0.45, [300, 300], "coarse servo did not converge")
+
+    recalled = _recall_saturation_memories(substrate.store, "green", 0.45)
+    assert [m["episode_id"] for m in recalled] == [match]
+    assert recalled[0]["target"] == [501.0, 266.0]
+
+    class Panda:
+        def get_position(self):
+            return [0.4, 0.0, 0.45]
+
+    monkeypatch.setattr(primitives, "move_to_pose", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        primitives, "find_blocks",
+        lambda **kwargs: {"blocks": [{"u": 505, "v": 270, "npix": 2000}]},
+    )
+    out = primitives.vision_grasp_probe(
+        color="green", instance="leftmost", feasibility_mode="avoid_saturation",
+        acquire_z=0.45, _context={"panda": Panda()}, _store=substrate.store,
+    )
+    assert out["note"].startswith("deliberate abstention")
+    assert out["feasibility_memory"]["retrieved_episode_ids"] == [match]
+    assert not out["safe_to_descend"]
 
 
 def test_read_camera_mock(substrate):

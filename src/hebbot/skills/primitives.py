@@ -838,6 +838,21 @@ def _predict_servo_pixel(u, v, jinv, commanded_dx, commanded_dy):
     return [float(u + pixel_delta[0]), float(v + pixel_delta[1])]
 
 
+def _workspace_saturated(requested_dx, requested_dy, actual_dx, actual_dy, ratio=0.25):
+    """True when clipping removes most motion on the dominant requested axis.
+
+    Motion retained on the secondary axis cannot resolve error whose Jacobian correction is
+    dominated by an axis already pinned to a workspace boundary.
+    """
+    requested = [abs(float(requested_dx)), abs(float(requested_dy))]
+    actual = [abs(float(actual_dx)), abs(float(actual_dy))]
+    dominant = 0 if requested[0] >= requested[1] else 1
+    return bool(
+        requested[dominant] >= 0.002
+        and actual[dominant] < float(ratio) * requested[dominant]
+    )
+
+
 def grasp_at(
     *,
     grasp_z: float = 0.038,
@@ -1404,6 +1419,41 @@ def _is_frame_edge_candidate(u, v, width=640, height=480, margin=20):
     )
 
 
+def _recall_saturation_memories(store, color, acquire_z, limit=10):
+    """Return recent canonical-view saturation outcomes for one target color."""
+    if store is None:
+        return []
+    memories = []
+    for ep in store.recent_episodes(skill_name="vision_grasp_probe", limit=100):
+        params = ep.get("params") or {}
+        outcome = ep.get("outcome") or {}
+        result = outcome.get("result") or {}
+        note = str(result.get("note") or "")
+        saturation = result.get("workspace_saturation")
+        selected = (result.get("instance_selection") or {}).get("target")
+        if params.get("color") != color or not selected or len(selected) != 2:
+            continue
+        if abs(float(params.get("acquire_z", _VG_ACQUIRE_Z)) - float(acquire_z)) > 0.02:
+            continue
+        if saturation is None and not note.startswith("workspace saturation"):
+            continue
+        memories.append({
+            "episode_id": ep["id"],
+            "target": [round(float(selected[0]), 1), round(float(selected[1]), 1)],
+            "workspace_saturation": saturation,
+        })
+        if len(memories) >= limit:
+            break
+    return memories
+
+
+def _candidate_memory_distance(candidate, memory):
+    return math.hypot(
+        float(candidate["u"]) - float(memory["target"][0]),
+        float(candidate["v"]) - float(memory["target"][1]),
+    )
+
+
 # EE z at which the fingertips touch the table — the base for turning a height above the table into
 # a grasp_z: grasp_z = _TABLE_EE_Z + (desired fingertip height). DIRECTLY MEASURED by probe_table
 # (the open fingers pressed to a bare table → contact_z ≈ 0.016, repeatably). The old 0.047 was a
@@ -1795,17 +1845,19 @@ def vision_grasp(
     located = False
     track = list(target) if target else None   # lock onto one instance when given
     servo_stop_reason = None
+    workspace_saturation = None
 
     def _coarse_servo():
         """Colour-centroid image-Jacobian servo from acquire_z down to approach_z over the
         tracked instance — a coarse centre. Returns the last (u, v) pixel, or None if lost."""
-        nonlocal track, located, servo_stop_reason
+        nonlocal track, located, servo_stop_reason, workspace_saturation
         z = float(np.clip(acquire_z, approach_z, 0.45))
         p0 = panda.get_position()
         move_to_pose([float(p0[0]), float(p0[1]), z], speed_factor=motion_speed,
                      _context=_context)
         last = None
         expected_height_m = None
+        consecutive_saturated = 0
         for step in range(max_steps):
             expected_track = list(track) if track else None
             if track:
@@ -1899,6 +1951,37 @@ def vision_grasp(
             px, py = float(p[0]), float(p[1])
             tx = float(np.clip(px + dex, 0.30, 0.60))
             ty = float(np.clip(py + dey, -0.28, 0.28))
+            actual_dx, actual_dy = tx - px, ty - py
+            saturated = bool(
+                err > descend_tol
+                and _workspace_saturated(dex, dey, actual_dx, actual_dy)
+            )
+            consecutive_saturated = consecutive_saturated + 1 if saturated else 0
+            history[-1].update({
+                "requested_dx_m": round(dex, 5),
+                "requested_dy_m": round(dey, 5),
+                "commanded_dx_m": round(actual_dx, 5),
+                "commanded_dy_m": round(actual_dy, 5),
+                "workspace_saturated": saturated,
+                "workspace_saturated_count": consecutive_saturated,
+            })
+            if consecutive_saturated >= 3:
+                axis = "x" if abs(dex) >= abs(dey) else "y"
+                requested_axis = dex if axis == "x" else dey
+                workspace_saturation = {
+                    "axis": axis,
+                    "direction": "positive" if requested_axis > 0 else "negative",
+                    "requested_m": round(float(requested_axis), 5),
+                    "commanded_m": round(float(actual_dx if axis == "x" else actual_dy), 5),
+                    "ee_xyz": [round(px, 5), round(py, 5), round(float(p[2]), 5)],
+                    "image_error_px": round(err, 1),
+                    "consecutive_observations": consecutive_saturated,
+                }
+                servo_stop_reason = (
+                    "workspace saturation: three consecutive servo corrections were "
+                    "clipped below 25% of requested motion"
+                )
+                return None
             move_to_pose([tx, ty, z], speed_factor=motion_speed, _context=_context)
             if track is not None:
                 # Predict where this same physical target should appear after the commanded
@@ -1908,7 +1991,7 @@ def vision_grasp(
                 if history[-1]["z"] != round(z, 3):
                     track = list(_vg_grasp_pixel(z - pick_top))
                 else:
-                    track = _predict_servo_pixel(u, v, jinv, tx - px, ty - py)
+                    track = _predict_servo_pixel(u, v, jinv, actual_dx, actual_dy)
         servo_stop_reason = (
             f"coarse servo did not converge: final error {err:.1f}px at z={z:.3f}m"
         )
@@ -1979,7 +2062,8 @@ def vision_grasp(
             result = {"_source": "live", "located": located, "grasped": False,
                       "note": servo_stop_reason or "block not found in frame",
                       "servo_steps": len(history),
-                      "history": history, "attempt": attempt}
+                      "history": history, "attempt": attempt,
+                      "workspace_saturation": workspace_saturation}
             break
 
         grip_yaw, geom = None, None
@@ -2445,6 +2529,7 @@ def vision_grasp_probe(
     camera: Optional[str] = None,
     target: Optional[list] = None,
     instance: Optional[str] = None,
+    feasibility_mode: str = "off",
     acquire_z: float = _VG_ACQUIRE_Z,
     approach_z: float = _VG_APPROACH_Z,
     max_steps: int = 10,
@@ -2462,7 +2547,13 @@ def vision_grasp_probe(
     This is the safe data-collection boundary for calibrating finger-clearance and clutter
     features. It deliberately creates a probe episode rather than a failed grasp episode.
     """
+    if feasibility_mode not in ("off", "avoid_saturation"):
+        return {
+            "_source": "error", "dry_run": True, "safe_to_descend": False,
+            "note": "feasibility_mode must be off|avoid_saturation",
+        }
     resolved_target = target
+    memory_trace = None
     if instance is not None:
         if instance not in ("leftmost", "rightmost", "largest"):
             return {
@@ -2491,11 +2582,39 @@ def vision_grasp_probe(
             if (not _is_canonical_wrist_self_candidate(b["u"], b["v"])
                 and not _is_frame_edge_candidate(b["u"], b["v"]))
         ]
+        if feasibility_mode == "avoid_saturation":
+            memories = _recall_saturation_memories(_store, color, acquire_z)
+            avoided, eligible = [], []
+            for candidate in candidates:
+                matches = [
+                    {**memory, "distance_px": round(
+                        _candidate_memory_distance(candidate, memory), 1,
+                    )}
+                    for memory in memories
+                    if _candidate_memory_distance(candidate, memory) <= 60.0
+                ]
+                if matches:
+                    avoided.append({"candidate": candidate, "memories": matches})
+                else:
+                    eligible.append(candidate)
+            memory_trace = {
+                "mode": feasibility_mode,
+                "retrieved_episode_ids": [m["episode_id"] for m in memories],
+                "avoided": avoided,
+                "eligible_count": len(eligible),
+            }
+            candidates = eligible
         if not candidates:
             return {
                 "_source": "live", "dry_run": True, "safe_to_descend": False,
-                "note": "no tabletop candidate at canonical acquisition pose",
+                "note": (
+                    "deliberate abstention: all tabletop candidates matched recent "
+                    "workspace-saturation memory"
+                    if memory_trace and memory_trace["avoided"]
+                    else "no tabletop candidate at canonical acquisition pose"
+                ),
                 "candidates": [],
+                "feasibility_memory": memory_trace,
             }
         if instance == "leftmost":
             chosen = min(candidates, key=lambda b: float(b["u"]))
@@ -2531,6 +2650,8 @@ def vision_grasp_probe(
             "rule": instance,
             "target": resolved_target,
         }
+    if memory_trace is not None:
+        out["feasibility_memory"] = memory_trace
     return out
 
 
@@ -4332,6 +4453,11 @@ PRIMITIVE_SPECS = [
                              "enum": ["leftmost", "rightmost", "largest"],
                              "description": "resolve a same-colour instance after moving to the "
                                             "canonical acquisition pose"},
+                "feasibility_mode": {"type": "string",
+                                     "enum": ["off", "avoid_saturation"],
+                                     "default": "off",
+                                     "description": "optionally abstain from targets matching "
+                                                    "recent workspace-saturation episodes"},
                 "acquire_z": {"type": "number", "minimum": 0.2, "maximum": 0.45,
                               "default": 0.34},
                 "approach_z": {"type": "number", "minimum": 0.1, "maximum": 0.3,

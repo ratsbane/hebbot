@@ -2105,3 +2105,85 @@ was unreachable under the current servo/workspace policy, and blue preserved ide
 the independent final-clearance criterion. The next smallest improvement is explicit workspace-
 saturation detection and recovery (for example, re-home/reacquire from a shifted overview pose),
 not looser perception gates.
+
+### Explicit workspace-saturation stop experiment
+
+*Added by Codex.*
+
+The green persistence trial remained roughly 30 px off target at `z=0.315 m` for many steps while
+command-derived expected pixels showed little achievable motion. Before designing a recovery, the
+substrate must distinguish this condition from perception loss and ordinary servo non-convergence.
+
+The new detector labels a correction saturated when the requested Cartesian displacement is at
+least 2 mm, the workspace-clipped command retains less than 25% of its norm, and image error is
+still above the descent tolerance. Three consecutive saturated observations stop before issuing
+the third ineffective motion. Episode history records requested and commanded XY displacement,
+the saturation boolean, and its consecutive count. This is classification only: it does not
+weaken workspace bounds, descend, or attempt an unvalidated recovery. Offline checks pass **50
+tests**.
+
+The first live classification trial retained green identity but again consumed all 20 steps. The
+new telemetry nevertheless localized the issue: steps 7–8 and 18–19 were labeled saturated, while
+intervening steps requested 20–46 mm primarily in X, commanded approximately 0–1 mm X, but retained
+smaller Y motion. Vector-norm comparison incorrectly treated that secondary-axis motion as useful.
+Saturation is now evaluated on the dominant requested axis. Under the recorded trajectory, steps
+7, 8, and 9 form three consecutive dominant-axis saturations and should stop around step 9 on
+replay. The arm made no contact and homed with maximum joint error **0.00851 rad**.
+
+The repeated live probe confirmed the revised classifier. Green identity remained stable and the
+primitive stopped explicitly after 11 observations, rather than exhausting 20. Its final three
+dominant-X corrections requested −41.4, −19.2, and −39.8 mm while the clipped commands retained
+approximately +0.09, +0.54, and −0.05 mm X. The outcome was `workspace saturation`, not generic
+non-convergence. No third ineffective motion was issued, no contact occurred, and homing maximum
+joint error was **0.00871 rad**.
+
+Architecturally, recovery should not silently reselect an object inside the grasp primitive. The
+primitive now emits a structured feasibility constraint (saturated axis/direction, requested and
+commanded motion, EE position, image error, and observation count). A deliberate planner or an
+explicit composite recovery skill can use that record to choose an alternate target or validated
+view, preserving the distinction between foundation-model choice and reflexive execution. The
+next thesis-relevant experiment is to retrieve this recent feasibility memory before repeating a
+similar target selection, and demonstrate that it changes the deliberate action.
+
+### Feasibility memory changes deliberate selection
+
+*Added by Codex.*
+
+Hypothesis: retrieving the recent green workspace-saturation episode before semantic selection can
+prevent an identical infeasible attempt and cause the deliberate layer to choose another action.
+This is intentionally opt-in via `feasibility_mode=avoid_saturation`; default probe behavior is
+unchanged, and the primitive does not silently substitute another object.
+
+Retrieval scans recent `vision_grasp_probe` episodes for the same color and acquisition height,
+requires an explicit workspace-saturation outcome, and compares the stored canonical selected
+pixel with current candidates. Candidates within 60 px are excluded. If none remain, the skill
+abstains before servo motion and returns a trace containing retrieved episode IDs, avoided
+candidates, pixel distances, and eligibility count. The foundation-model layer can then inspect
+that evidence and deliberately select a different color, target, or view.
+
+Offline tests construct matching and nonmatching episodes and demonstrate that retrieval is scoped
+by color, canonical view, and failure class. A candidate near `[505,270]` retrieves the matching
+green saturation at `[501,266]` and abstains without calling the grasp trajectory. Tests pass
+**51 total**. Live success requires (1) the green call to abstain with the real saturation episode
+ID and no servo motion, followed by (2) an explicit deliberate choice of a different feasible
+block for a no-contact probe.
+
+The live comparison met both criteria. Green abstention episode
+`a3a51cda-5bbf-4822-a684-ee8903a37e1d` observed the current canonical candidate at
+`[501.1,265.7]`, retrieved saturation episode `d91776dc-c189-4191-a29a-f3beba97ba68` at
+`[501.3,266.1]`, and associated them at **0.4 px** distance. Eligibility was zero. The arm rose to
+the canonical view but issued no servo trajectory.
+
+Codex then deliberately changed color and instance rather than repeating green. Red-rightmost
+episode `341ae0a9-7efe-4fb2-8647-e138a1ed6ad1` used the same feasibility mode, retrieved no red
+saturation memories, retained three eligible candidates, and completed a 12-step no-contact probe.
+Its final +6° pose passed the jaw-clearance guard at **3.78 px**. Exact initial, before-close, and
+final-pose RGB-D were stored. No descent or contact occurred; final homing maximum joint error was
+**0.00869 rad**.
+
+This is the first direct evidence in this line of work that Hebbot's stored recent experience
+changes a subsequent deliberate action: a prior failure was retrieved, prevented its own replay,
+and caused selection of an alternative that passed. It is still hand-designed retrieval and
+foundation-model-mediated choice, not learned policy improvement. The missing next link is to
+record the abstention→alternative pair as a reusable recovery decision and test whether Hebbot can
+replay that choice without Codex manually interpreting the trace.
