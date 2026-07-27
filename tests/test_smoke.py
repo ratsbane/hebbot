@@ -226,6 +226,66 @@ def test_saturation_memory_recall_is_scoped_by_color_and_acquisition_pose(
     assert not out["safe_to_descend"]
 
 
+def test_feasibility_recovery_probe_replays_recorded_fallback(monkeypatch):
+    import hebbot.skills.primitives as primitives
+
+    calls = []
+
+    def fake_probe(**kwargs):
+        calls.append((kwargs["color"], kwargs["instance"]))
+        if kwargs["color"] == "green":
+            return {
+                "safe_to_descend": False,
+                "note": "deliberate abstention: remembered saturation",
+                "feasibility_memory": {"retrieved_episode_ids": ["sat-1"]},
+            }
+        return {"safe_to_descend": True, "note": "probe passed"}
+
+    monkeypatch.setattr(primitives, "vision_grasp_probe", fake_probe)
+    monkeypatch.setattr(
+        primitives, "_recall_probe_recoveries",
+        lambda *args, **kwargs: [{
+            "episode_id": "recovery-1",
+            "fallback": {"color": "red", "instance": "rightmost"},
+            "trigger_episode_ids": ["sat-1"],
+        }],
+    )
+
+    class Decision:
+        def record(self, decision, **kwargs):
+            self.decision = decision
+            self.kwargs = kwargs
+
+    decision = Decision()
+    out = primitives.feasibility_recovery_probe(
+        requested_color="green", requested_instance="leftmost",
+        recovery_mode="replay", _log_decision=decision.record,
+    )
+    assert calls == [("green", "leftmost"), ("red", "rightmost")]
+    assert out["safe_to_descend"]
+    assert out["recovery"]["source_episode_id"] == "recovery-1"
+    assert out["recovery"]["trigger_episode_ids"] == ["sat-1"]
+    assert decision.decision == "replay"
+
+
+def test_feasibility_recovery_record_requires_deliberate_fallback(monkeypatch):
+    import hebbot.skills.primitives as primitives
+
+    monkeypatch.setattr(
+        primitives, "vision_grasp_probe",
+        lambda **kwargs: {
+            "safe_to_descend": False,
+            "note": "deliberate abstention: remembered saturation",
+            "feasibility_memory": {"retrieved_episode_ids": ["sat-1"]},
+        },
+    )
+    out = primitives.feasibility_recovery_probe(
+        requested_color="green", recovery_mode="record",
+    )
+    assert not out["safe_to_descend"]
+    assert out["note"] == "record mode requires fallback_color"
+
+
 def test_read_camera_mock(substrate):
     # No camera in context -> mock mode, no file written.
     out = substrate.call("read_camera")

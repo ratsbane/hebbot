@@ -2187,3 +2187,54 @@ and caused selection of an alternative that passed. It is still hand-designed re
 foundation-model-mediated choice, not learned policy improvement. The missing next link is to
 record the abstention→alternative pair as a reusable recovery decision and test whether Hebbot can
 replay that choice without Codex manually interpreting the trace.
+
+### Explicit recovery record and replay skill
+
+*Added by Codex.*
+
+The next link is represented by `feasibility_recovery_probe`, a bounded no-contact skill rather
+than hidden behavior inside the grasp primitive. It first invokes the requested target with
+feasibility-memory avoidance. Only if that call explicitly abstains does recovery activate.
+
+In `record` mode, the deliberate layer supplies a fallback color and instance. The episode stores
+the requested action, triggering saturation episode IDs, fallback action, and fallback probe
+result. In `replay` mode, the skill retrieves recent successful recovery episodes matching the
+requested color/instance, selects the recorded fallback, and executes it without requiring Codex
+to interpret the abstention trace. The routing decision is logged as `replay`, including candidates
+and the source recovery episode. If no recovery exists, it abstains safely.
+
+Offline tests demonstrate replay of green-leftmost → red-rightmost, preservation of the original
+saturation trigger, explicit source episode attribution, and refusal to record without a deliberate
+fallback. Tests pass **53 total**. The live protocol is one record trial followed by a separate
+replay trial from home; success requires the second trial to select red-rightmost from the first
+recovery episode and independently pass its no-contact clearance check.
+
+The first live record call exposed an interface error before fallback motion:
+`AttributeError: 'function' object has no attribute 'record'`. Classical skills receive
+`_log_decision` as the already-bound callable `decision.record`, consistent with the existing
+`vision_grasp` replay path; the new skill incorrectly treated it as the internal decision object.
+The green primary performed only its canonical observation/abstention and no recovery servo ran.
+The arm homed with maximum joint error **0.00850 rad**. The call site now invokes the injected
+callback directly, and the failed episode remains part of the experiment record.
+
+After reload, the first complete record attempt correctly paired the green abstention with a
+red-rightmost fallback, but the fallback failed its independent final guard: **12.21 px** versus
+5.69 px after +7° yaw. Episode `ae5797da-1895-458a-9271-1b28e3eeaaeb` is therefore not replayable.
+A single bounded repeat succeeded. Record episode `b22d62fb-d950-4f83-9767-7bf5f5ec737e` stores
+the same saturation trigger `d91776dc-c189-4191-a29a-f3beba97ba68`, explicit fallback
+red-rightmost, and a passing final pose at **1.14 px** versus 5.69 px after +8° yaw.
+
+The separate replay call supplied only requested green-leftmost; no fallback parameters were
+provided by Codex. Episode `217c6362-9344-49ee-abb3-055646dd8120` retrieved the successful record
+`b22d62fb-d950-4f83-9767-7bf5f5ec737e`, automatically selected red-rightmost, and passed at
+**0.84 px** versus 5.66 px after +2° yaw. Its decisions-table row is `decision='replay'`, outcome
+`success`, with reasoning `feasibility memory blocked green/leftmost; chose red/rightmost`, the
+original saturation ID in relational state, and the record episode in candidates. Exact RGB-D was
+stored for both successful fallback trajectories. No descent or contact occurred; final homing
+maximum joint error was **0.00855 rad**.
+
+This closes the intended missing link at a small experimental scale: deliberate recovery was
+recorded once, retrieved later, and replayed successfully without foundation-model interpretation
+of the second abstention. It remains symbolic/episodic replay, not policy distillation. The next
+compression question is whether multiple recovery records can be generalized by relational state
+rather than exact requested color/instance keys, and eventually distilled into a recovery policy.

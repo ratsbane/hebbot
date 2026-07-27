@@ -2655,6 +2655,134 @@ def vision_grasp_probe(
     return out
 
 
+def _recall_probe_recoveries(store, requested_color, requested_instance, limit=5):
+    """Retrieve successful recorded abstention→fallback decisions."""
+    if store is None:
+        return []
+    recalled = []
+    for ep in store.recent_episodes(skill_name="feasibility_recovery_probe", limit=100):
+        outcome = ep.get("outcome") or {}
+        result = outcome.get("result") or {}
+        recovery = result.get("recovery") or {}
+        requested = recovery.get("requested") or {}
+        fallback = recovery.get("fallback") or {}
+        fallback_result = result.get("fallback_result") or {}
+        if (requested.get("color") != requested_color
+                or requested.get("instance") != requested_instance
+                or not fallback.get("color")
+                or not fallback_result.get("safe_to_descend")):
+            continue
+        recalled.append({
+            "episode_id": ep["id"],
+            "fallback": fallback,
+            "trigger_episode_ids": recovery.get("trigger_episode_ids") or [],
+        })
+        if len(recalled) >= limit:
+            break
+    return recalled
+
+
+def feasibility_recovery_probe(
+    *,
+    requested_color: str,
+    requested_instance: str = "leftmost",
+    recovery_mode: str = "replay",
+    fallback_color: Optional[str] = None,
+    fallback_instance: str = "rightmost",
+    camera: Optional[str] = None,
+    acquire_z: float = 0.45,
+    speed_factor: float = 0.05,
+    max_steps: int = 20,
+    pixel_tol: float = 10.0,
+    _context: Optional[Any] = None,
+    _store: Optional[Any] = None,
+    _episode_id: Optional[str] = None,
+    _log_decision: Optional[Any] = None,
+) -> dict:
+    """Record or replay an explicit recovery after feasibility-memory abstention."""
+    if recovery_mode not in ("record", "replay"):
+        return {"_source": "error", "safe_to_descend": False,
+                "note": "recovery_mode must be record|replay"}
+
+    primary = vision_grasp_probe(
+        color=requested_color, instance=requested_instance,
+        feasibility_mode="avoid_saturation", camera=camera, acquire_z=acquire_z,
+        speed_factor=speed_factor, max_steps=max_steps, pixel_tol=pixel_tol,
+        _context=_context, _store=_store, _episode_id=_episode_id,
+    )
+    memory = primary.get("feasibility_memory") or {}
+    abstained = str(primary.get("note") or "").startswith("deliberate abstention")
+    if not abstained:
+        return {
+            **primary,
+            "recovery": {"used": False, "reason": "primary did not abstain"},
+            "primary_result": primary,
+        }
+
+    candidates = _recall_probe_recoveries(
+        _store, requested_color, requested_instance,
+    )
+    if recovery_mode == "record":
+        if fallback_color is None:
+            return {
+                "_source": "error", "safe_to_descend": False,
+                "note": "record mode requires fallback_color",
+                "primary_result": primary,
+            }
+        chosen = {"color": fallback_color, "instance": fallback_instance}
+        source_episode_id = None
+        decision_source = "deliberate_record"
+    elif candidates:
+        chosen = dict(candidates[0]["fallback"])
+        source_episode_id = candidates[0]["episode_id"]
+        decision_source = "episode_replay"
+    else:
+        return {
+            "_source": "live", "dry_run": True, "safe_to_descend": False,
+            "note": "abstained; no recorded recovery decision available",
+            "primary_result": primary, "recovery_candidates": [],
+        }
+
+    if _log_decision is not None:
+        _log_decision(
+            "replay" if recovery_mode == "replay" else "orchestrator",
+            reasoning=(
+                f"{decision_source}: feasibility memory blocked {requested_color}/"
+                f"{requested_instance}; chose {chosen['color']}/{chosen['instance']}"
+            ),
+            relational_state={
+                "requested": {"color": requested_color, "instance": requested_instance},
+                "trigger_episode_ids": memory.get("retrieved_episode_ids") or [],
+            },
+            candidates=candidates,
+            threshold_values={"candidate_memory_radius_px": 60.0},
+        )
+
+    fallback = vision_grasp_probe(
+        color=chosen["color"], instance=chosen["instance"],
+        feasibility_mode="avoid_saturation", camera=camera, acquire_z=acquire_z,
+        speed_factor=speed_factor, max_steps=max_steps, pixel_tol=pixel_tol,
+        _context=_context, _store=_store, _episode_id=_episode_id,
+    )
+    return {
+        "_source": "live", "dry_run": True,
+        "safe_to_descend": bool(fallback.get("safe_to_descend")),
+        "note": "recovery fallback probe complete",
+        "primary_result": primary,
+        "fallback_result": fallback,
+        "recovery": {
+            "used": True,
+            "mode": recovery_mode,
+            "decision_source": decision_source,
+            "source_episode_id": source_episode_id,
+            "requested": {"color": requested_color, "instance": requested_instance},
+            "trigger_episode_ids": memory.get("retrieved_episode_ids") or [],
+            "fallback": chosen,
+        },
+        "recovery_candidates": candidates,
+    }
+
+
 def place_block(
     *,
     target_xy: Optional[list[float]] = None,
@@ -4471,6 +4599,42 @@ PRIMITIVE_SPECS = [
                 "speed_factor": {"type": "number", "minimum": 0.01, "maximum": 0.05,
                                  "default": 0.05},
             },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "feasibility_recovery_probe",
+        "function_spec": "hebbot.skills.primitives:feasibility_recovery_probe",
+        "expectations": {
+            "checks": [
+                {"name": "safe_recovery_pose", "field": "safe_to_descend",
+                 "op": "eq", "value": True},
+            ],
+        },
+        "params_schema": {
+            "type": "object",
+            "properties": {
+                "requested_color": {"type": "string", "enum": ["blue", "green", "red"]},
+                "requested_instance": {"type": "string",
+                                       "enum": ["leftmost", "rightmost", "largest"],
+                                       "default": "leftmost"},
+                "recovery_mode": {"type": "string", "enum": ["record", "replay"],
+                                  "default": "replay"},
+                "fallback_color": {"type": "string", "enum": ["blue", "green", "red"],
+                                   "description": "required only when recording a recovery"},
+                "fallback_instance": {"type": "string",
+                                      "enum": ["leftmost", "rightmost", "largest"],
+                                      "default": "rightmost"},
+                "camera": {"type": "string"},
+                "acquire_z": {"type": "number", "minimum": 0.2, "maximum": 0.45,
+                              "default": 0.45},
+                "speed_factor": {"type": "number", "minimum": 0.01, "maximum": 0.05,
+                                 "default": 0.05},
+                "max_steps": {"type": "integer", "minimum": 1, "maximum": 20,
+                              "default": 20},
+                "pixel_tol": {"type": "number", "minimum": 0.5, "default": 10.0},
+            },
+            "required": ["requested_color"],
             "additionalProperties": False,
         },
     },
