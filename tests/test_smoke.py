@@ -286,6 +286,67 @@ def test_feasibility_recovery_record_requires_deliberate_fallback(monkeypatch):
     assert out["note"] == "record mode requires fallback_color"
 
 
+def test_relational_recovery_generalizes_trigger_region_across_color(
+    substrate, monkeypatch,
+):
+    import hebbot.skills.primitives as primitives
+
+    trigger = substrate.store.start_episode(
+        "vision_grasp_probe", params={"color": "green", "acquire_z": 0.45},
+    )
+    substrate.store.end_episode(trigger, success=False, outcome={
+        "success": False,
+        "result": {
+            "note": "workspace saturation: test",
+            "instance_selection": {"target": [500, 266]},
+        },
+    })
+    recovery = substrate.store.start_episode("feasibility_recovery_probe")
+    substrate.store.end_episode(recovery, success=True, outcome={
+        "success": True,
+        "result": {
+            "recovery": {
+                "used": True, "trigger_episode_ids": [trigger],
+                "fallback": {"color": "red", "instance": "rightmost"},
+            },
+            "fallback_result": {"safe_to_descend": True},
+        },
+    })
+
+    class Panda:
+        def get_position(self):
+            return [0.4, 0.0, 0.45]
+
+    monkeypatch.setattr(primitives, "move_to_pose", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        primitives, "find_blocks",
+        lambda **kwargs: {"blocks": [
+            {"color": "blue", "u": 510, "v": 270, "npix": 2000},
+        ]},
+    )
+    out = primitives.relational_recovery_probe(
+        requested_color="blue", requested_instance="largest", shadow_only=True,
+        acquire_z=0.45, _context={"panda": Panda()}, _store=substrate.store,
+    )
+    assert out["predicted_recovery"]
+    selected = out["prediction"]["selected"]
+    assert selected["episode_id"] == recovery
+    assert selected["trigger_color"] == "green"
+    assert selected["fallback"] == {"color": "red", "instance": "rightmost"}
+
+    monkeypatch.setattr(
+        primitives, "find_blocks",
+        lambda **kwargs: {"blocks": [
+            {"color": "blue", "u": 300, "v": 300, "npix": 2000},
+        ]},
+    )
+    negative = primitives.relational_recovery_probe(
+        requested_color="blue", shadow_only=True, acquire_z=0.45,
+        _context={"panda": Panda()}, _store=substrate.store,
+    )
+    assert not negative["predicted_recovery"]
+
+
 def test_read_camera_mock(substrate):
     # No camera in context -> mock mode, no file written.
     out = substrate.call("read_camera")

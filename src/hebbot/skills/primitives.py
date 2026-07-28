@@ -2783,6 +2783,153 @@ def feasibility_recovery_probe(
     }
 
 
+def _relational_recovery_candidates(
+    store, target_pixel, acquire_z, sigma_px=80.0, limit=5,
+):
+    """Rank successful recovery records by canonical trigger-region similarity."""
+    if store is None:
+        return []
+    ranked = []
+    for ep in store.recent_episodes(skill_name="feasibility_recovery_probe", limit=100):
+        outcome = ep.get("outcome") or {}
+        result = outcome.get("result") or {}
+        recovery = result.get("recovery") or {}
+        fallback_result = result.get("fallback_result") or {}
+        if not recovery.get("used") or not fallback_result.get("safe_to_descend"):
+            continue
+        for trigger_id in recovery.get("trigger_episode_ids") or []:
+            trigger = store.get_episode(trigger_id)
+            if trigger is None:
+                continue
+            trigger_params = trigger.get("params") or {}
+            trigger_result = (trigger.get("outcome") or {}).get("result") or {}
+            trigger_pixel = (trigger_result.get("instance_selection") or {}).get("target")
+            if not trigger_pixel or len(trigger_pixel) != 2:
+                continue
+            trigger_z = float(trigger_params.get("acquire_z", _VG_ACQUIRE_Z))
+            if abs(trigger_z - float(acquire_z)) > 0.02:
+                continue
+            distance = math.hypot(
+                float(target_pixel[0]) - float(trigger_pixel[0]),
+                float(target_pixel[1]) - float(trigger_pixel[1]),
+            )
+            similarity = math.exp(-0.5 * (distance / float(sigma_px)) ** 2)
+            ranked.append({
+                "episode_id": ep["id"],
+                "trigger_episode_id": trigger_id,
+                "trigger_color": trigger_params.get("color"),
+                "trigger_target": [round(float(trigger_pixel[0]), 1),
+                                   round(float(trigger_pixel[1]), 1)],
+                "distance_px": round(distance, 1),
+                "relational_similarity": round(similarity, 4),
+                "fallback": recovery.get("fallback"),
+            })
+    ranked.sort(key=lambda item: item["relational_similarity"], reverse=True)
+    return ranked[:limit]
+
+
+def relational_recovery_probe(
+    *,
+    requested_color: str,
+    requested_instance: str = "largest",
+    camera: Optional[str] = None,
+    acquire_z: float = 0.45,
+    similarity_threshold: float = 0.80,
+    shadow_only: bool = True,
+    speed_factor: float = 0.05,
+    max_steps: int = 20,
+    pixel_tol: float = 10.0,
+    _context: Optional[Any] = None,
+    _store: Optional[Any] = None,
+    _episode_id: Optional[str] = None,
+    _log_decision: Optional[Any] = None,
+) -> dict:
+    """Predict or execute recovery from a spatially similar saturation trigger."""
+    if requested_instance not in ("leftmost", "rightmost", "largest"):
+        return {"_source": "error", "completed": False,
+                "note": "requested_instance must be leftmost|rightmost|largest"}
+    panda = _extract(_context, "panda")
+    if panda is None:
+        return {"_source": "mock", "completed": True, "predicted_recovery": False,
+                "note": "mock — no arm"}
+    pos = panda.get_position()
+    move_to_pose(
+        [float(pos[0]), float(pos[1]), float(acquire_z)],
+        speed_factor=min(float(speed_factor), 0.05), _context=_context,
+    )
+    candidates = find_blocks(
+        camera=camera, colors=[requested_color], min_px=120, _context=_context,
+    ).get("blocks", [])
+    candidates = [
+        b for b in candidates
+        if (not _is_canonical_wrist_self_candidate(b["u"], b["v"])
+            and not _is_frame_edge_candidate(b["u"], b["v"]))
+    ]
+    if not candidates:
+        return {"_source": "live", "completed": True, "predicted_recovery": False,
+                "note": "no complete candidate at canonical acquisition pose"}
+    if requested_instance == "leftmost":
+        chosen = min(candidates, key=lambda b: float(b["u"]))
+    elif requested_instance == "rightmost":
+        chosen = max(candidates, key=lambda b: float(b["u"]))
+    else:
+        chosen = max(candidates, key=lambda b: int(b["npix"]))
+    target = [float(chosen["u"]), float(chosen["v"])]
+    recalled = _relational_recovery_candidates(_store, target, acquire_z)
+    selected = recalled[0] if recalled and recalled[0]["relational_similarity"] >= float(
+        similarity_threshold
+    ) else None
+    prediction = {
+        "requested": {"color": requested_color, "instance": requested_instance,
+                      "target": [round(target[0], 1), round(target[1], 1)]},
+        "threshold": float(similarity_threshold),
+        "selected": selected,
+        "candidates": recalled,
+    }
+    if shadow_only or selected is None:
+        if _log_decision is not None:
+            _log_decision(
+                "orchestrator",
+                reasoning="shadow-only relational recovery prediction; no fallback executed",
+                relational_state=prediction["requested"], candidates=recalled,
+                threshold_values={"relational_similarity": similarity_threshold},
+            )
+        return {
+            "_source": "live", "completed": True, "shadow_only": bool(shadow_only),
+            "predicted_recovery": selected is not None,
+            "note": "relational recovery shadow evaluation complete",
+            "prediction": prediction,
+        }
+
+    fallback = selected.get("fallback") or {}
+    if not fallback.get("color") or not fallback.get("instance"):
+        return {"_source": "live", "completed": True, "predicted_recovery": True,
+                "executed": False, "note": "selected recovery has no valid fallback",
+                "prediction": prediction}
+    if _log_decision is not None:
+        _log_decision(
+            "replay",
+            reasoning=(f"relational recovery {selected['relational_similarity']:.3f} >= "
+                       f"{similarity_threshold:.3f}; replaying {fallback['color']}/"
+                       f"{fallback['instance']}"),
+            relational_state=prediction["requested"], candidates=recalled,
+            threshold_values={"relational_similarity": similarity_threshold},
+        )
+    out = vision_grasp_probe(
+        color=fallback["color"], instance=fallback["instance"],
+        feasibility_mode="avoid_saturation", camera=camera, acquire_z=acquire_z,
+        speed_factor=speed_factor, max_steps=max_steps, pixel_tol=pixel_tol,
+        _context=_context, _store=_store, _episode_id=_episode_id,
+    )
+    return {
+        "_source": "live", "completed": True, "shadow_only": False,
+        "predicted_recovery": True, "executed": True,
+        "safe_to_descend": bool(out.get("safe_to_descend")),
+        "note": "relational recovery fallback probe complete",
+        "prediction": prediction, "fallback_result": out,
+    }
+
+
 def place_block(
     *,
     target_xy: Optional[list[float]] = None,
@@ -4628,6 +4775,37 @@ PRIMITIVE_SPECS = [
                 "camera": {"type": "string"},
                 "acquire_z": {"type": "number", "minimum": 0.2, "maximum": 0.45,
                               "default": 0.45},
+                "speed_factor": {"type": "number", "minimum": 0.01, "maximum": 0.05,
+                                 "default": 0.05},
+                "max_steps": {"type": "integer", "minimum": 1, "maximum": 20,
+                              "default": 20},
+                "pixel_tol": {"type": "number", "minimum": 0.5, "default": 10.0},
+            },
+            "required": ["requested_color"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "relational_recovery_probe",
+        "function_spec": "hebbot.skills.primitives:relational_recovery_probe",
+        "expectations": {
+            "checks": [
+                {"name": "completed", "field": "completed", "op": "eq", "value": True},
+            ],
+        },
+        "params_schema": {
+            "type": "object",
+            "properties": {
+                "requested_color": {"type": "string", "enum": ["blue", "green", "red"]},
+                "requested_instance": {"type": "string",
+                                       "enum": ["leftmost", "rightmost", "largest"],
+                                       "default": "largest"},
+                "camera": {"type": "string"},
+                "acquire_z": {"type": "number", "minimum": 0.2, "maximum": 0.45,
+                              "default": 0.45},
+                "similarity_threshold": {"type": "number", "minimum": 0.0, "maximum": 1.0,
+                                         "default": 0.80},
+                "shadow_only": {"type": "boolean", "default": True},
                 "speed_factor": {"type": "number", "minimum": 0.01, "maximum": 0.05,
                                  "default": 0.05},
                 "max_steps": {"type": "integer", "minimum": 1, "maximum": 20,

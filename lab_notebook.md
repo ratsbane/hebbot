@@ -2238,3 +2238,56 @@ recorded once, retrieved later, and replayed successfully without foundation-mod
 of the second abstention. It remains symbolic/episodic replay, not policy distillation. The next
 compression question is whether multiple recovery records can be generalized by relational state
 rather than exact requested color/instance keys, and eventually distilled into a recovery policy.
+
+### Cross-color relational recovery shadow probe
+
+*Added by Codex.*
+
+Exact recovery replay keys on requested color/instance. The next compression hypothesis is that
+workspace infeasibility is primarily relational to canonical target region, not object color. A
+new `relational_recovery_probe` therefore selects a current candidate at the same 0.45 m overview,
+retrieves successful recovery records and their saturation triggers, and scores canonical pixel
+distance with `similarity = exp(-0.5 * (distance / 80 px)^2)`. Trigger color is reported but not
+used in the score. The default acceptance threshold is 0.80 (approximately a 53 px radius).
+
+The skill defaults to `shadow_only=true`: it rises to the overview, observes and ranks recovery
+candidates, logs the prediction and threshold, but does not servo toward either requested or
+fallback objects. Execution is a separate explicit mode after evidence review. Offline tests show
+a blue candidate near `[510,270]` retrieving a successful recovery whose green trigger is
+`[500,266]`, while a blue candidate at `[300,300]` remains below threshold. Tests pass **54 total**.
+The first live trial is intentionally negative on the current layout; a cross-color positive trial
+will require a different-color block in the remembered green region, preferably moved manually
+before any execution is authorized.
+
+Live negative-control episode `b6dce89e-6594-4ca7-b34d-eae8afb8ac7d` selected blue-largest at
+`[572.2,362.6]`. Both the successful recorded recovery and its successful replay resolve to the
+same green saturation trigger `[501.3,266.1]`; each ranked at **119.7 px** distance and **0.3262**
+similarity, below the 0.80 threshold. `predicted_recovery=false`; no requested-target servo and no
+fallback execution occurred. The arm homed with maximum joint error **0.00837 rad**.
+
+This validates the negative side of the relational gate on hardware. A discriminating positive
+control requires changing object identity while holding spatial relation approximately fixed: move
+a blue or red block to the current green block's canonical region, then run shadow mode again. The
+block should be within roughly 53 px of `[501,266]`; swapping the physical positions of blue and
+green is preferable because it preserves an explicit cross-color comparison without adding a new
+object.
+
+Doug manually swapped blue and green. Positive shadow episode
+`387bc821-ac4e-42b4-a8ac-27f4cc44e518` then selected blue-largest at `[499.4,274.2]`, only
+**8.3 px** from the remembered green trigger. Similarity was **0.9946**, above 0.80, and the selected
+fallback was red-rightmost. The decision row remained `orchestrator` with shadow-only reasoning;
+no requested-target servo or fallback execution occurred.
+
+After homing and explicit authorization, execution episode
+`9db9a097-1561-448f-8b59-838a85e1f2b4` independently observed blue at `[499.5,274.1]` and scored
+the green trigger **0.9948** at 8.2 px. It replayed red-rightmost, never servoed toward blue, and
+passed the final +9° clearance pose at **2.07 px** versus 5.63 px. Its decision row is
+`decision='replay'`, outcome `success`, reasoning `relational recovery 0.995 >= 0.800; replaying
+red/rightmost`. Exact fallback RGB-D was stored. No descent or contact occurred; final homing
+maximum joint error was **0.00877 rad**.
+
+Together, the before/after swap controls isolate spatial relation from color: the same blue request
+scored 0.3262 when 119.7 px away and 0.9946–0.9948 after being moved 8 px from the green trigger.
+This is genuine one-step generalization beyond the exact symbolic key. It is still a hand-designed
+Gaussian representation and threshold. The next scientific question is whether the metric can be
+learned/calibrated from several saturation and success boundaries, rather than chosen by Codex.
