@@ -1,4 +1,4 @@
-"""Train and promotion-gate Hebbot's tiny workspace-feasibility classifier."""
+"""Train and promotion-gate Hebbot's tiny visual-servo envelope classifier."""
 
 from __future__ import annotations
 

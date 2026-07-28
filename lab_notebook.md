@@ -2465,3 +2465,128 @@ failure/pattern clusters → a candidate code, trajectory, or model improvement 
 validation → shadow execution → bounded live testing → promotion with explicit domain limits →
 monitoring and possible demotion. Successfully closing that loop would differentiate Hebbot from
 mere scripted automation and from a skill library that grows without reflexive compression.
+
+## 2026-07-28 — Codex experiment: geometric capability map versus servo envelope
+
+*Added by Codex.*
+
+The feasibility experiment had been treating repeated visual-servo clipping as evidence about the
+Panda's reachable workspace. Doug proposed mapping the physical limits directly, without requiring
+blocks. A new arm-free `geometric_capability_map_v1` sampler now queries the resident cuRobo service
+for gripper-down endpoint IK and collision-free paths over an XY grid. It preserves separate fields
+for `ik_reachable`, `path_found`, positional error, distance from the seed configuration, and the
+candidate joint state. The artifact explicitly says that cuRobo currently models robot
+self-collision and joint limits but **does not yet include the table or blocks**; it must not be
+interpreted as a complete scene-collision map. The panda_py EE target is converted to cuRobo's
+`panda_hand` frame using the existing calibrated 0.103 m tool-axis offset.
+
+Offline tests verify the frame conversion and that endpoint IK, path availability, and failed
+requests remain distinct evidence. The full suite passes **58 tests**. At EE `z=0.20 m`, all
+**153/153** points in the conservative teleop box (`x=0.25..0.65`, `y=-0.40..0.40`, 5 cm grid)
+had collision-aware endpoint IK. An expanded no-motion grid (`x=0.15..0.80`,
+`y=-0.60..0.60`) found IK for **286/350** points and 31 grid-adjacent boundary candidates. Nine
+reachable endpoints had reported IK error above 1 mm and 14 were more than 2.5 rad from the home
+seed; those quality signals remain recorded rather than being collapsed into a boolean. A focused
+set of **15** poses spanning the visual-servo boundary all had both IK and a cuRobo path from home.
+
+The complete artifacts are stored outside the repository with the episode data:
+
+- `capability_maps/2026-07-28_curobo_ik_z020.json`
+- `capability_maps/2026-07-28_curobo_paths_servo_boundary_z020.json`
+
+The source of the earlier “workspace saturation” is now clear in code: `vision_grasp` clips every
+servo target to `x∈[0.30,0.60]`, `y∈[-0.28,0.28]`, then declares saturation when clipping removes
+most of the dominant correction for three consecutive observations. This is a deliberately
+conservative **execution envelope**, not the Panda's physical reach radius.
+
+One live no-contact validation tested `[x=0.45, y=+0.30]`, 2 cm beyond the servo's positive-y
+limit. The predeclared sequence first moved to `z=0.30 m`, inspected state and aligned depth, then
+moved to `z=0.20 m` only after confirming clearance. Both calls used speed factor 0.03 and reported
+`ik_source='curobo'`. The high checkpoint reached within **3.33 mm**, with 0.305 m center depth and
+86.2% depth coverage. The lower pose reached within **1.44 mm**, with 0.208 m center depth and 89.0%
+coverage. State and force remained nominal; there was no descent to contact, grasp, or object
+motion. The arm homed with maximum joint error **0.00886 rad**.
+
+This falsifies the simple interpretation that the remembered `[501,266]` saturation represents a
+physical reach boundary. It is evidence that the current visual-servo policy cannot pursue that
+image correction while constrained to its safety box. Geometric reachability, path feasibility,
+live pose attainment, visual-servo convergence, and final-pose authorization must remain separate
+labels. The tiny pixel classifier should not be promoted as a model of physical reach, even after
+collecting another clipped region; at most it models the current controller envelope. The next
+design decision is whether to (a) retain it explicitly as an execution-envelope predictor, or
+(b) replace raw canonical pixels with geometric and phase-conditional features, using cuRobo as a
+prior and real episodes to learn perception/controller residual risk.
+
+### Orthogonal outcome axes and corrected learner semantics
+
+*Added by Codex.*
+
+The architectural correction is now implemented. Every new `vision_grasp_probe` result includes
+an `outcome_axes` record with independently nullable fields:
+
+- `geometric_reachable`
+- `planned_path_found`
+- `live_pose_reached`
+- `controller_envelope_clipped`
+- `controller_envelope_limited`
+- `visual_servo_converged`
+- `final_pose_authorized`
+
+The rule is deliberately epistemic: absence of evidence remains `null`, not failure. A final-pose
+authorization establishes live pose attainment, servo convergence, and lack of controller-envelope
+limitation for that execution, but it does not retroactively claim that a separate offline IK or
+path query occurred. Conversely, three clipped corrections establish controller-envelope
+limitation and failed servo convergence, but say nothing about geometric reachability or path
+existence. Perception rejection and other ambiguous failures leave unmeasured axes unknown.
+
+New servo histories write `controller_envelope_clipped` and
+`controller_envelope_clipped_count`; failure results write
+`controller_envelope_saturation`. The old `workspace_saturated`, count, and saturation fields are
+retained as compatibility aliases so historical episodes and retrieval continue to work. The MCP
+parameter `feasibility_mode='avoid_saturation'` is likewise retained, but its description now says
+that it recalls controller-envelope clipping episodes rather than physical workspace limits.
+
+The original trainer module remains source-compatible but now produces
+`controller_envelope_logistic_v1` artifacts and uses `authorized` versus
+`controller_envelope_limited` class names. Reprocessing the real store produced
+`controller_envelope_cd5e2bb85304.json`: the same 11 source episodes, weights, and grouped Brier
+**0.0886**, now correctly described as 9 authorized observations in three spatial groups versus 2
+controller-limited observations in one group. It remains unpromoted because one limited group is
+insufficient. Numerical identity with the earlier candidate is expected; this change corrects the
+scientific interpretation and data contract rather than manufacturing a new empirical result.
+
+The suite passes **61 tests**, including explicit checks that saturation is controller evidence
+and not geometric failure, ambiguous outcomes remain unknown, successful probes populate only
+supported axes, and the live probe wrapper emits the normalized record. No robot motion was needed
+for this semantic/data-contract change. The next learned component should predict residual
+perception/controller risk conditioned on separately queried geometric/path evidence, rather than
+attempting to rediscover robot kinematics from canonical pixels.
+
+### First live orthogonal-outcome probe
+
+*Added by Codex.*
+
+After MCP restart, `vision_grasp_probe` registered as v23 and a live no-contact trial revisited the
+unresolved green-largest region. Episode `36482b0d-75cb-4bc8-b374-c76ce4cdc180` selected canonical
+target `[581.6,370.5]`, ran at speed factor 0.03 with a 20-step bound, and stored aligned RGB-D. The
+coarse controller progressed through every height without a single controller-envelope clip. It
+reached **3.5 px** error at `z=0.20 m`, below the coarse threshold. Failure occurred in the
+subsequent depth top-face alignment: four independently perceived corrections produced 4.59,
+4.25, 5.35, and **4.82 px** error against the physically derived 4.0 px jaw-clearance tolerance.
+The guard refused descent; there was no grasp or contact. Post-trial depth coverage was 80.5% with
+0.328 m center depth. The arm homed with maximum joint error **0.00885 rad**.
+
+The first normalized live output correctly reported no envelope clipping and did not claim
+geometric failure, but its aggregate `visual_servo_converged` remained unknown. This exposed a
+second conflation: coarse image servo, depth top-face alignment, and final yawed-pose alignment are
+separate execution phases. The schema now additionally records
+`coarse_visual_servo_converged`, `depth_alignment_converged`, and
+`final_pose_alignment_converged`. Offline reinterpretation of the stored episode yields,
+respectively, **true**, **false**, and **null**, with aggregate visual-servo convergence false and
+final-pose authorization false. Geometric reachability, path availability, and live pose
+attainment remain null because this particular episode did not independently log those queries.
+
+The suite passes **62 tests**. This is a useful failure: the learned residual-risk target can now
+be phase-specific rather than asking one classifier to predict an undifferentiated “feasibility.”
+The repeated green-largest evidence points specifically at a tight/noisy depth-alignment gate near
+this view, not at the robot's reach, the servo safety envelope, or coarse centering.

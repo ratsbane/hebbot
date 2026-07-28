@@ -1962,6 +1962,9 @@ def vision_grasp(
                 "requested_dy_m": round(dey, 5),
                 "commanded_dx_m": round(actual_dx, 5),
                 "commanded_dy_m": round(actual_dy, 5),
+                "controller_envelope_clipped": saturated,
+                "controller_envelope_clipped_count": consecutive_saturated,
+                # Legacy aliases retained so existing episodes/retrieval stay readable.
                 "workspace_saturated": saturated,
                 "workspace_saturated_count": consecutive_saturated,
             })
@@ -2063,6 +2066,7 @@ def vision_grasp(
                       "note": servo_stop_reason or "block not found in frame",
                       "servo_steps": len(history),
                       "history": history, "attempt": attempt,
+                      "controller_envelope_saturation": workspace_saturation,
                       "workspace_saturation": workspace_saturation}
             break
 
@@ -2547,25 +2551,30 @@ def vision_grasp_probe(
     This is the safe data-collection boundary for calibrating finger-clearance and clutter
     features. It deliberately creates a probe episode rather than a failed grasp episode.
     """
+    def with_axes(result):
+        from hebbot.learning.outcomes import probe_outcome_axes
+        result["outcome_axes"] = probe_outcome_axes(result)
+        return result
+
     if feasibility_mode not in ("off", "avoid_saturation"):
-        return {
+        return with_axes({
             "_source": "error", "dry_run": True, "safe_to_descend": False,
             "note": "feasibility_mode must be off|avoid_saturation",
-        }
+        })
     resolved_target = target
     memory_trace = None
     if instance is not None:
         if instance not in ("leftmost", "rightmost", "largest"):
-            return {
+            return with_axes({
                 "_source": "error", "dry_run": True, "safe_to_descend": False,
                 "note": "instance must be leftmost|rightmost|largest",
-            }
+            })
         panda = _extract(_context, "panda")
         if panda is None:
-            return {
+            return with_axes({
                 "_source": "mock", "dry_run": True, "safe_to_descend": False,
                 "note": "mock — no arm",
-            }
+            })
         pos = panda.get_position()
         move_to_pose(
             [float(pos[0]), float(pos[1]), float(acquire_z)],
@@ -2605,7 +2614,7 @@ def vision_grasp_probe(
             }
             candidates = eligible
         if not candidates:
-            return {
+            return with_axes({
                 "_source": "live", "dry_run": True, "safe_to_descend": False,
                 "note": (
                     "deliberate abstention: all tabletop candidates matched recent "
@@ -2615,7 +2624,7 @@ def vision_grasp_probe(
                 ),
                 "candidates": [],
                 "feasibility_memory": memory_trace,
-            }
+            })
         if instance == "leftmost":
             chosen = min(candidates, key=lambda b: float(b["u"]))
         elif instance == "rightmost":
@@ -2652,7 +2661,7 @@ def vision_grasp_probe(
         }
     if memory_trace is not None:
         out["feasibility_memory"] = memory_trace
-    return out
+    return with_axes(out)
 
 
 def _recall_probe_recoveries(store, requested_color, requested_instance, limit=5):
@@ -4732,7 +4741,8 @@ PRIMITIVE_SPECS = [
                                      "enum": ["off", "avoid_saturation"],
                                      "default": "off",
                                      "description": "optionally abstain from targets matching "
-                                                    "recent workspace-saturation episodes"},
+                                                    "recent controller-envelope clipping episodes; "
+                                                    "parameter name retained for compatibility"},
                 "acquire_z": {"type": "number", "minimum": 0.2, "maximum": 0.45,
                               "default": 0.34},
                 "approach_z": {"type": "number", "minimum": 0.1, "maximum": 0.3,

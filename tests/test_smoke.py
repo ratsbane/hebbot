@@ -159,6 +159,9 @@ def test_vision_grasp_probe_forces_recorded_no_descent_episode(monkeypatch):
         color="red", target=[320, 330], speed_factor=0.2,
     )
     assert out["dry_run"]
+    assert out["outcome_axes"]["final_pose_authorized"] is True
+    assert out["outcome_axes"]["controller_envelope_limited"] is False
+    assert out["outcome_axes"]["geometric_reachable"] is None
     assert called["experience_mode"] == "record"
     assert called["max_retry"] == 0
     assert called["speed_factor"] == pytest.approx(0.05)
@@ -170,6 +173,7 @@ def test_vision_grasp_probe_forces_recorded_no_descent_episode(monkeypatch):
     failed = primitives.vision_grasp_probe(color="red")
     assert failed["dry_run"]
     assert not failed["safe_to_descend"]
+    assert failed["outcome_axes"]["geometric_reachable"] is None
 
     invalid = primitives.vision_grasp_probe(color="red", instance="middle")
     assert not invalid["safe_to_descend"]

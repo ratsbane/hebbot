@@ -1,4 +1,4 @@
-"""Tiny calibrated feasibility classifier distilled from no-contact probe episodes."""
+"""Tiny controller-envelope classifier distilled from no-contact probe episodes."""
 
 from __future__ import annotations
 
@@ -11,19 +11,23 @@ from pathlib import Path
 
 import numpy as np
 
+from hebbot.learning.outcomes import probe_outcome_axes
+
 
 FEATURE_NAMES = ("u_norm", "v_norm")
 
 
 def _label(result: dict) -> tuple[int | None, str]:
-    note = str(result.get("note") or "")
-    if result.get("safe_to_descend") is True:
+    axes = result.get("outcome_axes") or probe_outcome_axes(result)
+    if axes["controller_envelope_limited"] is True:
+        return 1, "controller_envelope_limited"
+    if axes["final_pose_authorized"] is True:
         return 0, "authorized"
-    if note.startswith("workspace saturation"):
-        return 1, "workspace_saturation"
+    # Two consecutive clips are retained as a precursor label for the original
+    # experiment, but are explicitly about the controller envelope, not geometry.
     history = result.get("history") or []
     if max((int(h.get("workspace_saturated_count") or 0) for h in history), default=0) >= 2:
-        return 1, "workspace_saturation_precursor"
+        return 1, "controller_envelope_precursor"
     return None, "excluded_ambiguous_or_other_failure"
 
 
@@ -42,7 +46,7 @@ def _spatial_groups(examples: list[dict], radius_px: float = 35.0) -> list[int]:
 
 
 def extract_examples(store, limit: int = 500, acquire_z: float = 0.45) -> list[dict]:
-    """Extract only current, defensible feasibility labels from probe episodes."""
+    """Extract defensible labels for the current visual-servo execution envelope."""
     examples = []
     for episode in reversed(store.recent_episodes(
         skill_name="vision_grasp_probe", limit=limit,
@@ -112,7 +116,7 @@ def train_candidate(
     max_group_loo_brier: float = 0.25, ridge: float = 1.0,
 ) -> TrainingResult:
     reasons = []
-    artifact = {"kind": "feasibility_logistic_v1", "n": len(examples)}
+    artifact = {"kind": "controller_envelope_logistic_v1", "n": len(examples)}
     if len(examples) < 2 or len({e["y"] for e in examples}) < 2:
         reasons.append("need at least two classes and two examples")
         artifact.update({"promoted": False, "rejection_reasons": reasons})
@@ -139,10 +143,10 @@ def train_candidate(
         "created_at": time.time(), "feature_names": list(FEATURE_NAMES),
         "source_episode_ids": [e["episode_id"] for e in examples],
         "weights": weights.tolist(), "ridge": float(ridge),
-        "class_counts": {"feasible": int((y == 0).sum()),
-                         "workspace_limited": int((y == 1).sum())},
-        "spatial_group_counts": {"feasible": negative_groups,
-                                 "workspace_limited": positive_groups},
+        "class_counts": {"authorized": int((y == 0).sum()),
+                         "controller_envelope_limited": int((y == 1).sum())},
+        "spatial_group_counts": {"authorized": negative_groups,
+                                 "controller_envelope_limited": positive_groups},
         "group_loo_n": len(loo_p), "group_loo_brier": brier,
         "group_loo_predictions": [
             {"episode_id": examples[i]["episode_id"], "y": int(y[i]), "p": p}
@@ -153,10 +157,10 @@ def train_candidate(
         reasons.append(f"{len(examples)} examples < minimum {min_samples}")
     if positive_groups < min_positive_groups:
         reasons.append(
-            f"{positive_groups} workspace-limited spatial groups < minimum {min_positive_groups}"
+            f"{positive_groups} controller-limited spatial groups < minimum {min_positive_groups}"
         )
     if negative_groups < min_negative_groups:
-        reasons.append(f"{negative_groups} feasible spatial groups < minimum {min_negative_groups}")
+        reasons.append(f"{negative_groups} authorized spatial groups < minimum {min_negative_groups}")
     if brier is None or brier > max_group_loo_brier:
         reasons.append(f"group-LOO Brier {brier} exceeds {max_group_loo_brier}")
     artifact["promotion_thresholds"] = {
@@ -174,7 +178,7 @@ def save_artifact(result: TrainingResult, policies_dir: str | Path) -> Path:
     policies_dir.mkdir(parents=True, exist_ok=True)
     canonical = json.dumps(result.artifact, sort_keys=True).encode()
     digest = hashlib.sha256(canonical).hexdigest()[:12]
-    path = policies_dir / f"feasibility_{digest}.json"
+    path = policies_dir / f"controller_envelope_{digest}.json"
     path.write_text(json.dumps(result.artifact, indent=2, sort_keys=True) + "\n")
     return path
 
