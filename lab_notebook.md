@@ -2291,3 +2291,177 @@ scored 0.3262 when 119.7 px away and 0.9946–0.9948 after being moved 8 px from
 This is genuine one-step generalization beyond the exact symbolic key. It is still a hand-designed
 Gaussian representation and threshold. The next scientific question is whether the metric can be
 learned/calibrated from several saturation and success boundaries, rather than chosen by Codex.
+
+### First calibrated feasibility candidate
+
+*Added by Codex.*
+
+The first deliberately tiny learned feasibility model uses only canonical overview target pixel
+coordinates (`u/640`, `v/480`) and logistic regression with L2 regularization. Training labels are
+conservative: successful probes with `safe_to_descend=true` are feasible; explicit workspace
+saturation and the immediately preceding repeated-saturation precursor are workspace-limited.
+Perception failures, identity rejections, clearance refusals, and generic nonconvergence are
+excluded because treating them as workspace labels would teach the model historical software bugs.
+
+Validation groups observations within 35 px and holds out whole spatial groups rather than random
+rows. This prevents repeated trials at one block location from appearing in both train and test
+sets. Promotion requires at least 8 samples, two spatial groups of each class, and grouped
+leave-one-location-out Brier score no worse than 0.25. The implementation and refusal behavior pass
+the full **56-test** suite.
+
+Training against the real episode store produced artifact
+`feasibility_ab8e01b5564f.json`: **10 defensible examples**, comprising 8 feasible observations in
+two spatial groups and 2 workspace-limited observations in only one spatial group. The grouped
+Brier score was **0.1434** over the eight evaluable held-out feasible observations. The candidate
+was correctly **not promoted** because the positive class has only one independent location; the
+limited group itself cannot yet be held out while retaining both classes for training.
+
+For orientation only, the unpromoted candidate assigns workspace-limited probabilities 0.320 at
+the known saturation trigger `[501.3,266.1]`, 0.312 at the old blue location `[572.2,362.6]`,
+0.127 at the feasible-left region `[130,352]`, and 0.243 at feasible-mid `[452,375]`. The ranking
+contains some signal, but its broad similarity between the known limited region and old blue
+location demonstrates why deployment would be premature. The next useful data are not more repeats
+at `[501,266]`; they are independently labeled boundary probes at additional spatial locations,
+including both sides of the reachability transition. This is an instance where the learning loop's
+promotion gate prevented apparent in-sample progress from being mistaken for generalization.
+
+A first boundary-oriented live probe targeted green-largest at canonical `[575.1,371.4]`, near the
+former blue region where the unpromoted model predicted 0.312 workspace limitation. Episode
+`2ef4eb20-40c2-47e3-81c6-565e84fc7be0` ran at speed factor 0.03 with an eight-step cap and no
+descent or contact. It reduced pixel error from 265.9 px to 20.4 px at `z=0.405 m`, encountered one
+transient workspace clamp on step 5, recovered on step 6, and then stopped as nonconverged. This is
+neither a positive nor negative feasibility label: repeated saturation was not established and the
+safe final pose was not reached. The failure and aligned RGB-D remain stored as episode data.
+
+Retraining after the attempt again extracted exactly 10 examples with identical weights and
+metrics, confirming that the ambiguous failure was excluded rather than mislabeled. The arm was
+homed with maximum joint error **0.00876 rad**. A follow-up at this same location may use a larger
+bounded step allowance to resolve its label, but even a conclusive positive there would be more
+than 35 px from `[501,266]` and therefore supply the independent workspace-limited spatial group
+needed for the first honest promotion test.
+
+A single follow-up at the same green-largest location increased the bound to 14 steps, retaining
+speed factor 0.03 and the no-contact probe. Episode
+`6c72ab1e-c40a-462c-8ffa-a37760839d6a` reached **4.0 px** error at `z=0.360 m` with no workspace
+saturation, then lost alignment during the lower-height phase: 28.1 px at 0.315 m and 34.3 px at
+0.270 m. It stopped nonconverged, without descent authorization or contact. This strongly suggests
+the location is kinematically reachable while exposing low-height visual-servo instability; it is
+still not a defensible final-feasibility label under the conservative definition. Retraining again
+extracted exactly 10 examples, confirming exclusion. The arm homed with maximum joint error
+**0.00867 rad**.
+
+A separate boundary sample targeted green-leftmost at canonical `[301.3,443.1]`, more than 35 px
+from every previous feasible group. Episode `f1e2cb17-717b-4b9e-9daf-023d3383ff74` ran at speed
+factor 0.03 with a 16-step cap. It reached every observation height without workspace saturation,
+completed the final no-contact clearance pose with **1.14 px** alignment versus a 4.0 px tolerance,
+and returned `safe_to_descend=true`; no grasp, descent, or table contact was commanded. Exact
+initial, before-close, and final-pose aligned RGB-D were stored. The arm homed with maximum joint
+error **0.00555 rad** and was verified nominal.
+
+Retraining after this conclusive sample produced artifact `feasibility_afa6fbf4746a.json` from
+**11 defensible examples**: 9 feasible in three independent spatial groups and 2 workspace-limited
+in one group. Grouped leave-one-location-out Brier improved from 0.1434 to **0.0886** across nine
+held-out feasible observations. Promotion still correctly refused because the positive class has
+only one independent spatial region. This sample improves the reachable side of the boundary but
+does not substitute for a second genuinely saturated location.
+
+Scientific consequence: collecting reachability labels and improving final descent stability are
+now separable tasks. The calibrated workspace model still needs another independently saturated
+canonical location. The green trial should instead inform a future phase-conditional execution
+model or controller improvement, since collapsing its low-height servo failure into a workspace
+label would confound perception/control quality with geometric reachability.
+
+## 2026-07-28 — Codex literature note: Waddle, CaP-X, and ASPIRE
+
+*Added by Codex. Previous notebook entries may have been written by Claude; Claude may return to
+review, comment on, and contribute to this work.*
+
+Waddle Labs' “Introducing Waddle: agents that control robots” describes an architecture in the
+same immediate research neighborhood as Hebbot. Waddle uses a foundation-model coding agent to
+decompose tasks, inspect camera observations, write and revise robot programs, and call action
+models where useful. Its hierarchy consists of a fixed platform vocabulary of perception and
+control primitives, agent-created/refined parameterized skills, and task programs composed from
+those skills. It explicitly argues that long-horizon planning should remain with the reasoning
+model rather than being buried in an end-to-end action policy.
+
+Sources reviewed:
+
+- Waddle Labs, “Introducing Waddle: agents that control robots,” July 2026:
+  <https://www.waddlelabs.ai/research/introducing-waddle>
+- Fu et al., “CaP-X: A Framework for Benchmarking and Improving Coding Agents for Robot
+  Manipulation,” 2026: <https://arxiv.org/abs/2603.22435>
+- Lu et al., “ASPIRE: Agentic Skills Discovery for Robotics,” 2026:
+  <https://arxiv.org/abs/2607.00272>
+
+### What their work validates
+
+The independent convergence is meaningful. Waddle's primitive → skill → program hierarchy closely
+matches Hebbot's hardware/classical primitives → stable skill contracts with replaceable bodies →
+foundation-model composition. Its use of execution feedback, intermediate verification, autonomous
+repair, and a persistent shared skill library supports Hebbot's separation of deliberate cognition,
+substrate skill records, reflexive execution, and hardware processes. ASPIRE strengthens the case:
+it treats fine-grained multimodal execution traces as the raw material for failure diagnosis,
+repair synthesis, validation, and reusable skill discovery. Hebbot's decision to preserve failed
+attempts, aligned RGB-D, robot state, controller histories, retrieval decisions, surprises, and
+independent verification is therefore well aligned with the emerging code-as-policy literature.
+
+CaP-X supplies an important warning and an evaluation pattern. Its results show that coding-agent
+performance improves substantially with human-designed abstractions and degrades as that
+scaffolding is removed. Hebbot must therefore measure whether gains come from memory/learning or
+from progressively better hand-written primitives. A stable benchmark with ablations is necessary
+to avoid mistaking substrate engineering for autonomous improvement.
+
+### The important distinction from Hebbot's thesis
+
+Waddle publicly describes two improvement channels. In one, solved tasks yield validated programs
+and parameterized skills that enter a shared library, with no retraining between tasks. In the
+other, an agent reportedly generated roughly 1,000 randomized LEGO pick-and-place rollouts and
+then trained an ACT policy from scratch. The public material does not yet demonstrate an automatic
+continuum between ordinary task episodes, immediate memory retrieval, adapted replay, and neural
+distillation.
+
+Hebbot's intended contribution remains stronger and more explicit: one structured episode store
+feeds both immediate deliberate-layer retrieval and periodic reflexive-layer distillation, with a
+measured progression from deliberate script to reusable repair, trajectory replay/adaptation, and
+learned policy. The transition itself—not merely a code library at one endpoint and batch policy
+training at the other—is the scientific object. Later execution should become measurably cheaper,
+faster, or more reliable because prior experience changed the execution path, while the deliberate
+layer retains override and demotion authority.
+
+### Architectural lessons to adopt
+
+1. Treat a validated code repair as an intermediate form of compression. Record which failures
+   motivated it, candidate repairs attempted, evaluation episodes, the promoted skill version, and
+   its applicability conditions. This sits between one-off deliberate reasoning and trajectory or
+   neural distillation.
+2. Generalize the current model gate into a common lifecycle for every candidate body:
+   `candidate → shadow → bounded live evaluation → promoted → monitored → demoted`. The same
+   provenance and domain-bound rules should cover code repairs, trajectories, classifiers,
+   regressors, and neural policies.
+3. Build a small stable Hebbot benchmark spanning isolated pickup, duplicate-color identity,
+   modest clutter, infeasible-target avoidance, recovery choice, and relational placement. Compare
+   no-memory deliberation, retrieval-assisted deliberation, replay/adaptation, and learned reflexes.
+   Measure task success, unsafe contacts, latency, foundation-model cost, servo steps, retries, and
+   interventions.
+4. Store intervention provenance explicitly: autonomous success/failure, foundation-model repair,
+   human instruction, human physical scene change, and safety intervention supervise different
+   parts of the system and must not be collapsed into one label.
+5. Use the deliberate layer to design bounded, diversity-aware collection curricula, then let a
+   cheaper executor gather the batch. Active boundary sampling for the feasibility model is the
+   immediate small-scale example; randomized manipulation rollouts can follow once resets and
+   verification are sufficiently reliable.
+6. Prefer relational transfer over task-name reuse. The cross-color recovery result already shows
+   the right pattern: a recovery first associated with green transferred to blue because canonical
+   target region, not color identity, was causally relevant.
+
+Multi-agent robot coordination is not a present priority despite Waddle's emphasis on it. A single
+Panda with deeply instrumented, scientifically attributable learning is more valuable at this
+stage. Likewise, Waddle's thousand-rollout example argues for autonomous clean data collection,
+not for prematurely increasing model capacity on Hebbot's current tiny datasets.
+
+The near-term boundary-feasibility experiment should therefore be viewed as the first complete
+instance of a generic Hebbot “skill compiler”: episodes and intervention traces → defensible
+failure/pattern clusters → a candidate code, trajectory, or model improvement → grouped offline
+validation → shadow execution → bounded live testing → promotion with explicit domain limits →
+monitoring and possible demotion. Successfully closing that loop would differentiate Hebbot from
+mere scripted automation and from a skill library that grows without reflexive compression.
