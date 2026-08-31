@@ -120,3 +120,22 @@ def test_warm_start_prefers_the_event_anchor_over_nearest_timestamp(store):
     # The filename-matched frame points at t=1.0; the event points at t=1.2, and the
     # event wins.
     assert examples[0]["y"] == [0.42, 0.05]
+
+
+def test_dispatcher_injects_the_recorder_into_a_real_primitive(tmp_path):
+    """End-to-end: a refusal with no hardware still leaves a legible record."""
+    from hebbot import Substrate
+    from hebbot.skills.primitives import register_all
+
+    substrate = Substrate(tmp_path / "t.db")
+    register_all(substrate)
+    outcome = substrate.call("vision_grasp_probe", params={"color": "blue"})
+    assert outcome["policy_version"]                      # stamped for the ablation
+
+    episode = substrate.store.recent_episodes(skill_name="vision_grasp_probe", limit=1)[0]
+    rollout = substrate.store.rollout(episode["id"])
+    assert rollout["instrumented"] is True
+    event = rollout["events"][0]
+    assert (event["phase"], event["kind"], event["label"]) == \
+        ("abstain", "refusal", "probe_outcome")
+    assert event["data"]["note"] == "mock — no arm/camera"
