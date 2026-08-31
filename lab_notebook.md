@@ -3208,3 +3208,177 @@ reasons remain independently visible. This moves a proven executor precondition 
 volume-cohort decision without conflating selection with execution. Focused ranking coverage checks
 the new reason; the complete suite remains **71/71 passing** and `git diff --check` is clean. An MCP
 reload is required before asking the selector for the next volume target.
+
+---
+
+## 2026-08-31 — Claude review of the July work, and a literature pass including Anthropic's Model Hardware Standard
+
+*Added by Claude, returning after a two-month gap to review the work Codex did at the bench between
+2026-07-24 and 2026-07-30, as the July entries invited. Verified against the code, the episode store,
+the promoted-policy artifacts, and a live test run — not against the prose. Findings #146 and #147
+continue the numbered log, which paused at #145.*
+
+### Review of Codex's work: what holds up
+
+The validation discipline is stronger than the June work it builds on, and it is self-applied. Every
+learned artifact is gated before it may be used, and the reasons for rejection are written into the
+artifact rather than into a log the next reader has to find. The feasibility classifier holds out by
+**spatial group** (35 px clusters), so a candidate cannot pass by memorising one table position.
+Warm-start gates on leave-one-out error *and* a spatial-diversity floor. Artifacts are content-hash
+named and carry `source_episode_ids`, so any promotion decision is auditable back to the episodes
+that produced it. This is exactly the ablation-and-provenance discipline the 2026-07-28 CaP-X note
+demanded, applied to Codex's own output.
+
+The fail-safe defaults are correct throughout. `warm_start.propose()` returns
+`decision: "orchestrator"` unless the artifact is promoted **and** the query is inside the training
+domain **and** the prediction lies in the workspace box. `feasibility_mode` defaults to `off`.
+`_label()` returns `None` for ambiguous outcomes instead of manufacturing a class. Abstentions are
+recorded as episodes rather than discarded — the failed red-block servo attempt is retained as data,
+which is the right instinct and the one most systems get wrong.
+
+The close-view parallax boundary is a genuine transferable result. `shove` independently reproduced
+what `vision_grasp` had found: alignment error minimises near z ≈ 0.26–0.28 m and **worsens** below
+it (4.87 px at z=0.2556 → 14.95 px at z=0.20). Terminating *visual authorization* at a calibrated
+z=0.255 while leaving the contact trajectory unchanged is a clean separation of the perception
+handoff from the motion, and the near-gate correction that followed — accept demonstrated
+convergence at ≤8 px rather than descend into a worse regime — is Codex correcting its own first
+answer from evidence. The partial-success diagnosis (corridor occupancy, not servo tuning) is the
+kind of attribution that is easy to get wrong and was got right.
+
+### Finding #146 — the compression loop is not wired; no policy has ever been promoted
+
+| # | Finding |
+|---|---------|
+| 146 | **`hebbot.learning` is imported by exactly two files — `scripts/train_feasibility.py` and `scripts/train_warm_start.py`. Nothing in `primitives.py` or `mcp_server.py` imports it. No distilled artifact can influence live execution even if it were promoted.** The naming hides this: the runtime `feasibility_mode="avoid_saturation"` path (`primitives.py:2585`) is *episode memory* — a SQL scan of recent probe episodes matching candidates within 60 px of a remembered saturation — and is a wholly separate mechanism from the trained logistic classifier in `learning/feasibility.py`, which is read by nobody. **And nothing has passed a gate:** all four artifacts in `hebbot-data/policies/` are `promoted: false` — `feasibility_afa6fbf4746a` (n=11, 1 workspace-limited spatial group < 2), `controller_envelope_cd5e2bb85304` (n=11, same), `vision_grasp_warm_start_afb458bc1cdc` (n=3 < 6; pre-close xy span 0.0171 m < 0.0600 m). The gates work; the constraint is data. The store holds **76 `vision_grasp` episodes in the project's lifetime**, of which three carried the verified-success plus capture structure warm-start requires, and all three occurred within 1.7 cm of one another. So the thesis chain — deliberate → episode → retrieval → adapted replay → verified dataset → **distilled reflex** — is real and demonstrated as far as adapted replay, and the final arrow is a stub. The useful consequence: there are currently *two* gaps between experience and reflex (no data, and no wire), and only one of them costs hardware time to close. Wiring one promoted artifact into a default-off runtime path, with the decision recorded as a `decisions` row, would leave the promotion gate as the single thing standing between the corpus and a reflex — which is what the architecture claims it already is. |
+
+Three further defects found in the same pass, none fatal, all worth recording before they harden:
+
+**The newest commit's distinction is presently empirically empty.** `c00ad74 "Separate geometric and
+execution feasibility"` produces `controller_envelope_*` alongside `feasibility_*`. Comparing the two
+artifacts directly: **identical `source_episode_ids`, identical labels, identical group-LOO Brier
+(0.08863), identical class counts.** The two-model story rests on one labelling of the same eleven
+episodes. The refactor may well carve correctly once the cohorts diverge, but as of today nothing
+distinguishes the two models and the notebook should not imply that two learned things exist.
+
+**The feasibility classifier has two features, `u_norm` and `v_norm`** — it is a linear separator over
+*image position*. It cannot represent a reach boundary that is nonlinear in image coordinates, and it
+conflates camera pose with robot kinematics. `extract_examples` guards this by filtering on
+`acquire_z = 0.45 ± 0.02`, which is right, but only in z: the artifact never records the acquisition
+pose it is valid for. Move the observe pose and the artifact becomes silently wrong with no way to
+detect it. The acquisition pose belongs in the artifact as a validity precondition.
+
+**Warm-start may be gating on the wrong quantity.** It predicts pre-close EE xy from the *first*
+observation, but the value of a warm start is servo steps saved. `mean_deliberate_servo_steps` is
+recorded and never gated on, so a candidate could pass the accuracy threshold and save nothing.
+(Leave-one-out RMSE at n=3 is near-meaningless anyway; the xy-span floor is what actually caught this
+candidate, and deserves the credit.) Two smaller notes: the corpus plumbing is brittle for what it is
+being asked to carry — 1,548 episodes but only **122 states** and 627 frames, forcing
+`extract_verified_examples` into a nearest-in-time state/frame join plus a substring match on
+`"before_close" in f["file_path"]`; and `_spatial_groups` is greedy first-match over
+`reversed(recent_episodes)`, so group assignment — and therefore the promotion decision — depends on
+episode ordering, which should be deterministic by construction and named as a calibrated constant
+like the others.
+
+### Finding #147 — CaP-X's warning has come true, and the loop that would answer it is dormant
+
+| # | Finding |
+|---|---------|
+| 147 | **Every measurable improvement between 2026-06-27 and 2026-07-30 came from better hand-written primitives, not from learning — and no measurement exists that could tell the difference.** `primitives.py` roughly doubled over the window (2,490 → ~4,700+ lines). The gains are real and they are all substrate: the shove alignment staircase, near-gate verification, adaptive depth-identity gates, the yaw envelope, the z=0.255 handoff. Meanwhile **`practice` has not run since 2026-06-27** and `practice_metrics` holds two episodes in total. The self-improvement loop that was June's headline has been dormant while the substrate was extended around it. This is precisely the failure mode the project's own 2026-07-28 CaP-X note predicted — *"Hebbot must measure whether gains come from memory/learning or from progressively better hand-written primitives"* — arriving one month after it was written down. It is not an argument against the substrate work, which is high quality and was needed. It is that the project's central scientific claim is currently unfalsifiable: with no frozen benchmark and no ablation at a pinned policy-code hash, "the system learned" and "we wrote better code" produce identical evidence. The measurement has to be built **before** more data is collected, or the collected data will not be able to settle the question either. |
+
+### Literature: Anthropic's Model Hardware Standard (2026-08-27)
+
+Primary source: Anthropic, ["Previewing the Model Hardware
+Standard"](https://www.anthropic.com/news/model-hardware-standard-research-preview), 2026-08-27,
+developed with HHMI Janelia Research Campus.
+
+MHS is a common driver layer through which agents discover, read from, and write to physical
+equipment — microscopes, liquid handlers, plate readers, laser controllers, robot arms. Two
+primitives: **reads** (retrieve a temperature) and **writes** (set a temperature). The driver carries
+**natural-language tags** documenting physical characteristics, adjustable parameters, and *enforced
+safety limits* that are not discernible from code — the example given is a robot arm's weight, with a
+vendor constraining the speeds and angles an agent may use. From those tags the system generates an
+agent-facing reference file. Three access paths: MCP, a CLI, and code/APIs. Anthropic's own framing
+is "what MCP did for software, MHS will do for the hardware world." It is an application-gated
+research preview, not open source at launch, with stated intent to open-source afterwards; testers
+include AWS, Danaher, Hugging Face and Raspberry Pi, and the robotics-adjacent named work is Doosan
+multi-robot coordination plus a LeRobot integration.
+
+**Three consequences for Hebbot.**
+
+**It commoditises the layer beneath Hebbot, which is good news.** MHS standardises the *device
+interface*. It says nothing about experience, verification, retrieval, or compression. If "how do I
+talk to this arm" becomes free, the scarce remaining asset is exactly what Hebbot stores: what
+happened when it tried, and what that changed. The correct repositioning is **the experience layer
+above MHS**, not an integration layer — and Hebbot's MCP server is already the right shape to sit
+there. This does not weaken the differentiator identified against ENPIRE and Waddle; it sharpens it.
+
+**It gives the calibrated constants a declarative home.** Everything this notebook has painfully
+measured currently lives as a literal inside `primitives.py`: the z=0.255 visual-authorization
+ceiling, the 4 px contact guard, the 8 px near-gate, the 4 N load-bearing contact force, the −1°
+gripper roll (#143), `table_z(x,y)` (#144), the workspace-saturation envelope. Those are precisely
+what MHS encodes as safety-limit tags. Extracting them into a declarative device-capability file is
+worth doing on its own merits — they are calibrated results, not implementation details — and it
+would make an MHS driver nearly free later.
+
+**Anthropic's stated limitations restate Hebbot's problem.** The launch material concedes
+insufficient spatial reasoning for complex manipulation, absent physical intuition, over-caution, and
+heavy context requirements. The named failure is that Claude retried a bubble-formation error into
+*the same wells*, not understanding that foam was a physical state change. That is finding **#145** in
+a different domain: an agent acting without a model of what its own actions changed. Predict-then-look
+external-change detection is a proposed answer to exactly that, and the correspondence is close
+enough to be worth putting in front of the preview programme.
+
+**Regulatory note.** EU Machinery Regulation 2023/1230 takes effect **2027-01-20** and covers
+AI-based safety functions for the first time; an MHS file that constrains equipment operation
+plausibly constitutes a regulated safety component. Hebbot's established habit of recording
+*refusals with their evidence* — the 4 px guard, the abstention episodes, the `contacted` flag — is
+the audit trail such a regime asks for. Worth treating as a differentiator rather than as future
+compliance overhead. **Caveat: do not refactor toward MHS yet.** The specification is not public;
+apply, read it, then decide.
+
+### Literature: self-improvement work since the July notes
+
+**RoboClaw**, "An Agentic Framework for Scalable Long-Horizon Robotic Tasks"
+(<https://arxiv.org/abs/2603.11558>), introduces **Entangled Action Pairs**: couple every forward
+manipulation behaviour with its inverse recovery to form *self-resetting loops* for autonomous data
+collection, with the same agent orchestrating learned primitives at deployment. This lands directly on
+the #146 bottleneck. Hebbot's `practice` reset (un-stack + place) is a hand-built EAP special case
+bolted to one loop; making reset a first-class property of *every* skill is the structural change that
+would let verified episodes accumulate without a human at the bench.
+
+**RISE**, "Self-Improving Robot Policy with Compositional World Model"
+(<https://arxiv.org/abs/2602.11075>, RSS 2026, OpenDriveLab, code released) — a controllable
+multi-view dynamics model plus a progress value model, improving a policy by imagination to escape the
+cost, safety, and reset limits of physical rollouts; +35–45% absolute on contact-rich tasks. Relevant
+because Hebbot's rollout budget *is* the binding constraint (76 grasps, ever), and because the seeds of
+both components already exist here — the #145 scene store and an implicit progress notion. The
+counter-consideration is that RISE trains a neural policy, so it is what one reaches for *after* the
+corpus exists, not instead of building it.
+
+**Experience distillation outside robotics** — EDGE (<https://arxiv.org/html/2608.21946>) validates
+and distils online experience while co-evolving its bank by **utility-based pruning**; also
+Mem²Evolve and Procedural Memory Distillation. Worth reading because Hebbot's episode store only ever
+grows and retrieval is nearest-neighbour on relational similarity. That literature is about *which*
+experiences are worth keeping, a question that arrives the moment collection scales.
+
+Already reviewed and unchanged in status: ENPIRE, Waddle, CaP-X, ASPIRE, Gemini Robotics ER 2.
+
+### Recommended order of work
+
+1. **Wire the loop before collecting more data.** One promoted artifact reachable at runtime behind a
+   default-off flag, with the decision recorded as a `decisions` row. Reduces #146's two gaps to one.
+2. **Build the measurement before adding capability.** A frozen benchmark with ablations —
+   substrate-only vs. +memory vs. +policy — at a pinned `primitives.py` content hash. Without it the
+   July gains are unattributable and #147 stands.
+3. **Then collect, using the failed gates as the specification.** Revive `practice` under RoboClaw's
+   EAP framing, and *randomise target position*: the xy-span rejection is the corpus reporting that
+   all of its data came from one spot.
+4. **Unified rollout record** — states at frame rate, explicit phase and event boundaries. This is the
+   June roadmap item that now blocks both distillation and any ER 2-style offline critic.
+5. **Apply to the MHS research preview**, and meanwhile extract the calibrated constants into a
+   declarative capability file.
+
+The carried-forward bench threads from 2026-07-30 are unchanged and still correct: corridor occupancy
+as an explicit recorded precondition, the selector/executor cohort mismatch (RGB-eligible targets
+whose aligned-depth identity is not stable enough for the executor), and resuming verified grasp
+collection on the admitted low-yaw red target near (185, 335).
