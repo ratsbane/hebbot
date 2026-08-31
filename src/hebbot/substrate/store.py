@@ -266,6 +266,86 @@ class Store:
         return out
 
     # -----------------------------------------------------------------------
+    # Events (the unified rollout record)
+    # -----------------------------------------------------------------------
+
+    def record_event(
+        self,
+        episode_id: str,
+        *,
+        seq: int,
+        t: float,
+        phase: str,
+        kind: str,
+        label: Optional[str] = None,
+        data: Optional[dict] = None,
+        state_t: Optional[float] = None,
+        frame_ids: Optional[list[str]] = None,
+    ) -> str:
+        """Record one thing that happened, anchored to the exact state and frames with it."""
+        event_id = _uuid()
+        self.conn.execute(
+            """
+            INSERT INTO events (
+                id, episode_id, seq, t, phase, kind, label, data, state_t, frame_ids
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id, episode_id, int(seq), float(t), phase, kind, label,
+                _jsonify(data), state_t, _jsonify(frame_ids),
+            ),
+        )
+        return event_id
+
+    def episode_events(self, episode_id: str) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM events WHERE episode_id = ? ORDER BY seq", (episode_id,)
+        ).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            item["data"] = _unjsonify(item["data"])
+            item["frame_ids"] = _unjsonify(item["frame_ids"]) or []
+            out.append(item)
+        return out
+
+    def rollout(self, episode_id: str) -> dict:
+        """One episode as a single ordered record, with states and frames resolved inline.
+
+        The point of this reader is that a consumer never has to guess. Each event names
+        the state timestamp it was taken at and the frames captured with it, so there is no
+        nearest-in-time matching and no identifying a checkpoint by its filename — the two
+        inferences that made the training extractors brittle (lab notebook #146).
+        """
+        episode = self.get_episode(episode_id)
+        states = {round(float(state["t"]), 6): state
+                  for state in self.episode_states(episode_id)}
+        frames = {frame["id"]: frame for frame in self.episode_frames(episode_id)}
+        events = []
+        for event in self.episode_events(episode_id):
+            state_t = event.get("state_t")
+            events.append({
+                **event,
+                "state": states.get(round(float(state_t), 6)) if state_t is not None else None,
+                "frames": [frames[fid] for fid in event["frame_ids"] if fid in frames],
+            })
+        return {
+            "episode": episode,
+            "events": events,
+            "n_states": len(states),
+            "n_frames": len(frames),
+            "instrumented": bool(events),
+        }
+
+    def event_by_label(self, episode_id: str, label: str) -> Optional[dict]:
+        """The first event with this label, states and frames resolved. None if absent."""
+        return next(
+            (event for event in self.rollout(episode_id)["events"]
+             if event["label"] == label),
+            None,
+        )
+
+    # -----------------------------------------------------------------------
     # Frames (image references)
     # -----------------------------------------------------------------------
 

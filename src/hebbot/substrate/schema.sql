@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS schema_meta (
     value TEXT NOT NULL
 );
 
-INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '1');
+INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '2');
 INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('created_at', datetime('now'));
 
 -- ---------------------------------------------------------------------------
@@ -106,3 +106,32 @@ CREATE TABLE IF NOT EXISTS decisions (
 
 CREATE INDEX IF NOT EXISTS idx_decisions_skill ON decisions(skill_called);
 CREATE INDEX IF NOT EXISTS idx_decisions_ts ON decisions(timestamp);
+
+-- ---------------------------------------------------------------------------
+-- Events: the unified rollout record (schema v2).
+--
+-- Frames, states and decisions each answered one question about an episode, and
+-- reassembling them meant guessing: matching a capture to a robot state by nearest
+-- timestamp, and identifying a checkpoint by a substring of its filename. Both are
+-- fragile enough that only 5 of 76 lifetime grasps yielded a usable training example
+-- (lab notebook #146). An event says explicitly what happened, in what phase, anchored
+-- to the exact state timestamp and the exact frames captured with it, so a reader
+-- reconstructs the rollout instead of inferring it.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS events (
+    id          TEXT PRIMARY KEY,
+    episode_id  TEXT NOT NULL,
+    seq         INTEGER NOT NULL,                   -- monotonic within episode; the ordering authority
+    t           REAL NOT NULL,                      -- seconds since episode start
+    phase       TEXT NOT NULL,                      -- approach | align | grasp | lift | verify | abstain | reset
+    kind        TEXT NOT NULL,                      -- observation | motion | contact | closure | verdict | refusal
+    label       TEXT,                               -- specific checkpoint name, e.g. "before_close"
+    data        TEXT,                               -- JSON payload
+    state_t     REAL,                               -- exact t of the anchoring states row, if any
+    frame_ids   TEXT,                               -- JSON: ids of frames captured at this event
+    FOREIGN KEY (episode_id) REFERENCES episodes(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_episode_seq ON events(episode_id, seq);
+CREATE INDEX IF NOT EXISTS idx_events_phase ON events(episode_id, phase);
+CREATE INDEX IF NOT EXISTS idx_events_label ON events(episode_id, label);

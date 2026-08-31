@@ -12,7 +12,7 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 
@@ -39,6 +39,33 @@ def feature_vector(step0: dict, start_xyz: list[float]) -> list[float]:
     return _features(step0, start_xyz).tolist()
 
 
+def _preclose_from_events(store, episode_id) -> Optional[dict]:
+    """The pre-close state, taken from the episode's own record of it.
+
+    An instrumented episode names the state its pre-close capture was taken at, so this is
+    a lookup. The legacy path below has to guess — nearest timestamp to a frame identified
+    by a substring of its filename — and that guessing is why only a handful of grasps ever
+    yielded a training example (lab notebook #146).
+    """
+    try:
+        event = store.event_by_label(episode_id, "before_close")
+    except Exception:
+        return None
+    return (event or {}).get("state")
+
+
+def _preclose_by_nearest_timestamp(store, episode_id, states) -> Optional[dict]:
+    """Legacy reconstruction for episodes recorded before the events table existed."""
+    before_t = next(
+        (f["t"] for f in store.episode_frames(episode_id)
+         if "before_close" in f["file_path"] and f["camera"] == "wrist"),
+        None,
+    )
+    if before_t is None:
+        return None
+    return min(states, key=lambda s: abs(float(s["t"]) - float(before_t)))
+
+
 def extract_verified_examples(store, limit: int = 500) -> list[dict]:
     """Extract acquisition observation -> successful pre-close EE xy pairs."""
     examples = []
@@ -48,19 +75,16 @@ def extract_verified_examples(store, limit: int = 500) -> list[dict]:
         if result.get("task_verified_success") is not True:
             continue
         history = result.get("history") or []
-        captures = ((result.get("experience") or {}).get("captures") or {})
-        before = captures.get("before_close") or {}
         states = store.episode_states(episode["id"])
-        if not history or not before or len(states) < 2:
+        if not history or len(states) < 2:
             continue
-        before_t = next(
-            (f["t"] for f in store.episode_frames(episode["id"])
-             if "before_close" in f["file_path"] and f["camera"] == "wrist"),
-            None,
-        )
-        if before_t is None:
+        preclose = _preclose_from_events(store, episode["id"])
+        source = "events"
+        if preclose is None:
+            preclose = _preclose_by_nearest_timestamp(store, episode["id"], states)
+            source = "nearest_timestamp"
+        if preclose is None:
             continue
-        preclose = min(states, key=lambda s: abs(float(s["t"]) - float(before_t)))
         if not states[0].get("ee_pose") or not preclose.get("ee_pose"):
             continue
         start_xyz = _xyz(states[0]["ee_pose"])
@@ -72,6 +96,7 @@ def extract_verified_examples(store, limit: int = 500) -> list[dict]:
             "y": target_xyz[:2],
             "start_xyz": start_xyz,
             "acquire_z": float((episode.get("params") or {}).get("acquire_z", 0.45)),
+            "preclose_source": source,
             "initial_observation": {
                 key: history[0].get(key)
                 for key in ("u", "v", "z", "depth_height_m", "npix")

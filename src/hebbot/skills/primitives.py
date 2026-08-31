@@ -613,15 +613,19 @@ def read_camera(
         color_rel = f"{rel_dir}/{cam.name}_{safe_tag}.jpg"
         # capture() returns BGR; flip to RGB so the saved JPEG has true colors.
         Image.fromarray(cap["color"][:, :, ::-1]).save(data_root / color_rel, quality=92)
-        _store.record_frame(_episode_id, camera=cam.name, t=float(_t),
-                            file_path=color_rel, width=w, height=h)
+        result.setdefault("frame_ids", []).append(
+            _store.record_frame(_episode_id, camera=cam.name, t=float(_t),
+                                file_path=color_rel, width=w, height=h)
+        )
         result["color_path"] = color_rel
 
         if with_depth and cap["depth"] is not None:
             depth_rel = f"{rel_dir}/{cam.name}_{safe_tag}_depth.npy"
             np.save(data_root / depth_rel, cap["depth"])  # lossless uint16
-            _store.record_frame(_episode_id, camera=f"{cam.name}:depth", t=float(_t),
-                                file_path=depth_rel, width=w, height=h)
+            result.setdefault("frame_ids", []).append(
+                _store.record_frame(_episode_id, camera=f"{cam.name}:depth", t=float(_t),
+                                    file_path=depth_rel, width=w, height=h)
+            )
             result["depth_path"] = depth_rel
 
     return result
@@ -1893,6 +1897,12 @@ def _recall_grasp_experiences(store, state, limit=5):
 
 
 def _record_state_snapshot(store, episode_id, context, t):
+    """Write a states row and report the exact `t` it was written at.
+
+    The returned `_state_t` is what an event anchors to. Without it a reader has to match
+    a capture to a state by nearest timestamp, which the controller's ~6 ms jitter makes a
+    guess rather than a fact (lab notebook #146).
+    """
     if store is None or episode_id is None:
         return None
     state = get_state(context)
@@ -1906,6 +1916,7 @@ def _record_state_snapshot(store, episode_id, context, t):
         force=state.get("force"),
         gripper_width=state.get("gripper_width"),
     )
+    state["_state_t"] = float(t)
     return state
 
 
@@ -2063,6 +2074,7 @@ def vision_grasp(
     _store: Optional[Any] = None,
     _episode_id: Optional[str] = None,
     _log_decision: Optional[Any] = None,
+    _record_event: Optional[Any] = None,
 ) -> dict:
     """Locate a block from the wrist camera and grasp it — no hand-eye calibration.
 
@@ -2130,7 +2142,7 @@ def vision_grasp(
     started = time.monotonic()
     initial_capture = None
     if experiment:
-        _record_state_snapshot(_store, _episode_id, _context, 0.0)
+        initial_state = _record_state_snapshot(_store, _episode_id, _context, 0.0)
         try:
             initial_capture = read_camera(
                 camera=camera, with_depth=True, save=True, _context=_context,
@@ -2138,6 +2150,13 @@ def vision_grasp(
             )
         except Exception:
             initial_capture = None
+        if _record_event is not None:
+            _record_event(
+                "approach", "observation", label="initial",
+                data={"color": color, "target": target, "acquire_z": acquire_z},
+                state_t=(initial_state or {}).get("_state_t"),
+                frame_ids=(initial_capture or {}).get("frame_ids"),
+            )
 
     # Rise to the acquisition height (preserving xy) for the widest catch basin.
     pos = panda.get_position()
@@ -2596,7 +2615,7 @@ def vision_grasp(
                         )
                     decision_logged = True
                 if before_capture is None:
-                    _record_state_snapshot(
+                    before_state = _record_state_snapshot(
                         _store, _episode_id, _context, time.monotonic() - started,
                     )
                     try:
@@ -2608,6 +2627,17 @@ def vision_grasp(
                         )
                     except Exception:
                         before_capture = None
+                    # The pre-close pose is the warm start's training target, so this is the
+                    # one anchor the extractor must never have to guess at.
+                    if _record_event is not None:
+                        _record_event(
+                            "align", "observation", label="before_close",
+                            data={"attempt": attempt,
+                                  "observation": history[0] if history else None,
+                                  "pixel_err": history[-1]["pixel_err"] if history else None},
+                            state_t=(before_state or {}).get("_state_t"),
+                            frame_ids=(before_capture or {}).get("frame_ids"),
+                        )
 
             # Piece 2: fingers parallel to the true long edges (across the short axis), using
             # the STABLE depth principal axis. Skip the twist for near-square tops (cubes).
@@ -2782,6 +2812,13 @@ def vision_grasp(
                 ) if experiment else None
             except Exception:
                 final_pose_capture = None
+            if _record_event is not None:
+                _record_event(
+                    "align", "observation", label="final_pose",
+                    data={"attempt": attempt, "alignment": final_pose_alignment,
+                          "grip_yaw_deg": grip_yaw},
+                    frame_ids=(final_pose_capture or {}).get("frame_ids"),
+                )
             if not final_pose_alignment["passed"]:
                 result = {
                     "_source": "live", "located": located, "grasped": False,
@@ -2880,7 +2917,7 @@ def vision_grasp(
             lift_z = float(np.clip(float(p[2]) + 0.12, 0.16, min(acquire_z, 0.36)))
             move_to_pose([float(p[0]), float(p[1]), lift_z], speed_factor=motion_speed,
                          _context=_context)
-            _record_state_snapshot(
+            lift_state = _record_state_snapshot(
                 _store, _episode_id, _context, time.monotonic() - started,
             )
             verification_cap = None
@@ -2894,6 +2931,13 @@ def vision_grasp(
                 )
             except Exception:
                 after_capture = None
+            if _record_event is not None:
+                _record_event(
+                    "lift", "observation", label="after_lift",
+                    data={"lift_z": lift_z},
+                    state_t=(lift_state or {}).get("_state_t"),
+                    frame_ids=(after_capture or {}).get("frame_ids"),
+                )
             # Perceptual check: a substantial target-colour component must remain near the
             # gripper-centred region after the lift. When the held block is clipped below the
             # image, combine proprioception with vacancy at the height-corrected source pixel.
@@ -2945,6 +2989,18 @@ def vision_grasp(
                 "after_lift": after_capture,
             },
         }
+    if _record_event is not None and isinstance(result, dict):
+        _record_event(
+            "verify", "verdict", label="task_verified",
+            data={
+                "task_verified_success": result.get("task_verified_success"),
+                "proprioceptive_success": result.get("proprioceptive_success"),
+                "grasped": result.get("grasped"),
+                "note": result.get("note"),
+                "servo_steps": result.get("servo_steps"),
+                "attempt": result.get("attempt"),
+            },
+        )
     if warm_start_mode != "off" and isinstance(result, dict):
         result["warm_start"] = _evaluate_warm_start(
             history=history, start_xyz=warm_start_start_xyz, acquire_z=acquire_z,
@@ -2977,6 +3033,7 @@ def vision_grasp_probe(
     _store: Optional[Any] = None,
     _episode_id: Optional[str] = None,
     _log_decision: Optional[Any] = None,
+    _record_event: Optional[Any] = None,
 ) -> dict:
     """Observe and align a grasp through its final yawed RGB-D pose, without descending.
 
@@ -2986,6 +3043,24 @@ def vision_grasp_probe(
     def with_axes(result):
         from hebbot.learning.outcomes import probe_outcome_axes
         result["outcome_axes"] = probe_outcome_axes(result)
+        # Every probe return passes through here, so this is the one place that guarantees
+        # a refusal is recorded as deliberately as an authorization. An abstention is the
+        # probe's most informative outcome and must not be the one that leaves no trace.
+        if _record_event is not None:
+            authorized = result.get("safe_to_descend") is True
+            _record_event(
+                "verify" if authorized else "abstain",
+                "verdict" if authorized else "refusal",
+                label="probe_outcome",
+                data={
+                    "safe_to_descend": result.get("safe_to_descend"),
+                    "note": result.get("note"),
+                    "outcome_axes": result["outcome_axes"],
+                    "feasibility_policy": result.get("feasibility_policy"),
+                    "feasibility_memory": result.get("feasibility_memory"),
+                    "instance_selection": result.get("instance_selection"),
+                },
+            )
         return result
 
     if feasibility_mode not in ("off", "avoid_saturation", "policy"):
@@ -4452,6 +4527,62 @@ def scene_show(*, _store: Optional[Any] = None, _context: Optional[Any] = None) 
     return {"_source": "live", **_load_scene(_scene_path(_store))}
 
 
+def rollout_show(
+    *,
+    episode_id: Optional[str] = None,
+    skill: str = "vision_grasp",
+    _store: Optional[Any] = None,
+    _context: Optional[Any] = None,
+) -> dict:
+    """Return one episode as a single ordered record: events, with states and frames inline.
+
+    The deliberate layer's window onto what actually happened in an attempt — the phase
+    sequence, what was observed at each step, the exact robot state each observation was
+    taken at, and the verdict. Read-only; moves nothing. With no `episode_id` it returns
+    the most recent episode of `skill`.
+    """
+    if _store is None:
+        return {"_source": "mock", "note": "no store"}
+    if episode_id is None:
+        recent = _store.recent_episodes(skill_name=skill, limit=1)
+        if not recent:
+            return {"_source": "live", "note": f"no episodes recorded for {skill!r}"}
+        episode_id = recent[0]["id"]
+    record = _store.rollout(episode_id)
+    if record.get("episode") is None:
+        return {"_source": "live", "note": f"no episode {episode_id!r}"}
+    episode = record["episode"]
+    return {
+        "_source": "live",
+        "episode_id": episode_id,
+        "skill_name": episode.get("skill_name"),
+        "started_at": episode.get("started_at"),
+        "success": episode.get("success"),
+        "params": episode.get("params"),
+        "policy_version": (episode.get("outcome") or {}).get("policy_version"),
+        "instrumented": record["instrumented"],
+        "n_states": record["n_states"],
+        "n_frames": record["n_frames"],
+        "events": [
+            {
+                "seq": event["seq"], "t": round(float(event["t"]), 3),
+                "phase": event["phase"], "kind": event["kind"], "label": event["label"],
+                "data": event["data"],
+                "ee_pose": (event.get("state") or {}).get("ee_pose"),
+                "gripper_width": (event.get("state") or {}).get("gripper_width"),
+                "force": (event.get("state") or {}).get("force"),
+                "frames": [frame["file_path"] for frame in event["frames"]],
+            }
+            for event in record["events"]
+        ],
+        "note": (
+            "unified rollout record"
+            if record["instrumented"]
+            else "episode predates event instrumentation; states and frames only"
+        ),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Self-improvement metrics — the rising success-rate curve (ENPIRE-style pass@k evidence)
 # ---------------------------------------------------------------------------
@@ -5642,6 +5773,20 @@ PRIMITIVE_SPECS = [
         "name": "scene_show",
         "function_spec": "hebbot.skills.primitives:scene_show",
         "params_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "rollout_show",
+        "function_spec": "hebbot.skills.primitives:rollout_show",
+        "params_schema": {
+            "type": "object",
+            "properties": {
+                "episode_id": {"type": "string",
+                               "description": "episode to read; omit for the most recent"},
+                "skill": {"type": "string", "default": "vision_grasp",
+                          "description": "which skill's most recent episode to read"},
+            },
+            "additionalProperties": False,
+        },
     },
     {
         "name": "practice_metrics",

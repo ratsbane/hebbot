@@ -11,6 +11,7 @@ Body types still stubbed (raise UnsupportedBodyTypeError):
 from __future__ import annotations
 
 import importlib
+import time
 from typing import Any, Callable, Optional
 
 from .expectations import evaluate as evaluate_expectations
@@ -124,6 +125,56 @@ class _Decision:
             )
 
 
+class _Rollout:
+    """Records the ordered event stream for one skill invocation.
+
+    A body opts in by declaring `_record_event` and calling it at the moments that
+    matter — an observation it acted on, a contact, a closure, a verdict, a refusal. The
+    recorder owns the sequence number and the episode-relative clock so a body cannot
+    produce an ambiguous ordering, and it swallows storage errors: an episode that fails
+    to describe itself is a lost record, never a dropped grasp.
+    """
+
+    PHASES = ("approach", "align", "grasp", "lift", "verify", "abstain", "reset")
+    KINDS = ("observation", "motion", "contact", "closure", "verdict", "refusal")
+
+    def __init__(self, store: Store, *, episode_id: str, started_at: float):
+        self._store = store
+        self._episode_id = episode_id
+        self._started_at = started_at
+        self._seq = 0
+
+    def record(
+        self,
+        phase: str,
+        kind: str,
+        *,
+        label: Optional[str] = None,
+        data: Optional[dict] = None,
+        state_t: Optional[float] = None,
+        frame_ids: Optional[list] = None,
+    ) -> Optional[str]:
+        if phase not in self.PHASES:
+            raise ValueError(f"phase must be one of {self.PHASES}, got {phase!r}")
+        if kind not in self.KINDS:
+            raise ValueError(f"kind must be one of {self.KINDS}, got {kind!r}")
+        self._seq += 1
+        try:
+            return self._store.record_event(
+                self._episode_id,
+                seq=self._seq,
+                t=time.time() - self._started_at,
+                phase=phase,
+                kind=kind,
+                label=label,
+                data=data,
+                state_t=state_t,
+                frame_ids=list(frame_ids) if frame_ids else None,
+            )
+        except Exception:
+            return None
+
+
 _POLICY_VERSION_CACHE: dict = {}
 
 
@@ -167,6 +218,7 @@ def _run_classical(
     context: Any,
     episode_id: str,
     decision: "_Decision",
+    rollout: Optional["_Rollout"] = None,
 ) -> dict:
     body = skill["body"] or {}
     spec = body.get("function")
@@ -175,6 +227,7 @@ def _run_classical(
     func = _resolve_classical(spec)
     extras = _injected_kwargs(
         func, context=context, store=store, episode_id=episode_id, decision=decision,
+        rollout=rollout,
     )
     result = func(**params, **extras)
     outcome = {"success": True, "result": result,
@@ -199,6 +252,7 @@ def _run_composition(
     context: Any,
     episode_id: str,
     decision: "_Decision",
+    rollout: Optional["_Rollout"] = None,
 ) -> dict:
     """Execute a composition body: an ordered list of sub-skill calls.
 
@@ -296,6 +350,7 @@ def call_skill(
         body_type_used=body_type,
     )
     decision = _Decision(store, skill_called=name, episode_id=episode_id, params=params)
+    rollout = _Rollout(store, episode_id=episode_id, started_at=time.time())
     top_level = parent_id is None
 
     try:
@@ -304,7 +359,7 @@ def call_skill(
             raise UnsupportedBodyTypeError(
                 f"body type {body_type!r} not yet supported by the dispatcher"
             )
-        outcome = runner(store, skill, params, context, episode_id, decision)
+        outcome = runner(store, skill, params, context, episode_id, decision, rollout)
         success = bool(outcome.get("success"))
         store.end_episode(episode_id, success=success, outcome=outcome)
         # Three-way outcome label: a clean run is "success"; a run that violated
@@ -333,6 +388,7 @@ def _injected_kwargs(
     store: Store,
     episode_id: str,
     decision: "_Decision",
+    rollout: Optional["_Rollout"] = None,
 ) -> dict:
     """Substrate-supplied kwargs a primitive may opt into by declaring them.
 
@@ -346,6 +402,11 @@ def _injected_kwargs(
                          (see `_Decision.record`) — candidates, relational
                          state, reasoning. The dispatcher stamps the outcome
                          after execution.
+      - `_record_event`  appends to this episode's unified rollout record (see
+                         `_Rollout.record`) — one entry per thing that happened,
+                         anchored to the state timestamp and frames it was taken
+                         with, so a later reader reconstructs the episode instead
+                         of inferring it from nearest timestamps and filenames.
 
     This is the single seam through which perception/logging/routing primitives
     reach the substrate — `read_camera` writes `frames` rows, a future replay
@@ -359,6 +420,7 @@ def _injected_kwargs(
         "_store": store,
         "_episode_id": episode_id,
         "_log_decision": decision.record if decision is not None else None,
+        "_record_event": rollout.record if rollout is not None else None,
     }
     return {k: v for k, v in available.items() if k in declared}
 

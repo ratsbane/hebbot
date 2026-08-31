@@ -3482,3 +3482,82 @@ unchanged and now better specified:
 The three bench threads carried from 2026-07-30 are still open and unaffected: corridor
 occupancy as a recorded precondition, the selector/executor cohort mismatch, and verified grasp
 collection on the admitted low-yaw red target near (185, 335).
+
+---
+
+## 2026-08-31 (cont.) — the unified rollout record, and a correction to why the corpus is small
+
+*Added by Claude. Item 4 of the 2026-08-31 recommendation. Suite 100/100. Schema v2 applied to
+the live store (backed up first); 1,548 episodes intact.*
+
+### Finding #149 — an episode now describes itself, and measuring the yield problem showed I had named the wrong cause
+
+| # | Finding |
+|---|---------|
+| 149 | **The substrate records a unified rollout — ordered events, each anchored to the exact robot state and camera frames it was taken with — and building it disproved the premise I had used to justify it.** The claim in #148's roadmap was that "5 usable warm-start examples out of 76 lifetime grasps is a plumbing yield problem, not a hardware-time problem." **Measured, that is wrong.** Of 76 `vision_grasp` episodes: **5 verified successes, 31 verified failures, 38 that ran but recorded no verification at all, 2 errored** — and all 5 of the verified successes extracted cleanly. The extractor loses nothing. The corpus is small because verified successes are rare, which is a hardware-time and grasp-reliability problem, exactly what I said it was not. **But half the corpus carrying no verdict at all *is* a recording gap** — just not the one I named. Those 38 episodes returned before reaching the verification block, so they are invisible to the ablation and to any offline critic: they cannot be counted as successes, cannot honestly be counted as failures, and say nothing about why. The rollout record closes precisely that hole, because `vision_grasp` funnels every executed attempt through a single terminal return, and a verdict event is now written there unconditionally — including when the verdict is `None`, with the note that explains it. An episode that refuses now says so in the same structured place as one that succeeds. |
+
+### What was built
+
+**`events` (schema v2)** — one row per thing that happened: `seq` (the ordering authority),
+episode-relative `t`, `phase` (approach / align / grasp / lift / verify / abstain / reset),
+`kind` (observation / motion / contact / closure / verdict / refusal), a `label`, a JSON payload,
+the **exact `state_t`** of the anchoring states row, and the **exact `frame_ids`** captured with
+it. The schema is applied on every `Store` init and is additive, so existing databases migrate on
+open; the live store went to v2 with all 1,548 episodes and both prior tables untouched.
+
+**`_record_event`** joins `_context`, `_store`, `_episode_id` and `_log_decision` as a substrate
+seam a primitive opts into by declaring it. The `_Rollout` recorder owns the sequence number and
+the clock so a body cannot produce an ambiguous ordering, validates phase and kind, and swallows
+storage errors — an episode that fails to describe itself is a lost record, never a dropped grasp,
+and there is a test that holds that line.
+
+**Instrumentation.** `vision_grasp` records `initial`, `before_close`, `final_pose`, `after_lift`
+and the terminal `task_verified` verdict. `vision_grasp_probe` records through its single
+`with_axes` funnel, so **every refusal is now recorded as deliberately as every authorization** —
+the probe's most informative outcome was previously the one that left the least trace.
+`read_camera` returns the frame ids it wrote and `_record_state_snapshot` returns the exact `t` it
+wrote, which is what makes the anchoring exact rather than inferred.
+
+**Readers.** `store.rollout(episode_id)` returns the episode with states and frames resolved
+inline; `store.event_by_label()` is the targeted lookup; and `rollout_show` exposes it as an MCP
+tool, so the deliberate layer can read what actually happened in an attempt — phase sequence,
+observation, robot state, verdict — without a Python session on the robot host.
+
+### The join that was right by luck
+
+`warm_start.extract_verified_examples` now reads the `before_close` anchor from the events table
+and falls back to the old reconstruction for historical episodes, tagging each example with which
+path produced it. Re-run against the live store it returns the same five examples, all tagged
+`nearest_timestamp` — the legacy path, still correct.
+
+Worth being precise about why it was correct: the old code matched a state to the *nearest*
+timestamp of a frame whose **filename contained the substring `before_close`**, and that worked
+only because no competing capture ever landed near one. The retry path writes
+`before_close_0`, `before_close_1`, … and the final-pose and after-lift captures land within the
+same second; the moment two attempts occur in one episode, "nearest timestamp to a filename match"
+starts silently selecting the wrong pose and training on it. A test now builds exactly that
+situation — a decoy frame 10 ms away — and asserts the event anchor wins. This is a fragility
+fixed before it bit rather than after, which is the cheaper end of the usual order here.
+
+### Honest accounting of what item 4 bought
+
+It did **not** unlock more training data today; #146's yield concern was mine and it was wrong.
+What it bought is three things that were going to be needed anyway: the 38 verdict-less episodes
+become legible, refusals become first-class records, and the state/frame anchoring stops being a
+guess before retries make the guess wrong. It is also the substrate an ER 2-style offline critic
+requires — phase labels, event boundaries, and progress are exactly the fields the 2026-07-30
+review proposed scoring a frontier reasoner against, and none of them existed until now.
+
+### Where the roadmap stands
+
+Items 1, 2 and 4 are built and tested; the two that remain are the two I cannot do alone.
+
+- **Item 3, collection, needs the bench.** It is now clearly the *only* thing standing between the
+  project and a promoted policy: both artifacts are blocked on spatial diversity, and #149 says the
+  corpus is small because verified grasps are rare, not because extraction is lossy. Randomised
+  target positions during ordinary work, with `warm_start_mode="shadow"` on, is the whole ask.
+- **Item 5, the MHS research preview,** is an application Doug has to submit.
+
+The three bench threads from 2026-07-30 remain open and unaffected: corridor occupancy as a
+recorded precondition, the selector/executor cohort mismatch, and verified grasp collection on the
+admitted low-yaw red target near (185, 335).
