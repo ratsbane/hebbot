@@ -3393,3 +3393,92 @@ The carried-forward bench threads from 2026-07-30 are unchanged and still correc
 as an explicit recorded precondition, the selector/executor cohort mismatch (RGB-eligible targets
 whose aligned-depth identity is not stable enough for the executor), and resuming verified grasp
 collection on the admitted low-yaw red target near (185, 335).
+
+---
+
+## 2026-08-31 (cont.) — closing the wire, and building the measurement that makes #147 falsifiable
+
+*Added by Claude, acting on the review earlier today. Two of the five recommended items are
+built and tested offline; the suite is 94/94 (was 71/71). Nothing here has run on hardware,
+and one path is deliberately left closed until it has.*
+
+### Finding #148 — the wire is closed, the promotion gate is now the only barrier, and building the ablation immediately proved its own necessity
+
+| # | Finding |
+|---|---------|
+| 148 | **A distilled artifact can now reach live execution, and the substrate now records what code produced every episode — and the first run of the resulting ablation report refused to compare anything, which is the correct and useful answer.** Three pieces. (1) `learning/registry.py` is the wire: it returns only artifacts whose `promoted` flag is true *and* whose recorded validity envelope matches the call, degrades to deliberate control on any malformed or missing artifact, and reports a reason for every absence so the fallback is logged rather than silent. (2) Two runtime paths use it — `vision_grasp_probe(feasibility_mode="policy")`, where the distilled controller-envelope classifier may **only remove** candidates the deliberate layer would have tried, and `vision_grasp(warm_start_mode="shadow")`, which records what the warm start *would* have proposed and commands nothing. (3) The dispatcher now stamps `policy_version` — the content hash of the primitives module that executed — on every classical outcome, and `learning/benchmark.py` derives each episode's experimental arm from the parameters it already recorded, so the substrate/memory/policy ablation needs no new bookkeeping. **The report's first run against the real store is the finding:** 36 `vision_grasp` episodes carry a verdict, 26 substrate and 10 memory, and *every one of them has no policy version*, because the stamp did not exist when they ran. So the tool declined to compute the delta — an arm comparison inside that bucket would also contain two months of primitive edits, which is exactly the confound of #147. Before the refusal was added it happily printed "memory vs substrate: −5%", a number that means nothing. **The measurement's first act was to invalidate the only comparison the project could previously have made.** Attribution starts from the next episode recorded. |
+
+### The gates now disagree with each other, which is what gates are for
+
+Retraining both candidates under the new rules produced a result worth recording. The
+warm-start extractor now finds **five** verified examples rather than the three of 2026-07-24,
+and the two gates split:
+
+| gate | 2026-07-24 (n=3) | 2026-08-31 (n=5) |
+|---|---|---|
+| leave-one-out RMSE | 0.0134 m (passed) | **0.0561 m** (fails 0.015 m) |
+| median held-out travel reduction | not measured | **0.132 m** (passes 0.02 m) |
+| improved fraction | not measured | **1.00** (passes 0.75) |
+| pre-close xy span | 0.0171 m (failed) | — |
+
+The reading is that the *old* accuracy number was an artefact of the very defect the span gate
+caught: three grasps 1.7 cm apart are trivially predictable, so a model fitted to them looked
+precise and was worthless. Add two more, spread further, and honest accuracy collapses to
+56 mm while usefulness becomes obvious — the prediction still removes 132 mm of
+the start-to-preclose travel every time. That is a policy which is clearly *pointing the right way*
+and clearly *not yet precise enough to hand the arm to*, and the two gates now say so
+independently. Accuracy alone would have promoted the useless one and rejected the useful one.
+This is the concrete answer to the #146 concern that warm-start gated on the wrong quantity:
+`min_travel_reduction_m` and `min_improved_fraction` measure, on held-out episodes, how much
+of the servo's work the reflex actually removes.
+
+### Deliberate restraints, and why each one is there
+
+**The policy may only subtract.** `feasibility_mode="policy"` can remove a candidate from
+consideration; it can never add one, choose a grasp, or move the arm. The worst case for a
+wrong policy is an abstention, which is already a first-class recorded outcome here.
+
+**The applied warm start stays closed.** `warm_start_mode` accepts `off` and `shadow` only;
+`apply` returns an explicit error saying the path opens when the shadow record shows on
+hardware that the proposal shortens the servo. Commanding a 13 cm open-loop hop into a grasp
+on the strength of five offline examples would be exactly the kind of unearned confidence the
+notebook keeps catching, and the shadow record is the cheap way to earn it — every ordinary
+grasp run with `warm_start_mode="shadow"` produces a live prediction-versus-achieved pair at
+no motion cost and no risk.
+
+**A shadow proposal is logged as an `orchestrator` decision, not a `policy` one,** and
+`classify_arm` deliberately does not count `shadow` as a policy arm. A reflex that proposed
+and was not obeyed did not act, and recording it as though it had would manufacture an effect
+in the very ablation built to detect one.
+
+**An artifact carries the pose it is valid at.** Both trainers now write
+`validity: {acquire_z, tolerances}`, and the registry refuses an artifact whose envelope
+excludes the current call. The feasibility classifier is a linear separator over *image*
+position (#146); it is meaningless read from a different observe height, and it can now say so
+instead of failing silently.
+
+**Spatial grouping is order-independent.** `_spatial_groups` clusters over a canonical
+pixel-sorted order, so the held-out split — and therefore the promotion decision — no longer
+depends on what order episodes came back from the store.
+
+### Where this leaves the roadmap
+
+Items 1 and 2 of the 2026-08-31 recommendation are built and tested; items 3, 4 and 5 are
+open. The ordering has been vindicated in a small way: building the measurement first was what
+revealed that the whole existing corpus is unattributable, which is a fact about *collection*
+that would have quietly poisoned any data gathered under item 3. The immediate next steps are
+unchanged and now better specified:
+
+1. Run ordinary grasps with `warm_start_mode="shadow"` at the bench. Every one produces a live
+   prediction-versus-achieved pair and costs nothing; this is the evidence that opens the
+   applied path, and it accumulates during work that was happening anyway.
+2. Collect with **randomised target positions**. Both artifacts are now blocked on spatial
+   diversity from opposite directions — the classifier needs a second controller-limited
+   region, the warm start needs accuracy across a spread it has never seen. One randomised
+   collection run addresses both.
+3. The unified rollout record (item 4) remains the deeper blocker: five usable warm-start
+   examples out of 76 lifetime grasps is a plumbing yield problem, not a hardware-time problem.
+
+The three bench threads carried from 2026-07-30 are still open and unaffected: corridor
+occupancy as a recorded precondition, the selector/executor cohort mismatch, and verified grasp
+collection on the admitted low-yaw red target near (185, 335).

@@ -32,16 +32,28 @@ def _label(result: dict) -> tuple[int | None, str]:
 
 
 def _spatial_groups(examples: list[dict], radius_px: float = 35.0) -> list[int]:
+    """Greedy first-match clustering, made independent of episode ordering.
+
+    Group assignment decides the held-out split and therefore the promotion decision, so
+    it must not depend on the order episodes came back from the store (lab notebook #146).
+    Clustering runs over a canonical pixel-sorted order and the resulting labels are
+    renumbered by that same order, so the same examples always produce the same groups.
+    """
+    order = sorted(
+        range(len(examples)),
+        key=lambda i: (examples[i]["target_pixel"][0], examples[i]["target_pixel"][1],
+                       str(examples[i].get("episode_id") or "")),
+    )
     centers: list[list[float]] = []
-    groups = []
-    for example in examples:
-        pixel = example["target_pixel"]
+    groups = [0] * len(examples)
+    for index in order:
+        pixel = examples[index]["target_pixel"]
         match = next((i for i, center in enumerate(centers)
                       if math.dist(pixel, center) <= radius_px), None)
         if match is None:
             match = len(centers)
             centers.append(list(pixel))
-        groups.append(match)
+        groups[index] = match
     return groups
 
 
@@ -71,6 +83,7 @@ def extract_examples(store, limit: int = 500, acquire_z: float = 0.45) -> list[d
             "color": params.get("color"),
             "instance": params.get("instance"),
             "label_source": label_source,
+            "acquire_z": float(params.get("acquire_z", acquire_z)),
         })
     groups = _spatial_groups(examples)
     for example, group in zip(examples, groups):
@@ -147,6 +160,15 @@ def train_candidate(
                          "controller_envelope_limited": int((y == 1).sum())},
         "spatial_group_counts": {"authorized": negative_groups,
                                  "controller_envelope_limited": positive_groups},
+        # The features are image pixels, so the artifact is only meaningful at the
+        # acquisition pose it was fitted at. Recording it lets the runtime registry refuse
+        # an artifact that has outlived its observe pose instead of silently misreading a
+        # different view (lab notebook #146).
+        "validity": {
+            "acquire_z": float(np.median([float(e.get("acquire_z", 0.0))
+                                          for e in examples])),
+            "tolerances": {"acquire_z": 0.02},
+        },
         "group_loo_n": len(loo_p), "group_loo_brier": brier,
         "group_loo_predictions": [
             {"episode_id": examples[i]["episode_id"], "y": int(y[i]), "p": p}

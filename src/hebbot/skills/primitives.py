@@ -1611,6 +1611,129 @@ def _candidate_memory_distance(candidate, memory):
     )
 
 
+def _evaluate_warm_start(
+    *, history, start_xyz, acquire_z, _store=None, _log_decision=None,
+):
+    """Shadow-evaluate the distilled warm start: what it WOULD have proposed, and why.
+
+    Recorded, never commanded. The applied path stays closed until this record shows on
+    hardware that the proposal shortens the deliberate servo — the usefulness the
+    promotion gate now measures offline but has never observed live (lab notebook #146).
+    Reporting the proposal costs nothing and no motion, and it is the evidence that would
+    justify opening the applied path.
+    """
+    from hebbot.learning import registry
+
+    trace = {"mode": "shadow", "proposal": None}
+    if not history or not start_xyz:
+        trace["reason"] = "no acquisition observation or start pose to featurise"
+        return trace
+    load = registry.load_promoted(
+        "warm_start_ridge_v1", store=_store,
+        preconditions={"acquire_z": float(acquire_z)},
+    )
+    trace["registry"] = registry.summarize(load)
+    if not load["available"]:
+        trace["reason"] = f"warm-start policy unavailable: {load.get('reason')}"
+        if _log_decision is not None:
+            _log_decision("orchestrator", reasoning=trace["reason"])
+        return trace
+    try:
+        from hebbot.learning.warm_start import feature_vector, propose
+
+        features = feature_vector(history[0], start_xyz)
+        proposal = propose(load["artifact"], features)
+    except Exception as exc:                      # a bad artifact must not affect the grasp
+        trace["reason"] = f"warm-start evaluation failed: {exc}"
+        return trace
+    trace.update({
+        "proposal": proposal,
+        "features": features,
+        "start_xy": [float(start_xyz[0]), float(start_xyz[1])],
+        "reason": "shadow proposal recorded; motion unchanged",
+    })
+    if _log_decision is not None:
+        # Recorded as an orchestrator decision, because that is what it was: the policy
+        # proposed and nothing routed to it. Calling this "policy" would put a commanded
+        # reflex in the decisions table that never touched the arm, and would then show up
+        # as a policy arm in the ablation (lab notebook #147).
+        _log_decision(
+            "orchestrator",
+            reasoning=(
+                f"shadow: warm start would have proposed {proposal['predicted_xy']} "
+                f"(accepted={proposal['accepted']}, "
+                f"domain_distance={proposal['domain_distance']:.2f}); not commanded"
+            ),
+            threshold_values={"max_domain_distance": 3.0},
+        )
+    return trace
+
+
+def _apply_feasibility_policy(
+    candidates, *, acquire_z, threshold, _store=None, _log_decision=None,
+):
+    """Filter candidates with the distilled controller-envelope classifier, if one is promoted.
+
+    This is the first path by which a distilled artifact can change what the arm does
+    (lab notebook #146). It is deliberately the weakest possible authority: the policy may
+    only *remove* candidates the deliberate layer would otherwise have tried, it is loaded
+    only when the promotion gate passed and the artifact's recorded acquisition pose
+    matches this call, and every outcome — including "no promoted policy" — is recorded as
+    a decision. Any failure degrades to the deliberate candidate list unchanged.
+    """
+    from hebbot.learning import registry
+
+    trace = {"mode": "policy", "threshold": float(threshold)}
+    load = registry.load_promoted(
+        "feasibility_logistic_v1", store=_store,
+        preconditions={"acquire_z": float(acquire_z)},
+    )
+    trace["registry"] = registry.summarize(load)
+    if not load["available"]:
+        trace.update({"applied": False, "avoided": [], "eligible_count": len(candidates)})
+        if _log_decision is not None:
+            _log_decision(
+                "orchestrator",
+                reasoning=f"feasibility policy unavailable: {load.get('reason')}",
+                candidates=[{"u": c["u"], "v": c["v"]} for c in candidates],
+                threshold_values={"feasibility_policy": float(threshold)},
+            )
+        return candidates, trace
+
+    from hebbot.learning.feasibility import predict
+
+    artifact = load["artifact"]
+    avoided, eligible, scored = [], [], []
+    for candidate in candidates:
+        try:
+            p_limited = predict(artifact, [candidate["u"], candidate["v"]])
+        except Exception as exc:                  # a bad artifact must not stop the arm
+            trace.update({"applied": False, "error": str(exc),
+                          "avoided": [], "eligible_count": len(candidates)})
+            return candidates, trace
+        scored.append({"u": candidate["u"], "v": candidate["v"],
+                       "p_controller_envelope_limited": round(p_limited, 4)})
+        (avoided if p_limited >= threshold else eligible).append(candidate)
+    trace.update({
+        "applied": True,
+        "artifact": registry.summarize(load)["path"],
+        "scored": scored,
+        "avoided": [{"u": c["u"], "v": c["v"]} for c in avoided],
+        "eligible_count": len(eligible),
+    })
+    if _log_decision is not None:
+        _log_decision(
+            "policy",
+            reasoning=(
+                f"distilled feasibility policy scored {len(scored)} candidates; "
+                f"{len(avoided)} predicted controller-envelope limited at p>={threshold}"
+            ),
+            candidates=scored,
+            threshold_values={"feasibility_policy": float(threshold)},
+        )
+    return eligible, trace
+
+
 # EE z at which the fingertips touch the table — the base for turning a height above the table into
 # a grasp_z: grasp_z = _TABLE_EE_Z + (desired fingertip height). DIRECTLY MEASURED by probe_table
 # (the open fingers pressed to a bare table → contact_z ≈ 0.016, repeatably). The old 0.047 was a
@@ -1928,6 +2051,7 @@ def vision_grasp(
     geometry: bool = True,
     experience_mode: str = "off",
     replay_threshold: float = 0.82,
+    warm_start_mode: str = "off",
     speed_factor: float = 0.1,
     dry_run: bool = False,
     alignment_gain: float = 1.0,
@@ -1964,6 +2088,19 @@ def vision_grasp(
             "replay" (retrieve and reuse parameters from a similar verified example).
         speed_factor: point-to-point motion speed; experimental calls are capped at 0.05.
     """
+    if warm_start_mode not in ("off", "shadow"):
+        return {"_source": "error", "grasped": None,
+                "note": ("warm_start_mode must be off|shadow — the applied warm-start "
+                         "motion path stays closed until the shadow record shows on "
+                         "hardware that the proposal shortens the servo")}
+    warm_start_start_xyz = None
+    if warm_start_mode != "off":
+        _ws_panda = _extract(_context, "panda")
+        if _ws_panda is not None:
+            try:
+                warm_start_start_xyz = [float(v) for v in _ws_panda.get_position()]
+            except Exception:
+                warm_start_start_xyz = None
     if experience_mode not in ("off", "record", "replay"):
         return {"_source": "error", "grasped": None,
                 "note": f"experience_mode must be off|record|replay, got {experience_mode!r}"}
@@ -2808,6 +2945,11 @@ def vision_grasp(
                 "after_lift": after_capture,
             },
         }
+    if warm_start_mode != "off" and isinstance(result, dict):
+        result["warm_start"] = _evaluate_warm_start(
+            history=history, start_xyz=warm_start_start_xyz, acquire_z=acquire_z,
+            _store=_store, _log_decision=_log_decision,
+        )
     return result
 
 
@@ -2818,6 +2960,7 @@ def vision_grasp_probe(
     target: Optional[list] = None,
     instance: Optional[str] = None,
     feasibility_mode: str = "off",
+    feasibility_policy_threshold: float = 0.5,
     acquire_z: float = _VG_ACQUIRE_Z,
     approach_z: float = _VG_APPROACH_Z,
     max_steps: int = 10,
@@ -2845,13 +2988,14 @@ def vision_grasp_probe(
         result["outcome_axes"] = probe_outcome_axes(result)
         return result
 
-    if feasibility_mode not in ("off", "avoid_saturation"):
+    if feasibility_mode not in ("off", "avoid_saturation", "policy"):
         return with_axes({
             "_source": "error", "dry_run": True, "safe_to_descend": False,
-            "note": "feasibility_mode must be off|avoid_saturation",
+            "note": "feasibility_mode must be off|avoid_saturation|policy",
         })
     resolved_target = target
     memory_trace = None
+    policy_trace = None
     if instance is not None:
         if instance not in ("leftmost", "rightmost", "largest"):
             return with_axes({
@@ -2902,6 +3046,12 @@ def vision_grasp_probe(
                 "eligible_count": len(eligible),
             }
             candidates = eligible
+        elif feasibility_mode == "policy":
+            candidates, policy_trace = _apply_feasibility_policy(
+                candidates, acquire_z=acquire_z,
+                threshold=feasibility_policy_threshold,
+                _store=_store, _log_decision=_log_decision,
+            )
         if not candidates:
             return with_axes({
                 "_source": "live", "dry_run": True, "safe_to_descend": False,
@@ -2909,10 +3059,14 @@ def vision_grasp_probe(
                     "deliberate abstention: all tabletop candidates matched recent "
                     "workspace-saturation memory"
                     if memory_trace and memory_trace["avoided"]
+                    else "policy abstention: all tabletop candidates predicted "
+                    "controller-envelope limited"
+                    if policy_trace and policy_trace.get("avoided")
                     else "no tabletop candidate at canonical acquisition pose"
                 ),
                 "candidates": [],
                 "feasibility_memory": memory_trace,
+                "feasibility_policy": policy_trace,
             })
         if instance == "leftmost":
             chosen = min(candidates, key=lambda b: float(b["u"]))
@@ -2955,6 +3109,7 @@ def vision_grasp_probe(
         }
     if memory_trace is not None:
         out["feasibility_memory"] = memory_trace
+        out["feasibility_policy"] = policy_trace
     return with_axes(out)
 
 
@@ -5124,6 +5279,11 @@ PRIMITIVE_SPECS = [
                                           "lock onto in a multi-block scene; default grabs the merged colour"},
                 "max_retry": {"type": "integer", "minimum": 0, "maximum": 2, "default": 2,
                               "description": "full lift/reacquire retries after a failed grasp"},
+                "warm_start_mode": {"type": "string", "enum": ["off", "shadow"],
+                                    "default": "off",
+                                    "description": "shadow = record what the distilled warm-start "
+                                                   "policy would have proposed, without commanding "
+                                                   "it; the applied path is deliberately closed"},
                 "experience_mode": {"type": "string", "enum": ["off", "record", "replay"],
                                     "default": "off",
                                     "description": "off=legacy; record=save verified example; "
@@ -5178,11 +5338,19 @@ PRIMITIVE_SPECS = [
                              "description": "resolve a same-colour instance after moving to the "
                                             "canonical acquisition pose"},
                 "feasibility_mode": {"type": "string",
-                                     "enum": ["off", "avoid_saturation"],
+                                     "enum": ["off", "avoid_saturation", "policy"],
                                      "default": "off",
-                                     "description": "optionally abstain from targets matching "
-                                                    "recent controller-envelope clipping episodes; "
-                                                    "parameter name retained for compatibility"},
+                                     "description": "off = deliberate; avoid_saturation = abstain "
+                                                    "from targets matching recent "
+                                                    "controller-envelope clipping episodes; "
+                                                    "policy = abstain per the distilled "
+                                                    "controller-envelope classifier, used only if "
+                                                    "one has passed the promotion gate at this "
+                                                    "acquisition pose"},
+                "feasibility_policy_threshold": {
+                    "type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.5,
+                    "description": "predicted P(controller-envelope limited) at or above which "
+                                   "the policy removes a candidate"},
                 "acquire_z": {"type": "number", "minimum": 0.2, "maximum": 0.45,
                               "default": 0.34},
                 "approach_z": {"type": "number", "minimum": 0.1, "maximum": 0.3,

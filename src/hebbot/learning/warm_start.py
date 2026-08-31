@@ -34,6 +34,11 @@ def _features(step0: dict, start_xyz: list[float]) -> np.ndarray:
     ], dtype=float)
 
 
+def feature_vector(step0: dict, start_xyz: list[float]) -> list[float]:
+    """Public feature builder so a runtime caller cannot drift from training."""
+    return _features(step0, start_xyz).tolist()
+
+
 def extract_verified_examples(store, limit: int = 500) -> list[dict]:
     """Extract acquisition observation -> successful pre-close EE xy pairs."""
     examples = []
@@ -66,6 +71,7 @@ def extract_verified_examples(store, limit: int = 500) -> list[dict]:
             "x": _features(history[0], start_xyz).tolist(),
             "y": target_xyz[:2],
             "start_xyz": start_xyz,
+            "acquire_z": float((episode.get("params") or {}).get("acquire_z", 0.45)),
             "initial_observation": {
                 key: history[0].get(key)
                 for key in ("u", "v", "z", "depth_height_m", "npix")
@@ -100,9 +106,17 @@ def train_candidate(
     min_samples: int = 6,
     min_xy_span_m: float = 0.06,
     max_loo_error_m: float = 0.015,
+    min_travel_reduction_m: float = 0.02,
+    min_improved_fraction: float = 0.75,
     ridge: float = 1e-3,
 ) -> TrainingResult:
-    """Fit and gate a candidate using leave-one-out error and spatial diversity."""
+    """Fit and gate a candidate on leave-one-out error, spatial diversity, and usefulness.
+
+    Accuracy alone is not a reason to promote a warm start: the point of one is to shorten
+    the deliberate servo, so a candidate that predicts well but lands no closer than the
+    arm already was buys nothing (lab notebook #146). The usefulness gate measures, on
+    held-out episodes, how much of the start-to-preclose travel the prediction removes.
+    """
     reasons = []
     if len(examples) < 2:
         reasons.append("need at least two examples to fit a candidate")
@@ -111,11 +125,21 @@ def train_candidate(
     y = np.asarray([e["y"] for e in examples], dtype=float)
     weights = _fit(x, y, ridge)
     loo_errors = []
+    travel_reductions = []
     if len(examples) >= 3:
         for held in range(len(examples)):
             keep = np.arange(len(examples)) != held
             pred = _predict(_fit(x[keep], y[keep], ridge), x[[held]])[0]
             loo_errors.append(float(np.linalg.norm(pred - y[held])))
+            # What the deliberate servo had to cover unaided, minus what it would still
+            # have to cover from the warm start. Positive means the reflex earned its keep.
+            start = examples[held].get("start_xyz")
+            if start is None:
+                continue          # unmeasurable, not evidence of usefulness either way
+            baseline = float(np.linalg.norm(
+                np.asarray(start[:2], dtype=float) - y[held]
+            ))
+            travel_reductions.append(baseline - loo_errors[-1])
     xy_span = np.ptp(y, axis=0)
     std = x.std(axis=0)
     safe_std = np.where(std < 1e-6, 1.0, std)
@@ -138,6 +162,19 @@ def train_candidate(
         "loo_rmse_m": (
             float(np.sqrt(np.mean(np.square(loo_errors)))) if loo_errors else None
         ),
+        "loo_travel_reduction_m": travel_reductions,
+        "median_travel_reduction_m": (
+            float(np.median(travel_reductions)) if travel_reductions else None
+        ),
+        "improved_fraction": (
+            float(np.mean([r > 0.0 for r in travel_reductions]))
+            if travel_reductions else None
+        ),
+        "validity": {
+            "acquire_z": float(np.median([float(e.get("acquire_z", 0.45))
+                                          for e in examples])),
+            "tolerances": {"acquire_z": 0.02},
+        },
         "mean_deliberate_servo_steps": float(
             np.mean([e["servo_steps"] for e in examples])
         ),
@@ -154,10 +191,24 @@ def train_candidate(
         reasons.append(
             f"leave-one-out RMSE {artifact['loo_rmse_m']} exceeds {max_loo_error_m:.4f}m"
         )
+    median_reduction = artifact["median_travel_reduction_m"]
+    improved_fraction = artifact["improved_fraction"]
+    if median_reduction is None or median_reduction < min_travel_reduction_m:
+        reasons.append(
+            f"median held-out travel reduction {median_reduction} "
+            f"below minimum {min_travel_reduction_m:.4f}m — accurate but not useful"
+        )
+    if improved_fraction is None or improved_fraction < min_improved_fraction:
+        reasons.append(
+            f"warm start improved only {improved_fraction} of held-out episodes "
+            f"< minimum {min_improved_fraction}"
+        )
     artifact["promotion_thresholds"] = {
         "min_samples": min_samples,
         "min_xy_span_m": min_xy_span_m,
         "max_loo_error_m": max_loo_error_m,
+        "min_travel_reduction_m": min_travel_reduction_m,
+        "min_improved_fraction": min_improved_fraction,
     }
     artifact["promoted"] = not reasons
     artifact["rejection_reasons"] = reasons

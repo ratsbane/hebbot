@@ -124,6 +124,38 @@ class _Decision:
             )
 
 
+_POLICY_VERSION_CACHE: dict = {}
+
+
+def _policy_version(func) -> Optional[str]:
+    """Content hash of the module a classical body came from = the policy code that ran.
+
+    Stamped on every outcome so an episode can be attributed to the exact primitives it
+    executed. Without this, a success-rate comparison cannot distinguish "the system
+    learned" from "we wrote better primitives", which is the ablation the project has been
+    unable to run (lab notebook #147). Git HEAD is the wrong key — the deployed copy on the
+    robot host routinely runs ahead of it.
+    """
+    import hashlib
+    import inspect
+    import os
+
+    try:
+        path = inspect.getsourcefile(func)
+        if not path:
+            return None
+        stamp = os.path.getmtime(path)
+        cached = _POLICY_VERSION_CACHE.get(path)
+        if cached and cached[0] == stamp:
+            return cached[1]
+        with open(path, "rb") as handle:
+            digest = hashlib.sha1(handle.read()).hexdigest()[:10]
+        _POLICY_VERSION_CACHE[path] = (stamp, digest)
+        return digest
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Body-type runners
 # ---------------------------------------------------------------------------
@@ -145,7 +177,8 @@ def _run_classical(
         func, context=context, store=store, episode_id=episode_id, decision=decision,
     )
     result = func(**params, **extras)
-    outcome = {"success": True, "result": result}
+    outcome = {"success": True, "result": result,
+               "policy_version": _policy_version(func)}
 
     # Commitment #1, slice 1: a result that violates the skill's declared
     # expectations is a *surprise* — it ran, but not as predicted. Surface it on

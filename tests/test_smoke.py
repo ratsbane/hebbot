@@ -1136,3 +1136,117 @@ def test_composition_halts_on_subskill_failure(substrate):
     #  from broken — easiest by confirming exactly one open_gripper was called)
     open_count = sum(1 for e in recent)
     assert open_count == 0  # broken never reached the open_gripper step
+
+
+# ---------------------------------------------------------------------------
+# The distilled-policy wire (lab notebook #146)
+# ---------------------------------------------------------------------------
+
+class _StubStore:
+    """Just enough store for the registry to find a policies dir beside the db."""
+
+    def __init__(self, tmp_path):
+        self.db_path = str(tmp_path / "hebbot.db")
+
+
+def _promote_feasibility_artifact(tmp_path, weights, acquire_z=0.45):
+    import json
+
+    policies = tmp_path / "policies"
+    policies.mkdir(exist_ok=True)
+    (policies / "feasibility_test.json").write_text(json.dumps({
+        "kind": "feasibility_logistic_v1",
+        "promoted": True,
+        "created_at": 1.0,
+        "weights": weights,
+        "validity": {"acquire_z": acquire_z, "tolerances": {"acquire_z": 0.02}},
+    }))
+    return policies
+
+
+def test_feasibility_policy_is_inert_until_something_is_promoted(tmp_path):
+    from hebbot.skills.primitives import _apply_feasibility_policy
+
+    decisions = []
+    candidates = [{"u": 100.0, "v": 350.0, "npix": 900}]
+    kept, trace = _apply_feasibility_policy(
+        candidates, acquire_z=0.45, threshold=0.5, _store=_StubStore(tmp_path),
+        _log_decision=lambda decision, **kw: decisions.append((decision, kw)),
+    )
+    assert kept == candidates                      # deliberate behaviour unchanged
+    assert trace["applied"] is False
+    assert decisions[0][0] == "orchestrator"
+    assert "unavailable" in decisions[0][1]["reasoning"]
+
+
+def test_promoted_feasibility_policy_removes_predicted_limited_candidates(tmp_path):
+    from hebbot.skills.primitives import _apply_feasibility_policy
+
+    # p(limited) rises with u: intercept -6, u_norm weight +12, v_norm weight 0.
+    _promote_feasibility_artifact(tmp_path, [-6.0, 12.0, 0.0])
+    decisions = []
+    near = {"u": 60.0, "v": 300.0, "npix": 900}
+    far = {"u": 600.0, "v": 300.0, "npix": 900}
+    kept, trace = _apply_feasibility_policy(
+        [near, far], acquire_z=0.45, threshold=0.5, _store=_StubStore(tmp_path),
+        _log_decision=lambda decision, **kw: decisions.append((decision, kw)),
+    )
+    assert kept == [near]
+    assert trace["applied"] is True
+    assert trace["avoided"] == [{"u": 600.0, "v": 300.0}]
+    assert decisions[0][0] == "policy"
+
+
+def test_feasibility_policy_refuses_an_artifact_from_another_observe_pose(tmp_path):
+    from hebbot.skills.primitives import _apply_feasibility_policy
+
+    _promote_feasibility_artifact(tmp_path, [-6.0, 12.0, 0.0], acquire_z=0.45)
+    candidates = [{"u": 600.0, "v": 300.0, "npix": 900}]
+    kept, trace = _apply_feasibility_policy(
+        candidates, acquire_z=0.34, threshold=0.5, _store=_StubStore(tmp_path),
+    )
+    assert kept == candidates
+    assert trace["applied"] is False
+    assert "outside artifact validity" in trace["registry"]["rejected"][0]["reason"]
+
+
+def test_probe_rejects_an_unknown_feasibility_mode():
+    from hebbot.skills.primitives import vision_grasp_probe
+
+    out = vision_grasp_probe(feasibility_mode="sometimes")
+    assert out["safe_to_descend"] is False
+    assert out["note"] == "feasibility_mode must be off|avoid_saturation|policy"
+
+
+def test_vision_grasp_refuses_to_command_an_unvalidated_warm_start():
+    from hebbot.skills.primitives import vision_grasp
+
+    out = vision_grasp(warm_start_mode="apply")
+    assert out["_source"] == "error"
+    assert "shadow record" in out["note"]
+
+
+def test_warm_start_shadow_records_a_proposal_without_moving(tmp_path):
+    import json
+
+    from hebbot.skills.primitives import _evaluate_warm_start
+
+    policies = tmp_path / "policies"
+    policies.mkdir()
+    (policies / "ws.json").write_text(json.dumps({
+        "kind": "warm_start_ridge_v1", "promoted": True, "created_at": 1.0,
+        "weights": [[0.45, 0.0], [0.0, 0.0], [0.0, 0.0],
+                    [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
+        "feature_mean": [0.0] * 5, "feature_std": [1.0] * 5,
+        "validity": {"acquire_z": 0.45, "tolerances": {"acquire_z": 0.02}},
+    }))
+    decisions = []
+    trace = _evaluate_warm_start(
+        history=[{"u": 320.0, "v": 240.0, "depth_height_m": 0.03}],
+        start_xyz=[0.45, 0.0, 0.45], acquire_z=0.45, _store=_StubStore(tmp_path),
+        _log_decision=lambda decision, **kw: decisions.append((decision, kw)),
+    )
+    assert trace["mode"] == "shadow"
+    assert trace["proposal"]["predicted_xy"][0] == pytest.approx(0.45)
+    assert decisions[0][0] == "orchestrator"          # a shadow proposal routes nothing
+    assert "not commanded" in decisions[0][1]["reasoning"]

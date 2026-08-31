@@ -18,6 +18,9 @@ def _examples(n=8):
         out.append({
             "episode_id": f"ep-{i}", "started_at": float(i), "x": x,
             "y": [0.42 + 0.10 * u, 0.02 + 0.10 * v],
+            # The start pose the features already encode (x[3], x[4]); the usefulness
+            # gate measures travel from here to the achieved pre-close xy.
+            "start_xyz": [0.308, 0.0, 0.45],
             "servo_steps": 7,
         })
     return out
@@ -50,3 +53,53 @@ def test_store_exposes_episode_states_and_frames():
         assert substrate.store.episode_states(ep)[0]["ee_pose"] == list(range(16))
         assert substrate.store.episode_frames(ep)[0]["file_path"] == "frames/example.jpg"
         substrate.close()
+
+
+def _useful_examples(n=8):
+    """Predictions that land far closer to the achieved pose than the arm started."""
+    examples = []
+    for i in range(n):
+        u = 200.0 + 30.0 * i
+        target = [0.36 + 0.02 * i, -0.10 + 0.025 * i]
+        examples.append({
+            "episode_id": f"ep-{i}",
+            "started_at": float(i),
+            "x": [(u - 320.0) / 320.0, 0.1, 0.0, 0.45, 0.0],
+            "y": target,
+            "start_xyz": [0.45, 0.0, 0.45],
+            "acquire_z": 0.45,
+            "servo_steps": 6,
+        })
+    return examples
+
+
+def test_accurate_but_useless_warm_start_is_refused():
+    from hebbot.learning.warm_start import train_candidate
+
+    examples = _useful_examples()
+    # Start each episode already at its achieved pose: the prediction can be perfect and
+    # still remove no travel, which is a policy worth nothing.
+    for example in examples:
+        example["start_xyz"] = [example["y"][0], example["y"][1], 0.45]
+    result = train_candidate(examples)
+    assert not result.promoted
+    assert any("not useful" in reason for reason in result.reasons)
+
+
+def test_useful_warm_start_records_its_travel_reduction():
+    from hebbot.learning.warm_start import train_candidate
+
+    result = train_candidate(_useful_examples())
+    assert result.artifact["median_travel_reduction_m"] > 0.02
+    assert result.artifact["improved_fraction"] == 1.0
+    assert result.artifact["validity"]["acquire_z"] == 0.45
+
+
+def test_feature_vector_matches_the_training_featuriser():
+    from hebbot.learning.warm_start import FEATURE_NAMES, feature_vector
+
+    features = feature_vector({"u": 320.0, "v": 240.0, "depth_height_m": 0.03},
+                              [0.45, 0.1, 0.45])
+    assert len(features) == len(FEATURE_NAMES)
+    assert features[:3] == [0.0, 0.0, 0.0]
+    assert features[3:] == [0.45, 0.1]

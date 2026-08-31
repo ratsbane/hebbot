@@ -31,3 +31,28 @@ def test_controller_envelope_candidate_refuses_one_positive_region():
     result = train_candidate(examples, max_group_loo_brier=1.0)
     assert not result.promoted
     assert any("controller-limited spatial groups" in reason for reason in result.reasons)
+
+
+def test_spatial_grouping_is_independent_of_episode_order():
+    from hebbot.learning.feasibility import _spatial_groups
+
+    examples = [
+        {"episode_id": "a", "target_pixel": [100.0, 350.0]},
+        {"episode_id": "b", "target_pixel": [110.0, 355.0]},
+        {"episode_id": "c", "target_pixel": [500.0, 260.0]},
+        {"episode_id": "d", "target_pixel": [505.0, 262.0]},
+    ]
+    forward = _spatial_groups(examples)
+    reversed_groups = _spatial_groups(list(reversed(examples)))[::-1]
+    assert forward == reversed_groups
+    assert forward[0] == forward[1] and forward[2] == forward[3]
+    assert forward[0] != forward[2]
+
+
+def test_artifact_records_the_acquisition_pose_it_is_valid_at():
+    examples = _examples()
+    for example in examples:
+        example["acquire_z"] = 0.45
+    result = train_candidate(examples, max_group_loo_brier=0.5)
+    assert result.artifact["validity"]["acquire_z"] == 0.45
+    assert result.artifact["validity"]["tolerances"]["acquire_z"] == 0.02
