@@ -803,6 +803,19 @@ def _update_alignment_geometry(geom, raised):
     }
 
 
+def _aggregate_raised_observations(observations):
+    """Median stationary RGB-D observations of the same tracked raised body."""
+    import numpy as np
+    if not observations:
+        return None
+    return (
+        float(np.median([o[0] for o in observations])),
+        float(np.median([o[1] for o in observations])),
+        int(np.median([o[2] for o in observations])),
+        float(np.median([o[3] for o in observations])),
+    )
+
+
 def _final_pose_alignment_tolerance_px(
     open_width, object_width, object_depth, requested_tol, uncertainty_px=2.0,
 ):
@@ -825,6 +838,35 @@ def _rotate_planar_delta(dx, dy, yaw):
     """Rotate a reference gripper-down XY image-servo correction into a yawed wrist frame."""
     c, s = math.cos(float(yaw)), math.sin(float(yaw))
     return c * float(dx) - s * float(dy), s * float(dx) + c * float(dy)
+
+
+def _grasp_axis_yaw(angle_deg, length_m, width_m):
+    """Shortest symmetric wrist yaw that closes across a rectangular top's short axis."""
+    if float(length_m) / max(float(width_m), 1e-3) < 1.25:
+        return 0.0
+    phi = math.atan2(-math.cos(math.radians(float(angle_deg))),
+                     -math.sin(math.radians(float(angle_deg))))
+    return ((phi + math.pi / 2) % math.pi) - math.pi / 2
+
+
+def _incremental_yaw_steps(yaw, max_step_deg=10.0):
+    """Number of bounded wrist rotations needed to preserve eye-in-hand visibility."""
+    return max(1, int(math.ceil(abs(float(yaw)) / math.radians(float(max_step_deg)))))
+
+
+def _yaw_clearance_open_width(object_width, current_open_width, yaw):
+    """Increase approach clearance for substantial yaw, bounded below full gripper opening."""
+    if abs(float(yaw)) < math.radians(15.0):
+        return float(current_open_width)
+    return float(min(0.065, max(
+        float(current_open_width), float(object_width) + 0.030,
+    )))
+
+
+def _visibility_limited_yaw(yaw, limit_deg=60.0):
+    """Keep the offset wrist camera inside its empirically observed yaw visibility envelope."""
+    limit = math.radians(float(limit_deg))
+    return float(max(-limit, min(limit, float(yaw))))
 
 
 def _predict_servo_pixel(u, v, jinv, commanded_dx, commanded_dy):
@@ -1129,6 +1171,121 @@ def find_blocks(
                            "aspect": round(asp, 2), "npix": int(len(xs))})
     blocks.sort(key=lambda b: -b["npix"])
     return {"_source": "live", "blocks": blocks, "n": len(blocks)}
+
+
+def _rank_grasp_candidates(
+    blocks, *, width=640, height=480, min_px=1000, edge_margin_px=110,
+    max_abs_yaw_deg=30.0, neighbor_clearance_px=80.0,
+):
+    """Annotate and rank grasp candidates without hiding ineligible observations."""
+    import numpy as np
+    ranked = []
+    for i, block in enumerate(blocks):
+        u, v = float(block["u"]), float(block["v"])
+        yaw = math.degrees(_grasp_axis_yaw(
+            block.get("ang", 0.0), block.get("L", 1.0), block.get("W", 1.0),
+        ))
+        edge = min(u, v, float(width - 1) - u, float(height - 1) - v)
+        neighbors = [
+            float(np.hypot(u - float(other["u"]), v - float(other["v"])))
+            for j, other in enumerate(blocks) if j != i
+        ]
+        nearest = min(neighbors) if neighbors else float("inf")
+        reasons = []
+        if int(block.get("npix", 0)) < int(min_px):
+            reasons.append("object_area")
+        if edge < float(edge_margin_px):
+            reasons.append("image_or_controller_margin")
+        if abs(yaw) > float(max_abs_yaw_deg):
+            reasons.append("yaw_domain")
+        if nearest < float(neighbor_clearance_px):
+            reasons.append("neighbor_clearance")
+        if block.get("depth_valid") is False:
+            reasons.append("depth_identity")
+        # Rank robustness, not convenience: larger bodies and larger margins lead.
+        score = (
+            min(1.0, int(block.get("npix", 0)) / 2000.0)
+            + min(1.0, edge / max(float(edge_margin_px), 1.0))
+            + min(1.0, nearest / max(float(neighbor_clearance_px), 1.0))
+            - abs(yaw) / 180.0
+        )
+        ranked.append({
+            **block,
+            "predicted_grip_yaw_deg": round(yaw, 1),
+            "edge_margin_px": round(edge, 1),
+            "nearest_neighbor_px": None if not neighbors else round(nearest, 1),
+            "eligible": not reasons,
+            "rejection_reasons": reasons,
+            "eligibility_score": round(float(score), 4),
+        })
+    ranked.sort(key=lambda item: (not item["eligible"], -item["eligibility_score"]))
+    return ranked
+
+
+def select_grasp_target(
+    *, camera=None, colors=None, min_px=1000, edge_margin_px=110,
+    max_abs_yaw_deg=30.0, neighbor_clearance_px=80.0,
+    _context=None,
+):
+    """Deliberately select an eligible grasp target and expose every rejected alternative."""
+    import numpy as np
+
+    found = find_blocks(
+        camera=camera, colors=colors, min_px=20, _context=_context,
+    )
+    cameras = _extract(_context, "cameras") or {}
+    cam = _select_camera(cameras, camera) if cameras else None
+    depth_samples = 3
+    max_height_spread_m = 0.012
+    blocks = found.get("blocks", [])
+    if cam is not None:
+        captures = [cam.capture(with_depth=True) for _ in range(depth_samples)]
+        for block in blocks:
+            observations = [
+                _nearest_raised_instance(
+                    cap, block["color"], [block["u"], block["v"]],
+                    min_px=600, max_track_distance_px=50.0,
+                )
+                for cap in captures
+            ]
+            observations = [obs for obs in observations if obs is not None]
+            heights = [float(obs[3]) for obs in observations]
+            spread = max(heights) - min(heights) if len(heights) >= 2 else None
+            block["depth_valid"] = bool(
+                len(observations) == depth_samples
+                and spread is not None and spread <= max_height_spread_m
+            )
+            block["depth_observations"] = len(observations)
+            block["depth_height_m"] = (
+                round(float(np.median(heights)), 4) if heights else None
+            )
+            block["depth_height_spread_m"] = (
+                round(float(spread), 4) if spread is not None else None
+            )
+            block["depth_object_pixels"] = (
+                round(float(np.median([obs[2] for obs in observations])))
+                if observations else None
+            )
+    ranked = _rank_grasp_candidates(
+        blocks, min_px=min_px,
+        edge_margin_px=edge_margin_px, max_abs_yaw_deg=max_abs_yaw_deg,
+        neighbor_clearance_px=neighbor_clearance_px,
+    )
+    selected = next((candidate for candidate in ranked if candidate["eligible"]), None)
+    return {
+        "_source": found.get("_source", "live"),
+        "selected": selected,
+        "eligible_count": sum(1 for candidate in ranked if candidate["eligible"]),
+        "candidates": ranked,
+        "criteria": {
+            "min_px": int(min_px),
+            "edge_margin_px": float(edge_margin_px),
+            "max_abs_yaw_deg": float(max_abs_yaw_deg),
+            "neighbor_clearance_px": float(neighbor_clearance_px),
+            "depth_samples": depth_samples,
+            "max_depth_height_spread_m": max_height_spread_m,
+        },
+    }
 
 
 def _nearest_instance(bgr, color, track, min_px=80):
@@ -1773,6 +1930,11 @@ def vision_grasp(
     replay_threshold: float = 0.82,
     speed_factor: float = 0.1,
     dry_run: bool = False,
+    alignment_gain: float = 1.0,
+    alignment_samples: int = 1,
+    alignment_passes: int = 4,
+    coarse_handoff_tol: float = 12.0,
+    precision_z: Optional[float] = None,
     _context: Optional[Any] = None,
     _store: Optional[Any] = None,
     _episode_id: Optional[str] = None,
@@ -1805,6 +1967,12 @@ def vision_grasp(
     if experience_mode not in ("off", "record", "replay"):
         return {"_source": "error", "grasped": None,
                 "note": f"experience_mode must be off|record|replay, got {experience_mode!r}"}
+    alignment_gain = max(0.1, min(1.0, float(alignment_gain)))
+    alignment_samples = max(1, min(5, int(alignment_samples)))
+    alignment_passes = max(2, min(8, int(alignment_passes)))
+    coarse_handoff_tol = max(float(pixel_tol), min(22.0, float(coarse_handoff_tol)))
+    precision_z = float(approach_z if precision_z is None else precision_z)
+    precision_z = max(0.10, min(float(approach_z), precision_z))
     if color not in _SEGMENT_COLORS:
         return {"_source": "error", "grasped": None,
                 "note": f"uncalibrated color {color!r}; have {_SEGMENT_COLORS}"}
@@ -1931,7 +2099,10 @@ def vision_grasp(
                             ),
                             "depth_rejected_frames": depth_rejections})
             last = (u, v)
-            if at_bottom and err <= pixel_tol:
+            # Coarse servo hands off a bounded residual to the depth top-face stage. The
+            # physically derived `pixel_tol` remains enforced by depth + final-pose guards;
+            # requiring it here made the precision stage unreachable in noisy close views.
+            if at_bottom and err <= coarse_handoff_tol:
                 servo_stop_reason = "converged"
                 return last
             jinv = _vg_jinv(d)
@@ -2083,14 +2254,18 @@ def vision_grasp(
             geom = _perceive_pose_3d(cam, color, track, _context=_context)
         if geom is not None:
             H = geom["height_m"]
-            # Re-centre on the TRUE top-face centroid. One pass is not sufficient at the edge of
-            # the workspace: the 2026-07-25 +y failure retained 11.9 px residual error, then a
-            # fingertip stalled 17.7 mm high on the block top. Re-perceive and recheck after every
-            # correction. Use the same physical jaw-clearance budget that the independent
+            # Re-centre on the TRUE top-face centroid as a descending staircase. At each height,
+            # observe once, make at most one combined X/Y correction, then descend before looking
+            # again. Repeating tiny lateral corrections at a fixed Z produced diminishing returns
+            # and discarded the camera's increasing close-range leverage. Metric width/yaw stays
+            # anchored to the stable 0.30 m observation; later RGB-D updates only centroid/height.
+            # Use the same physical jaw-clearance budget that the independent
             # post-yaw guard will enforce; otherwise the legacy 10 px gate can accept a pose that
             # the actual opening cannot safely straddle.
             geometry_aligned = False
-            for align_pass in range(4):       # observation + at most three corrections
+            alignment_zs = np.linspace(pz, precision_z, alignment_passes)
+            for align_pass in range(alignment_passes):
+                pz = float(alignment_zs[align_pass])
                 d_face = max(0.05, pz - H)
                 tu, tv = _vg_grasp_pixel(d_face)
                 align_error = float(np.hypot(geom["u"] - tu, geom["v"] - tv))
@@ -2114,33 +2289,77 @@ def vision_grasp(
                     "length_m": round(float(geom["length_m"]), 4),
                     "width_m": round(float(geom["width_m"]), 4),
                     "height_m": round(float(geom["height_m"]), 4),
+                    "alignment_gain": alignment_gain,
+                    "alignment_samples": alignment_samples,
+                    "precision_z": precision_z,
+                    "z": round(pz, 4),
                 })
-                if align_error <= alignment_tol:
-                    geometry_aligned = True
-                    break
-                if align_pass == 3:
-                    break
-                _recenter(geom["u"], geom["v"], tu, tv, d_face)
+                final_level = align_pass == alignment_passes - 1
+                corrected = align_error > alignment_tol
+                if corrected:
+                    _recenter(
+                        geom["u"], geom["v"], tu, tv, d_face, gain=alignment_gain,
+                    )
+                # Even an aligned higher view descends for a closer observation. At the final
+                # level, use its one permitted correction and verify without correcting twice.
+                next_z = pz if final_level else float(alignment_zs[align_pass + 1])
+                if next_z < pz - 1e-4:
+                    p = panda.get_position()
+                    move_to_pose(
+                        [float(p[0]), float(p[1]), next_z],
+                        speed_factor=motion_speed, _context=_context,
+                    )
                 # Geometry perception deliberately starts from color to estimate the grasp axis
                 # and width, but close-range illumination can split one physical rectangle into
                 # several color components. Do not chase those fragments during alignment. Use
                 # the same unified raised-depth body as coarse servoing, while retaining the
                 # initial object's width/length/yaw estimate.
-                raised, rejected = _reacquire_raised_instance(
-                    cam, color, [tu, tv], min_px=600, max_retries=2,
-                )
-                geometry_alignment_history[-1]["rejected_followup_frames"] = rejected
+                observations = []
+                rejected = 0
+                next_target = list(_vg_grasp_pixel(max(0.05, next_z - H)))
+                for _ in range(alignment_samples):
+                    raised, sample_rejected = _reacquire_raised_instance(
+                        cam, color, next_target, min_px=600, max_retries=2,
+                    )
+                    rejected += sample_rejected
+                    if raised is not None:
+                        observations.append(raised)
+                raised = _aggregate_raised_observations(observations)
+                geometry_alignment_history[-1].update({
+                    "corrected": corrected,
+                    "rejected_followup_frames": rejected,
+                    "accepted_followup_frames": len(observations),
+                })
                 if raised is None:
                     break
                 geom = _update_alignment_geometry(geom, raised)
                 track = [geom["u"], geom["v"]]
                 H = geom["height_m"]
+                if final_level:
+                    verify_d = max(0.05, pz - H)
+                    verify_u, verify_v = _vg_grasp_pixel(verify_d)
+                    verify_error = float(np.hypot(
+                        geom["u"] - verify_u, geom["v"] - verify_v,
+                    ))
+                    geometry_alignment_history[-1].update({
+                        "verification_u": round(float(geom["u"]), 2),
+                        "verification_v": round(float(geom["v"]), 2),
+                        "verification_target_u": round(float(verify_u), 2),
+                        "verification_target_v": round(float(verify_v), 2),
+                        "verification_pixel_error": round(verify_error, 2),
+                    })
+                    geometry_aligned = verify_error <= alignment_tol
+                    break
             if not geometry_aligned:
+                final_alignment_error = geometry_alignment_history[-1].get(
+                    "verification_pixel_error",
+                    geometry_alignment_history[-1]["pixel_error"],
+                )
                 result = {
                     "_source": "live", "located": located, "grasped": False,
                     "note": (
                         "depth top-face alignment did not converge before descent: "
-                        f"{geometry_alignment_history[-1]['pixel_error']:.1f}px > "
+                        f"{final_alignment_error:.1f}px > "
                         f"{geometry_alignment_history[-1]['pixel_tolerance']:.1f}px "
                         "jaw-clearance tolerance"
                     ),
@@ -2256,13 +2475,18 @@ def vision_grasp(
             # Piece 2: fingers parallel to the true long edges (across the short axis), using
             # the STABLE depth principal axis. Skip the twist for near-square tops (cubes).
             applied_yaw = 0.0
+            requested_yaw = 0.0
+            yaw_visibility_history = []
+            yaw_final_cap = None
             if geom["length_m"] / max(geom["width_m"], 1e-3) >= 1.25:
                 if replay_yaw is not None:
                     phi = replay_yaw
                 else:
-                    phi = math.atan2(-math.cos(math.radians(geom["ang"])),
-                                     -math.sin(math.radians(geom["ang"])))
-                    phi = ((phi + math.pi / 2) % math.pi) - math.pi / 2   # gripper symmetry
+                    phi = _grasp_axis_yaw(
+                        geom["ang"], geom["length_m"], geom["width_m"],
+                    )
+                requested_yaw = phi
+                phi = _visibility_limited_yaw(phi)
                 p = panda.get_position()
 
                 def _apply_yaw(yaw):
@@ -2273,24 +2497,62 @@ def vision_grasp(
                     return (r.get("ik_solution_q") or [0.0] * 7)[6]   # wrist joint 7
 
                 try:
-                    q7 = _apply_yaw(phi)
+                    yaw_steps = _incremental_yaw_steps(phi)
+                    yaw_track = [float(geom["u"]), float(geom["v"])]
+                    for yaw_step in range(1, yaw_steps + 1):
+                        partial_yaw = phi * yaw_step / yaw_steps
+                        q7 = _apply_yaw(partial_yaw)
+                        raised, rejected, yaw_final_cap = _reacquire_raised_capture(
+                            cam, color, yaw_track, min_px=600, max_retries=2,
+                            expected_height_m=H,
+                        )
+                        actual_p = panda.get_position()
+                        xy_drift = float(np.hypot(
+                            float(actual_p[0]) - float(p[0]),
+                            float(actual_p[1]) - float(p[1]),
+                        ))
+                        yaw_observation = {
+                            "step": yaw_step,
+                            "steps": yaw_steps,
+                            "yaw_deg": round(math.degrees(partial_yaw), 2),
+                            "xy_drift_m": round(xy_drift, 6),
+                            "q7": round(float(q7), 4),
+                            "rejected_frames": rejected,
+                            "visible": raised is not None,
+                        }
+                        if raised is None:
+                            yaw_visibility_history.append(yaw_observation)
+                            break
+                        yaw_track = [float(raised[0]), float(raised[1])]
+                        yaw_observation.update({
+                            "u": round(float(raised[0]), 2),
+                            "v": round(float(raised[1]), 2),
+                            "object_pixels": int(raised[2]),
+                            "height_m": round(float(raised[3]), 4),
+                        })
+                        yaw_visibility_history.append(yaw_observation)
+                    if not yaw_visibility_history[-1]["visible"]:
+                        raise RuntimeError("target lost during incremental wrist yaw")
                     applied_yaw = phi
                     grip_yaw = round(math.degrees(phi))
-                    # Exploit the gripper's 180° symmetry: yaw φ and φ±π are the IDENTICAL grasp, but
-                    # at the workspace edge the arm's azimuth forces a big counter-rotation, driving
-                    # wrist joint 7 near its ±2.9 rad limit — an awkward over-twist (Doug, 2026-06-28,
-                    # green at the far right). The symmetric grasp lands joint 7 ~π away; take it when
-                    # it's more comfortable (smaller |q7|), reverting if it isn't.
-                    if abs(q7) > 2.5:
-                        alt = phi - math.copysign(math.pi, phi)
-                        alt_q7 = _apply_yaw(alt)
-                        if abs(alt_q7) >= abs(q7):
-                            _apply_yaw(phi)              # original was better — revert
-                        else:
-                            applied_yaw = alt
                 except Exception:
-                    grip_yaw = None
-                    applied_yaw = 0.0
+                    result = {
+                        "_source": "live", "located": located, "grasped": False,
+                        "note": "target unavailable during incremental wrist yaw",
+                        "servo_steps": len(history), "history": history,
+                        "attempt": attempt,
+                        "geom": {k: round(float(val), 4) for k, val in geom.items()},
+                        "geometry_alignment_history": geometry_alignment_history,
+                        "yaw_visibility_history": yaw_visibility_history,
+                    }
+                    break
+
+            if result is not None:
+                break
+
+            open_w = _yaw_clearance_open_width(
+                geom["width_m"], open_w, applied_yaw,
+            )
 
             # Yaw is a consequential transform of the eye-in-hand system. The previous code
             # aligned before yaw and then descended without observing again; a small tool/camera
@@ -2309,7 +2571,32 @@ def vision_grasp(
             final_pose_history = []
             final_pose_cap = None
             final_pose_alignment = None
-            for final_pass in range(3):       # observation + at most two yaw-aware corrections
+            # For substantial yaw, the zero-yaw target pixel is not a valid invariant: the rigid
+            # camera offset rotates around the already-centered EE. Incremental identity/depth
+            # continuity plus measured EE XY hold verifies the physical alignment instead.
+            if abs(applied_yaw) >= math.radians(15.0) and yaw_visibility_history:
+                last_yaw = yaw_visibility_history[-1]
+                final_pose_cap = yaw_final_cap
+                final_pose_alignment = {
+                    "pass": 0,
+                    "passed": bool(
+                        last_yaw.get("visible")
+                        and float(last_yaw.get("xy_drift_m", 1.0)) <= 0.004
+                    ),
+                    "method": "incremental_yaw_identity+kinematic_xy_hold",
+                    "requested_yaw_deg": round(math.degrees(requested_yaw), 2),
+                    "yaw_deg": round(math.degrees(applied_yaw), 2),
+                    "xy_drift_m": last_yaw.get("xy_drift_m"),
+                    "u": last_yaw.get("u"),
+                    "v": last_yaw.get("v"),
+                    "object_pixels": last_yaw.get("object_pixels"),
+                    "height_m": last_yaw.get("height_m"),
+                    "rejected_frames": last_yaw.get("rejected_frames", 0),
+                    "yaw_visibility_history": yaw_visibility_history,
+                }
+                final_pose_history.append(final_pose_alignment)
+            for final_pass in range(0 if final_pose_alignment is not None else 3):
+                # Small yaws retain the calibrated target-pixel check and at most two corrections.
                 raised, rejected, final_pose_cap = _reacquire_raised_capture(
                     cam, color, [tu, tv], min_px=600, max_retries=2,
                 )
@@ -2347,10 +2634,7 @@ def vision_grasp(
                 final_pose_alignment["correction"] = {
                     key: round(float(value), 6) for key, value in correction.items()
                 }
-            final_pose_alignment = {
-                **final_pose_alignment,
-                "history": final_pose_history,
-            }
+            final_pose_alignment = {**final_pose_alignment, "history": final_pose_history}
             try:
                 final_pose_capture = read_camera(
                     camera=camera, with_depth=True, save=True, _context=_context,
@@ -2541,6 +2825,11 @@ def vision_grasp_probe(
     descend_tol: float = 22.0,
     z_step: float = 0.045,
     speed_factor: float = 0.05,
+    alignment_gain: float = 1.0,
+    alignment_samples: int = 1,
+    alignment_passes: int = 4,
+    coarse_handoff_tol: float = 12.0,
+    precision_z: float = 0.15,
     _context: Optional[Any] = None,
     _store: Optional[Any] = None,
     _episode_id: Optional[str] = None,
@@ -2647,6 +2936,11 @@ def vision_grasp_probe(
         experience_mode="record",
         speed_factor=min(float(speed_factor), 0.05),
         dry_run=True,
+        alignment_gain=alignment_gain,
+        alignment_samples=alignment_samples,
+        alignment_passes=alignment_passes,
+        coarse_handoff_tol=coarse_handoff_tol,
+        precision_z=precision_z,
         _context=_context,
         _store=_store,
         _episode_id=_episode_id,
@@ -3642,6 +3936,24 @@ def probe_table(
             "orientation": [round(float(v), 4) for v in q]}
 
 
+def _shove_alignment_levels(start_z, end_z, count=10):
+    """Distinct-Z schedule: one correction per view, then immediately move closer."""
+    count = max(2, int(count))
+    return [
+        float(start_z) + (float(end_z) - float(start_z)) * i / (count - 1)
+        for i in range(count)
+    ]
+
+
+def _shove_track_gate(error_px):
+    """Allow the next view to contain the pixel motion this servo just commanded."""
+    return float(min(180.0, max(90.0, float(error_px) + 40.0)))
+
+
+_SHOVE_PRECISION_Z = 0.255
+_SHOVE_VERIFY_TOL_PX = 8.0
+
+
 def shove(
     *,
     color: str = "blue",
@@ -3672,32 +3984,125 @@ def shove(
     if cam is None or target is None or push_uv is None:
         return {"_source": "error", "note": "need target [u,v] + push_uv [du,dv]"}
 
+    # Bind the caller's overview pixel to a physical raised-depth body *before* moving the
+    # eye-in-hand camera.  RGB-only nearest-colour tracking can silently jump to another
+    # same-colour block when the requested instance leaves the next view.
+    identity, identity_rejected = _reacquire_raised_instance(
+        cam, color, list(target), min_px=600, max_retries=2,
+        max_track_distance_px=65.0,
+    )
+    if identity is None:
+        return {
+            "_source": "live", "pushed": False,
+            "note": "target identity unavailable at overview pose",
+            "target": [float(target[0]), float(target[1])],
+            "identity_rejected_frames": identity_rejected,
+        }
+    track = [float(identity[0]), float(identity[1])]
+    expected_height_m = float(identity[3])
+    identity_history = [{
+        "stage": "overview", "u": round(track[0], 2), "v": round(track[1], 2),
+        "object_pixels": int(identity[2]), "height_m": round(expected_height_m, 4),
+        "rejected_frames": identity_rejected,
+    }]
+
     gripper.move(width=0.0, speed=0.1)          # closed — the gripper is the pusher
     approach_z, acquire_z = _VG_APPROACH_Z, _VG_ACQUIRE_Z
-    track = list(target)
     pos = panda.get_position()
-    z = float(np.clip(acquire_z, approach_z, 0.45))
+    # Do not drop an edge target straight from the overview into the narrower legacy acquisition
+    # view.  Begin at the calibrated 0.45 m overview ceiling, centre the depth-bound body there,
+    # and let the existing error-gated staircase descend only after it is comfortably visible.
+    z = float(np.clip(max(acquire_z, min(float(pos[2]), 0.45)), approach_z, 0.45))
     move_to_pose([float(pos[0]), float(pos[1]), z], _context=_context)
-    for _ in range(14):                         # servo the closed gripper over the target
-        seg = _nearest_instance(cam.capture(with_depth=False)["color"], color, track)
+    authorized = False
+    shove_y_limit = 0.34  # capability-expansion envelope; inward push immediately leaves edge
+    track_gate_px = 90.0
+    # The live D405 hand-eye residual improves down to ~0.255 m and then worsens with close-view
+    # parallax. Authorize from that calibrated view; physical execution still stages at 0.20 m.
+    alignment_z = max(approach_z, _SHOVE_PRECISION_Z)
+    levels = _shove_alignment_levels(z, alignment_z, 10)
+    for level_index, level_z in enumerate(levels):
+        z = float(level_z)
+        seg, rejected = _reacquire_raised_instance(
+            cam, color, track, min_px=600, max_retries=2,
+            expected_height_m=expected_height_m, max_height_delta_m=0.018,
+            max_track_distance_px=track_gate_px,
+        )
         if seg is None:
+            identity_history.append({
+                "stage": "servo", "z": round(z, 4), "visible": False,
+                "rejected_frames": rejected,
+            })
             break
-        u, v, _npx = seg
+        u, v, _npx, observed_height_m = seg
         track = [u, v]
         tu, tv = _vg_grasp_pixel(z)
         du, dv = tu - u, tv - v
         err = float(np.hypot(du, dv))
-        at_bottom = z <= approach_z + 1e-3
+        identity_history.append({
+            "stage": "servo", "z": round(z, 4), "visible": True,
+            "u": round(float(u), 2), "v": round(float(v), 2),
+            "object_pixels": int(_npx), "height_m": round(float(observed_height_m), 4),
+            "error_px": round(err, 2), "track_gate_px": round(track_gate_px, 1),
+            "rejected_frames": rejected,
+        })
+        at_bottom = level_index == len(levels) - 1
         if at_bottom and err <= 4.0:
+            authorized = True
             break
         ji = _vg_jinv(z)
         dex = float(np.clip(ji[0][0] * du + ji[0][1] * dv, -0.06, 0.06))
         dey = float(np.clip(ji[1][0] * du + ji[1][1] * dv, -0.06, 0.06))
-        if err <= 22.0 and not at_bottom:
-            z = max(approach_z, z - 0.045)
         p = panda.get_position()
-        move_to_pose([float(np.clip(p[0] + dex, 0.30, 0.60)),
-                      float(np.clip(p[1] + dey, -0.28, 0.28)), z], _context=_context)
+        next_z = z if at_bottom else float(levels[level_index + 1])
+        should_verify = at_bottom or err <= _SHOVE_VERIFY_TOL_PX
+        command_x = float(np.clip(p[0] + dex, 0.30, 0.60))
+        command_y = float(np.clip(p[1] + dey, -shove_y_limit, shove_y_limit))
+        identity_history[-1]["command_xy"] = [round(command_x, 4), round(command_y, 4)]
+        identity_history[-1]["controller_clipped"] = bool(
+            command_x != float(p[0] + dex) or command_y != float(p[1] + dey)
+        )
+        move_to_pose([command_x, command_y, z if should_verify else next_z], _context=_context)
+        track_gate_px = _shove_track_gate(err)
+        if should_verify:
+            # A near-gate correction is observed before throwing away a good view. This is still
+            # one correction at the level: failed verification descends without correcting again.
+            verify, verify_rejected = _reacquire_raised_instance(
+                cam, color, track, min_px=600, max_retries=2,
+                expected_height_m=expected_height_m, max_height_delta_m=0.018,
+                max_track_distance_px=track_gate_px,
+            )
+            if verify is None:
+                identity_history.append({
+                    "stage": "alignment_verification", "z": round(z, 4),
+                    "visible": False, "rejected_frames": verify_rejected,
+                })
+                break
+            vu, vv, vnpx, vheight = verify
+            track = [vu, vv]
+            vtu, vtv = _vg_grasp_pixel(z)
+            verr = float(np.hypot(vtu - vu, vtv - vv))
+            identity_history.append({
+                "stage": "alignment_verification", "z": round(z, 4), "visible": True,
+                "u": round(float(vu), 2), "v": round(float(vv), 2),
+                "object_pixels": int(vnpx), "height_m": round(float(vheight), 4),
+                "error_px": round(verr, 2), "rejected_frames": verify_rejected,
+            })
+            authorized = verr <= 4.0
+            if authorized or at_bottom:
+                break
+            move_to_pose([command_x, command_y, next_z], _context=_context)
+
+    if not authorized:
+        p = panda.get_position()
+        move_to_pose([float(p[0]), float(p[1]), max(float(p[2]), 0.20)], _context=_context)
+        return {
+            "_source": "live", "pushed": False,
+            "note": "target identity/alignment unavailable before contact",
+            "expected_height_m": round(expected_height_m, 4),
+            "alignment_z": round(alignment_z, 4),
+            "identity_history": identity_history,
+        }
 
     # Image push vector → EE-xy unit direction. The image Jacobian centres a block by moving the
     # CAMERA (block appears to move toward target); a physical push moves the block WITH the
@@ -3714,13 +4119,31 @@ def shove(
     sx, sy = bx - ux * off, by - uy * off
     tx, ty = bx + ux * distance, by + uy * distance
     cl = lambda x, lo, hi: float(np.clip(x, lo, hi))
-    move_to_pose([cl(sx, 0.30, 0.60), cl(sy, -0.28, 0.28), approach_z], _context=_context)
-    move_to_pose([cl(sx, 0.30, 0.60), cl(sy, -0.28, 0.28), z_push], _context=_context)
-    move_to_pose([cl(tx, 0.30, 0.60), cl(ty, -0.28, 0.28), z_push], _context=_context)  # push
-    move_to_pose([cl(tx, 0.30, 0.60), cl(ty, -0.28, 0.28), approach_z], _context=_context)
+    move_to_pose([cl(sx, 0.30, 0.60), cl(sy, -shove_y_limit, shove_y_limit), approach_z], _context=_context)
+    move_to_pose([cl(sx, 0.30, 0.60), cl(sy, -shove_y_limit, shove_y_limit), z_push], _context=_context)
+    move_to_pose([cl(tx, 0.30, 0.60), cl(ty, -shove_y_limit, shove_y_limit), z_push], _context=_context)  # push
+    move_to_pose([cl(tx, 0.30, 0.60), cl(ty, -shove_y_limit, shove_y_limit), approach_z], _context=_context)
+    post, post_rejected = _reacquire_raised_instance(
+        cam, color, list(_vg_grasp_pixel(approach_z)), min_px=600, max_retries=2,
+        expected_height_m=expected_height_m, max_height_delta_m=0.018,
+        max_track_distance_px=120.0,
+    )
+    post_identity = {
+        "visible": post is not None,
+        "rejected_frames": post_rejected,
+    }
+    if post is not None:
+        post_identity.update({
+            "u": round(float(post[0]), 2), "v": round(float(post[1]), 2),
+            "object_pixels": int(post[2]), "height_m": round(float(post[3]), 4),
+        })
     return {"_source": "live", "pushed": True,
             "ee_dir": [round(ux, 3), round(uy, 3)], "distance": distance,
-            "from_xy": [round(sx, 4), round(sy, 4)], "to_xy": [round(tx, 4), round(ty, 4)]}
+            "from_xy": [round(sx, 4), round(sy, 4)], "to_xy": [round(tx, 4), round(ty, 4)],
+            "controller_y_limit": shove_y_limit,
+            "alignment_z": round(alignment_z, 4),
+            "expected_height_m": round(expected_height_m, 4),
+            "identity_history": identity_history, "post_identity": post_identity}
 
 
 def _relevel_base(onto, canon_uv, canon_xy, _context, drift_tol=22.0):
@@ -4684,7 +5107,7 @@ PRIMITIVE_SPECS = [
                               "description": "start/observation height (m) — higher = wider FOV"},
                 "approach_z": {"type": "number", "minimum": 0.1, "maximum": 0.3, "default": 0.20,
                                "description": "final servo height (m) before grasp"},
-                "max_steps": {"type": "integer", "minimum": 1, "maximum": 20, "default": 10,
+                "max_steps": {"type": "integer", "minimum": 1, "maximum": 30, "default": 10,
                               "description": "image-servo iteration cap"},
                 "pixel_tol": {"type": "number", "minimum": 0.5, "default": 4.0,
                               "description": "final servo convergence threshold (px)"},
@@ -4711,6 +5134,23 @@ PRIMITIVE_SPECS = [
                 "speed_factor": {"type": "number", "minimum": 0.01, "maximum": 0.2,
                                  "default": 0.1,
                                  "description": "motion speed; experience trials cap this at 0.05"},
+                "alignment_gain": {"type": "number", "minimum": 0.1, "maximum": 1.0,
+                                   "default": 1.0,
+                                   "description": "depth top-face recenter gain"},
+                "alignment_samples": {"type": "integer", "minimum": 1, "maximum": 5,
+                                      "default": 1,
+                                      "description": "stationary RGB-D observations per pass"},
+                "alignment_passes": {"type": "integer", "minimum": 2, "maximum": 8,
+                                     "default": 4,
+                                     "description": "maximum depth-alignment observations"},
+                "coarse_handoff_tol": {"type": "number", "minimum": 4.0,
+                                       "maximum": 22.0, "default": 12.0,
+                                       "description": "coarse pixel residual allowed to hand off "
+                                                      "to strict depth alignment"},
+                "precision_z": {"type": "number", "minimum": 0.10, "maximum": 0.30,
+                                "default": 0.15,
+                                "description": "close no-contact EE height for precision RGB-D "
+                                               "alignment"},
             },
             "additionalProperties": False,
         },
@@ -4747,7 +5187,7 @@ PRIMITIVE_SPECS = [
                               "default": 0.34},
                 "approach_z": {"type": "number", "minimum": 0.1, "maximum": 0.3,
                                "default": 0.20},
-                "max_steps": {"type": "integer", "minimum": 1, "maximum": 20,
+                "max_steps": {"type": "integer", "minimum": 1, "maximum": 30,
                               "default": 10},
                 "pixel_tol": {"type": "number", "minimum": 0.5, "default": 4.0},
                 "descend_tol": {"type": "number", "minimum": 1.0, "default": 22.0},
@@ -4755,6 +5195,23 @@ PRIMITIVE_SPECS = [
                            "default": 0.045},
                 "speed_factor": {"type": "number", "minimum": 0.01, "maximum": 0.05,
                                  "default": 0.05},
+                "alignment_gain": {"type": "number", "minimum": 0.1, "maximum": 1.0,
+                                   "default": 1.0,
+                                   "description": "depth top-face recenter gain"},
+                "alignment_samples": {"type": "integer", "minimum": 1, "maximum": 5,
+                                      "default": 1,
+                                      "description": "stationary RGB-D observations per pass"},
+                "alignment_passes": {"type": "integer", "minimum": 2, "maximum": 8,
+                                     "default": 4,
+                                     "description": "maximum depth-alignment observations"},
+                "coarse_handoff_tol": {"type": "number", "minimum": 4.0,
+                                       "maximum": 22.0, "default": 12.0,
+                                       "description": "coarse pixel residual allowed to hand off "
+                                                      "to strict depth alignment"},
+                "precision_z": {"type": "number", "minimum": 0.10, "maximum": 0.30,
+                                "default": 0.15,
+                                "description": "close no-contact EE height for precision RGB-D "
+                                               "alignment"},
             },
             "additionalProperties": False,
         },
@@ -4911,6 +5368,26 @@ PRIMITIVE_SPECS = [
                            "description": "colours to detect (default all calibrated)"},
                 "min_px": {"type": "integer", "minimum": 20, "default": 120,
                            "description": "min pixels for an instance"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "select_grasp_target",
+        "function_spec": "hebbot.skills.primitives:select_grasp_target",
+        "params_schema": {
+            "type": "object",
+            "properties": {
+                "camera": {"type": "string"},
+                "colors": {"type": "array", "items": {"type": "string",
+                           "enum": ["blue", "green", "red"]}},
+                "min_px": {"type": "integer", "minimum": 100, "default": 1000},
+                "edge_margin_px": {"type": "number", "minimum": 20, "maximum": 200,
+                                   "default": 110},
+                "max_abs_yaw_deg": {"type": "number", "minimum": 0, "maximum": 90,
+                                    "default": 30},
+                "neighbor_clearance_px": {"type": "number", "minimum": 20,
+                                          "maximum": 250, "default": 80},
             },
             "additionalProperties": False,
         },

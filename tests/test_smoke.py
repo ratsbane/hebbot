@@ -33,6 +33,7 @@ def test_all_skills_registered(substrate):
     assert "open_gripper" in names
     assert "close_gripper" in names
     assert "read_camera" in names
+    assert "select_grasp_target" in names
     assert "compliant_hold" in names
     assert "teleop_xbox" in names
     assert "home" in names
@@ -123,6 +124,154 @@ def test_yawed_recenter_rotates_reference_planar_delta():
     )
 
 
+def test_grasp_axis_yaw_uses_shortest_symmetric_rotation():
+    import math
+    from hebbot.skills.primitives import _grasp_axis_yaw
+
+    assert math.degrees(_grasp_axis_yaw(83, 0.060, 0.030)) == pytest.approx(7)
+    assert math.degrees(_grasp_axis_yaw(-155, 0.060, 0.030)) == pytest.approx(65)
+    assert math.degrees(_grasp_axis_yaw(177.7, 0.060, 0.025)) == pytest.approx(-87.7)
+    assert _grasp_axis_yaw(20, 0.030, 0.029) == 0.0
+
+
+def test_incremental_yaw_steps_caps_rotation_at_ten_degrees():
+    import math
+    from hebbot.skills.primitives import _incremental_yaw_steps
+
+    assert _incremental_yaw_steps(0.0) == 1
+    assert _incremental_yaw_steps(math.radians(7)) == 1
+    assert _incremental_yaw_steps(math.radians(65)) == 7
+    assert _incremental_yaw_steps(math.radians(-88)) == 9
+
+
+def test_grasp_candidate_ranking_records_eligibility_reasons():
+    from hebbot.skills.primitives import _rank_grasp_candidates
+
+    ranked = _rank_grasp_candidates([
+        {"color": "red", "u": 300, "v": 250, "ang": 80,
+         "L": 60, "W": 30, "npix": 1500},
+        {"color": "blue", "u": 590, "v": 250, "ang": 0,
+         "L": 60, "W": 30, "npix": 1500},
+        {"color": "green", "u": 400, "v": 250, "ang": 0,
+         "L": 60, "W": 30, "npix": 400, "depth_valid": False},
+    ], neighbor_clearance_px=60)
+    assert ranked[0]["color"] == "red"
+    assert ranked[0]["eligible"]
+    blue = next(item for item in ranked if item["color"] == "blue")
+    green = next(item for item in ranked if item["color"] == "green")
+    assert "image_or_controller_margin" in blue["rejection_reasons"]
+    assert "object_area" in green["rejection_reasons"]
+    assert "depth_identity" in green["rejection_reasons"]
+
+
+def test_substantial_yaw_adds_bounded_approach_clearance():
+    import math
+    from hebbot.skills.primitives import _yaw_clearance_open_width
+
+    assert _yaw_clearance_open_width(0.030, 0.042, math.radians(10)) == pytest.approx(0.042)
+    assert _yaw_clearance_open_width(0.030, 0.042, math.radians(60)) == pytest.approx(0.060)
+    assert _yaw_clearance_open_width(0.040, 0.056, math.radians(-80)) == pytest.approx(0.065)
+
+
+def test_wrist_camera_yaw_is_limited_to_observed_visibility_envelope():
+    import math
+    from hebbot.skills.primitives import _visibility_limited_yaw
+
+    assert math.degrees(_visibility_limited_yaw(math.radians(35))) == pytest.approx(35)
+    assert math.degrees(_visibility_limited_yaw(math.radians(70))) == pytest.approx(60)
+    assert math.degrees(_visibility_limited_yaw(math.radians(-88))) == pytest.approx(-60)
+
+
+def test_shove_refuses_contact_when_depth_identity_is_lost(monkeypatch):
+    import hebbot.skills.primitives as primitives
+
+    observations = iter([((510.0, 270.0, 1600, 0.030), 0), (None, 3)])
+    monkeypatch.setattr(
+        primitives, "_reacquire_raised_instance",
+        lambda *args, **kwargs: next(observations),
+    )
+    moves = []
+    monkeypatch.setattr(
+        primitives, "move_to_pose",
+        lambda position, **kwargs: moves.append(list(position)) or {"success": True},
+    )
+
+    class Panda:
+        def get_position(self):
+            return [0.40, 0.0, 0.486]
+
+    class Gripper:
+        def move(self, **kwargs):
+            return True
+
+    out = primitives.shove(
+        color="green", target=[612.5, 366.2], push_uv=[-1, 0],
+        _context={"panda": Panda(), "gripper": Gripper(),
+                  "cameras": {"wrist": object()}},
+    )
+    assert not out["pushed"]
+    assert out["note"] == "target identity/alignment unavailable before contact"
+    assert out["identity_history"][-1]["visible"] is False
+    assert moves[0][2] == pytest.approx(0.45)
+    assert all(position[2] >= 0.20 for position in moves)
+
+
+def test_shove_alignment_schedule_uses_one_distinct_view_per_level():
+    from hebbot.skills.primitives import (
+        _SHOVE_PRECISION_Z, _SHOVE_VERIFY_TOL_PX,
+        _shove_alignment_levels, _shove_track_gate,
+    )
+
+    levels = _shove_alignment_levels(0.45, 0.20, 10)
+    assert len(levels) == len(set(levels)) == 10
+    assert levels[0] == pytest.approx(0.45)
+    assert levels[-1] == pytest.approx(0.20)
+    assert all(a > b for a, b in zip(levels, levels[1:]))
+    assert _shove_track_gate(20) == pytest.approx(90)
+    assert _shove_track_gate(117) == pytest.approx(157)
+    assert _shove_track_gate(300) == pytest.approx(180)
+    assert _SHOVE_PRECISION_Z == pytest.approx(0.255)
+    assert _SHOVE_VERIFY_TOL_PX == pytest.approx(8.0)
+
+
+def test_shove_servo_has_scoped_edge_arrangement_y_envelope(monkeypatch):
+    import hebbot.skills.primitives as primitives
+
+    observations = iter([
+        ((610.0, 365.0, 1800, 0.030), 0),
+        ((0.0, 0.0, 1800, 0.030), 0),
+        (None, 3),
+    ])
+    monkeypatch.setattr(
+        primitives, "_reacquire_raised_instance",
+        lambda *args, **kwargs: next(observations),
+    )
+    monkeypatch.setattr(primitives, "_vg_grasp_pixel", lambda z: (0.0, 100.0))
+    monkeypatch.setattr(primitives, "_vg_jinv", lambda z: ((1.0, 0.0), (0.0, 1.0)))
+    moves = []
+    monkeypatch.setattr(
+        primitives, "move_to_pose",
+        lambda position, **kwargs: moves.append(list(position)) or {"success": True},
+    )
+
+    class Panda:
+        def get_position(self):
+            return [0.40, 0.28, 0.486]
+
+    class Gripper:
+        def move(self, **kwargs):
+            return True
+
+    out = primitives.shove(
+        color="green", target=[610, 365], push_uv=[-1, 0],
+        _context={"panda": Panda(), "gripper": Gripper(),
+                  "cameras": {"wrist": object()}},
+    )
+    assert not out["pushed"]
+    assert any(position[1] == pytest.approx(0.34) for position in moves)
+    assert out["identity_history"][1]["command_xy"][1] == pytest.approx(0.34)
+
+
 def test_servo_prediction_uses_clamped_cartesian_command():
     from hebbot.skills.primitives import _predict_servo_pixel
 
@@ -165,6 +314,11 @@ def test_vision_grasp_probe_forces_recorded_no_descent_episode(monkeypatch):
     assert called["experience_mode"] == "record"
     assert called["max_retry"] == 0
     assert called["speed_factor"] == pytest.approx(0.05)
+    assert called["alignment_gain"] == pytest.approx(1.0)
+    assert called["alignment_samples"] == 1
+    assert called["alignment_passes"] == 4
+    assert called["coarse_handoff_tol"] == pytest.approx(12.0)
+    assert called["precision_z"] == pytest.approx(0.15)
 
     monkeypatch.setattr(
         primitives, "vision_grasp",
@@ -182,6 +336,18 @@ def test_vision_grasp_probe_forces_recorded_no_descent_episode(monkeypatch):
         color="red", feasibility_mode="invented",
     )
     assert not invalid_memory["safe_to_descend"]
+
+
+def test_alignment_observation_aggregation_uses_medians():
+    from hebbot.skills.primitives import _aggregate_raised_observations
+
+    out = _aggregate_raised_observations([
+        (10.0, 20.0, 100, 0.025),
+        (50.0, 22.0, 120, 0.029),
+        (12.0, 18.0, 110, 0.027),
+    ])
+    assert out == pytest.approx((12.0, 20.0, 110, 0.027))
+    assert _aggregate_raised_observations([]) is None
 
 
 def test_saturation_memory_recall_is_scoped_by_color_and_acquisition_pose(

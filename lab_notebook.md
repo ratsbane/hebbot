@@ -2590,3 +2590,621 @@ The suite passes **62 tests**. This is a useful failure: the learned residual-ri
 be phase-specific rather than asking one classifier to predict an undifferentiated “feasibility.”
 The repeated green-largest evidence points specifically at a tight/noisy depth-alignment gate near
 this view, not at the robot's reach, the servo safety envelope, or coarse centering.
+
+### Depth-alignment batch: upstream censoring and adaptive stop
+
+*Added by Codex.*
+
+The depth-alignment controller was parameterized without weakening the 4 px jaw-clearance guard:
+recenter gain 0.1–1.0, one to five stationary RGB-D observations per pass (median aggregation), and
+two to eight alignment passes. Defaults preserve the previous behavior (gain 1.0, one sample, four
+passes). Each alignment-history entry records the selected settings plus accepted and rejected
+follow-up frames. Offline median-aggregation and parameter-forwarding tests increased the suite to
+**63 tests**.
+
+A planned 16-trial green-largest no-contact matrix began with interleaved configurations, automatic
+homing, and a batch-level rule to stop if the coarse stage repeatedly censored the depth experiment.
+The first three episodes all reached `z=0.20 m` without controller-envelope clipping or contact but
+exhausted the 20-step coarse budget before the 4 px transition criterion:
+
+- configuration A, gain 0.35 / 1 sample / 4 passes, speed 0.05: **7.9 px** final error;
+- configuration B, gain 0.50 / 3 samples / 4 passes, speed 0.05: **6.6 px**;
+- configuration C, gain 0.35 / 3 samples / 6 passes, speed 0.03: **7.5 px**.
+
+Because none entered the parameterized depth-alignment phase, attributing these outcomes to A/B/C
+would be invalid. The batch stopped after 3/3 upstream censorings rather than collecting 13 more
+irrelevant failures. The arm homed after every attempt; final homing maximum error was **0.00864
+rad**. The MCP schema now permits up to 30 coarse steps while retaining the same 4 px criterion.
+The resumed batch should first demonstrate that this larger bounded budget produces depth-stage
+entries reliably; only then should the depth parameter comparison continue.
+
+After restart, a gating trial used the 30-step budget with configuration D (gain 0.20, three
+samples, six passes) at speed 0.03. It still stopped in coarse servo at **12.8 px** after repeatedly
+occupying a 5.5–10 px close-view noise band. Earlier in the same trajectory it had reached 1.9 px
+at `z=0.315 m` and 3.0 px at `z=0.270 m`; there was no clipping or contact. This showed that merely
+waiting longer does not reliably cross the instantaneous 4 px gate.
+
+The pipeline contained a redundant requirement: coarse servo had to meet the final physical 4 px
+jaw-clearance tolerance before invoking the depth top-face alignment stage whose purpose is to
+achieve that precision. A separate `coarse_handoff_tol` now defaults to **12 px** (bounded between
+the requested final tolerance and 22 px). At the bottom height, coarse servo may hand this bounded
+residual to depth alignment; depth alignment and the independent final yawed-pose guard still
+enforce the unchanged physically derived 4 px criterion before descent. This is a phase-interface
+correction, not a relaxed safety gate.
+
+Doug observed that the arm remained roughly 20 cm above the block while making many fine
+corrections and proposed the more natural policy: look, move closer, look and correct again, then
+move closer again. The probe now separates a stable mid-view geometry estimate from a close
+precision view. After coarse acquisition, it estimates width/yaw/top face at the configured
+geometry height, descends without contact to `precision_z` (default **0.15 m EE-z**), reacquires the
+same raised depth body with stationary RGB-D samples, and only then performs bounded fine
+corrections. Metric width/yaw remain anchored to the stable farther observation; the closer view
+updates centroid and top height. The 4 px depth and final-pose guards remain unchanged. The first
+live trial should use `approach_z=0.30 m`, making the visible schedule approximately
+0.45 m overview → 0.30 m geometry/correction → 0.15 m precision/correction, with no grasp descent.
+
+### Staged trials reveal fixed-height correction anti-pattern
+
+*Added by Codex.*
+
+The first staged green-largest trial was rejected after one lateral move: a same-colour candidate
+remained only **6.7 px** from prediction, but its inferred height changed from **55.8 mm to 25.8
+mm**. Because the initial target was at the extreme image edge, this is likely an edge-biased first
+depth estimate; importantly, the failed attempt was retained rather than silently switching bodies.
+
+A specifically selected, better-centred red block completed coarse alignment without envelope
+clipping. At the 0.15 m precision view, eight three-frame median observations yielded top-face
+errors of **56.5, 67.4, 41.0, 32.2, 24.9, 16.9, 13.1, and 10.9 px**. The final six improved
+monotonically and height stabilized around **29–31 mm**, but the 4 px authorization prevented
+contact. At 0.308 m block depth, 10.9 px is roughly **8.5 mm** lateral residual.
+
+Direct observation exposed a more important controller mistake: all eight precision corrections
+occurred at essentially the same Z. This contradicted the intended look → approach → correct →
+approach policy and spent motion on diminishing fixed-view refinements. Precision alignment is now
+a descending staircase from geometry height to `precision_z`: one observation and at most one
+combined X/Y correction per distinct Z, followed immediately by descent to the next view. The last
+close observation authorizes or refuses contact without another same-height correction. The real
+`vision_grasp` MCP schema also exposes these staged controls. Offline tests remain **63/63 passing**.
+
+Two staircase probes then used the same centred red block. With gain 0.7, the eight distinct Z
+levels (`0.3000` through `0.1500 m`) ended at **32.9 px**; with gain 1.0 they ended at **28.1 px**.
+Both avoided clipping and maintained three accepted depth observations per level. The errors stayed
+small through the upper staircase (gain 1.0 reached **4.17 px at z=0.2357 m**) but grew as the
+camera/tool parallax increased below approximately 0.21 m. Inspection exposed a sequencing error:
+each logged value was the *pre-correction* error, and the final level refused contact without ever
+using the one X/Y correction allowed at that Z. The controller now applies at most that one final
+correction, takes a verification observation at the same pose, and cannot correct again there.
+Higher levels descend after their observation even when already within tolerance, ensuring that
+contact authorization comes from the closest view. Offline tests remain **63/63 passing**.
+
+The corrected 0.15 m probe used its final permitted correction and improved **31.22 px → 12.88
+px** in one move. This confirmed the sequencing fix, while also locating a practical perception
+boundary: below roughly **0.21 m EE-z**, wrist-camera/tool parallax model error grows faster than
+the staircase corrects. Rather than repeat fixed-height adjustments, the live contact trial ended
+its four-view staircase at **0.2357 m**, inside the reliable region.
+
+One initial real-grasp attempt was invalid because home-view target coordinates were supplied while
+the arm was still at the close probe pose; the aligned-depth gate rejected the nearest candidate at
+**99.9 px** rather than switching targets. After homing and reacquiring the red target, the next
+recorded attempt succeeded. Its final staircase correction improved **6.69 px → 2.46 px**; the
+independent yawed-pose check improved **7.36 px → 2.42 px**. Compliant descent contacted at actual
+EE **z=0.02796 m**, closed to **28.76 mm**, lifted the block, and passed both proprioceptive and
+task verification (`source_vacant`) with zero air retries and no persistent-high-contact event.
+RGB plus aligned depth were stored at initial, before-close, final-pose, after-lift, and an additional
+held-state observation. This is the first successful contact test of the one-correction-per-Z
+staircase policy and supports using approximately 0.236 m—not the closest possible view—as the
+current calibrated handoff height. The arm subsequently homed normally (maximum joint error
+**0.00844 rad**).
+
+### Volume-collection shakedown stops on yaw observability
+
+*Added by Codex.*
+
+A planned 12-episode interleaved record/replay shakedown used the calibrated staircase policy
+(`acquire_z=0.45`, geometry `z=0.30`, precision `z=0.2357`, gain 1.0, three RGB-D samples, four
+levels, 4 px authorization, speed 0.05). The batch-level stop rule was three total failures or two
+consecutive physical failures. It stopped after four episodes with **1 verified grasp and 3 safe
+pre-contact refusals**:
+
+- green, record-only: verified grasp/lift, zero air retries, no persistent high contact;
+- red, replay condition: staircase reached **2.79 px**, but a near-quarter-turn grasp yaw
+  (`-88°`) moved the target out of the final wrist view; best memory similarity was only 0.560, so
+  replay correctly did not activate;
+- small blue, record-only: target lost after the first large acquisition translation;
+- green, replay condition: staircase reached **1.31 px**, but `+65°` grasp yaw again moved the
+  target out of the final wrist view; best similarity was 0.622, so replay did not activate.
+
+Inspection of the two stored final-pose RGB frames showed that this was not merely an overly strict
+segmentation threshold: after the large wrist rotations, the intended red/green targets were
+physically outside the camera FOV while other blocks and the table remained clearly visible. The
+current pipeline performs the entire grasp-axis yaw only after completing its translational
+staircase. That is adequate for small yaws (the successful red and green grasps used approximately
+`-10°` and `+3°`) but not for arbitrary block orientation. Serious collection can proceed now in a
+declared **low-yaw domain**, using target selection that predicts and limits absolute grasp yaw,
+while general-orientation collection requires interleaving incremental yaw with the descending
+observe/correct staircase so the eye-in-hand target stays visible. Blindly continuing the original
+12-run batch would primarily collect duplicate observability refusals, so the stop rule worked as
+intended.
+
+The controller now implements that interleaving. From the stable depth principal axis it computes
+the shortest gripper-symmetric grasp yaw, then distributes it linearly across the same four
+descending alignment levels. A representative `+65°` grasp therefore observes/corrects at about
+`0°, +21.7°, +43.3°, +65°` while descending `0.3000 → 0.2786 → 0.2571 → 0.2357 m`; a `-88°`
+grasp uses the corresponding negative sequence. Every lateral correction is transformed by the
+current partial wrist yaw, preserving the one-X/Y-correction-per-Z rule. The final pose reaches the
+full geometric yaw before its last verification, eliminating the single large blind rotation that
+moved targets out of frame. A sufficiently similar replay memory may still specialize the final
+yaw within existing bounds; otherwise the distributed geometric yaw is retained. New unit coverage
+checks the symmetric yaw mapping for the orientations observed live. The offline suite is now
+**64/64 passing**. Live resumption should begin with the previously failing `+65°` green target,
+because it is a direct falsification test of the proposed observability fix.
+
+The first live distributed-yaw falsification used four levels on the same rotated green target
+(measured full yaw about `+68.6°`). It retained the target through `+45.8°`, substantially farther
+than the old single final rotation, but the final 22.9° jump lost reacquisition. An eight-level
+repeat reduced increments to roughly 9.5°. That trial retained observations through the entire
+`+66.2°` rotation, proving that distributed yaw fixes the gross FOV-loss problem, but exposed a
+second error: lateral residual grew systematically from **6.9 px at +9.5°** to **42.7 px at
++56.8°**, and the final correction moved the centroid to **113.6 px** error. Thus the current
+positive-yaw correction transform was directionally wrong rather than merely under-sampled.
+
+The calibrated zero-yaw image Jacobian had been rotated by positive tool yaw. Live data show that
+the commanded wrist quaternion rotates the eye-in-hand image axes with the opposite sign relative
+to that convention. Yawed image-servo corrections now use the **inverse tool yaw**; this applies
+both during the descending yaw staircase and during independent final-pose correction. A focused
+unit test fixes the sign convention at a 90° example, and the offline suite is **65/65 passing**.
+The next live attempt should retain eight levels and require the lateral-error trend to shrink,
+not merely keep the target visible, before authorizing contact.
+
+The inverse-yaw live retry falsified that sign-only repair as well: it preserved the target but
+drove the centroid in the opposite image direction, reaching **204.2 px** before the final
+correction and **187.4 px** afterward. The deeper mistake was treating the canonical zero-yaw
+grasp pixel as invariant under wrist rotation. Because the D405 is offset from the EE rotation
+axis, rotating the rigid eye-in-hand assembly changes the correct image location even when the EE
+and block remain perfectly aligned in world XY. Neither sign of a simple planar rotation can force
+the target back to the zero-yaw pixel without introducing physical error.
+
+The revised controller separates the invariants. It first completes the proven translational
+staircase at zero yaw. It then holds the verified EE X/Y fixed and rotates to the grasp axis in
+increments bounded to **10°**, reacquiring the same raised depth body and checking measured XY
+drift after every increment. No X/Y corrections occur during this yaw-only tail. For substantial
+yaw (≥15°), final authorization now requires continuous object identity/height and ≤**4 mm** EE XY
+drift rather than comparison with an invalid canonical pixel. Small yaws retain the calibrated
+pixel guard and correction path. This is explicitly a kinematic-hold verification, not a claim that
+the yaw-dependent camera projection has been calibrated. Unit coverage fixes the increment bounds
+(65°→7 steps, −88°→9), and the offline suite is again **65/65 passing**. The direct live test remains
+the rotated green target; success requires continuous visibility through all increments followed by
+contact and verified lift.
+
+The direct live test validated the revised yaw invariant through perception. The rotated green
+target remained depth-validated through **seven** increments from `+8.7°` to `+60.7°`; measured EE
+XY drift increased only from **0.55 mm to 0.73 mm**, far below the 4 mm guard. The controller
+therefore authorized real descent. Contact occurred, but one fingertip stopped on the block top at
+actual EE **z=0.04766 m**, **21.7 mm** above the intended body grip. The controller detected
+`persistent_high_contact`, did not claim a grasp, and retained the complete failed episode.
+
+This localizes the next constraint to jaw approach clearance. The approximately 29.8 mm-wide block
+was approached with only 41.8 mm opening—about **6 mm nominal clearance per side**, appropriate
+after a calibrated small-yaw pixel check but too narrow while large-yaw hand-eye translation remains
+kinematically rather than visually calibrated. Substantial-yaw (≥15°) approaches now request object
+width + **30 mm** total clearance (about 15 mm per side), bounded by the existing **65 mm** clutter
+cap rather than fully opening to 80 mm. Small-yaw behavior is unchanged. Focused unit coverage checks
+the threshold and cap; the offline suite is **66/66 passing**. The same green contact is the next
+trial, and success requires descending past the prior 47.7 mm top-contact height and producing a
+verified lift.
+
+The first widened-clearance retry was censored before yaw: four-level zero-yaw verification ended
+at **7.89 px**, so no contact occurred. An eight-level translational retry then converged to **2.09
+px** and entered incremental yaw. The target remained visible through `+59.9°` with only **0.58 mm**
+XY drift, but the geometry requested `+69.9°`; that final increment moved the target outside the
+wrist FOV. The widened jaws again never reached contact. Combined with the prior successful
+continuous observation through `+60.7°`, this establishes an empirical camera visibility boundary
+near **±60°** at the current pose.
+
+Geometric and replay yaw are now clipped to ±60° and the outcome records both requested and applied
+yaw. This accepts bounded axis mismatch in exchange for continuous observability. For the current
+34 mm-wide, 66 mm-long block, the approximately 10° residual mismatch produces a projected jaw
+span still comfortably inside the roughly 64 mm widened opening. Unit coverage fixes both positive
+and negative clipping behavior; the offline suite is **67/67 passing**. The next retry should use
+eight translational levels, terminate yaw at +60°, and finally exercise the widened-clearance
+contact hypothesis.
+
+Subsequent live trials clarified the remaining limits. With the corrected zero-yaw centering and
+yaw-only tail, one `+60.7°` green attempt retained the target through all seven increments with
+**0.73 mm** maximum XY drift and authorized contact. It nevertheless stopped a fingertip at
+**z=0.04766 m** (`persistent_high_contact`, 21.7 mm high), motivating the bounded wider opening.
+The first widened retry was censored at **7.89 px** before yaw. An eight-level retry reached **2.09
+px**, remained visible through `+59.9°`, then lost the target only when requesting `+69.9°`; this
+established and motivated the ±60° visibility cap. The next capped trial was again censored by
+zero-yaw alignment (**13.26 px** after a worsening final correction), so it never exercised the
+wider jaws.
+
+The collection resumed in the declared low-yaw domain, but the scene's remaining eligible-looking
+targets were at workspace/image boundaries. Episode 6 selected a blue block near the right side;
+coarse servo recorded controller clipping and the depth-alignment centroid diverged to **44.62 px**.
+No yaw or contact occurred. At this point the batch stop rule was invoked: continuing to episode 12
+would primarily sample known target-selection/pathology regimes rather than manipulation
+repeatability.
+
+The architectural conclusion is that a volume runner must make **eligibility** an explicit recorded
+decision before grasp execution: minimum component/depth-body area, image-edge margin, predicted
+controller-envelope margin, supported yaw domain, and sufficient separation for the chosen jaw
+opening. Refusals remain valuable episodes, but they should form a deliberately sampled stratum,
+not accidentally dominate the grasp-success cohort. The incremental-yaw identity/kinematic-hold
+mechanism is retained as useful progress, but high-yaw contact is not yet promoted to the volume
+domain. The arm homed normally after the adaptive stop.
+
+An explicit `select_grasp_target` Hebbot skill now implements that eligibility decision. It retains
+every detected instance and annotates it with predicted symmetric grasp yaw, image/controller proxy
+margin, nearest-neighbor distance, eligibility score, and a list of rejection reasons. Initial
+volume-domain defaults require at least **700 px** object area, **100 px** image-edge margin,
+predicted absolute yaw ≤**30°**, and **80 px** nearest-neighbor clearance. Rejection reason values
+are `object_area`, `image_or_controller_margin`, `yaw_domain`, and `neighbor_clearance`. Eligible
+candidates rank by area and robustness margins rather than whichever color blob happens to be
+largest. This keeps the deliberate model-layer target decision distinct from execution: the
+selector recommends and records; `vision_grasp` still performs perception, alignment, contact, and
+verification as a separate episode. Mock/offline coverage checks registration, ranking, and reason
+retention; the suite is **68/68 passing**. After MCP reload, the next live action should call the
+selector before any grasp and either execute its top candidate or explicitly record that the scene
+has no volume-eligible target.
+
+The first live selector call retained all 14 detected candidates and chose exactly one: a red block
+at `(191,339)` with 741 px area, 140 px edge margin, 112.5 px nearest-neighbor clearance, and
+predicted `+20°` yaw. `vision_grasp` attempted it in record-only mode. One alignment attempt reached
+**1.83 px**, but the retry ended at **6.22 px** and safely refused contact. The marginal component
+area produced substantial centroid/depth variability, so the original 700 px criterion was too
+permissive for a volume-success cohort even though the decision trace was correct and reviewable.
+
+Eligibility defaults are tightened to **1,000 px** minimum area and **110 px** image/controller
+proxy margin; yaw ≤30° and neighbor clearance ≥80 px remain unchanged. These are cohort-quality
+thresholds, not universal manipulation limits: smaller/edge targets remain valuable deliberately
+sampled refusal or capability-expansion episodes. With the blocks in their current positions, the
+honest selector result may be zero eligible targets. The arm homed normally and the offline suite
+remains **68/68 passing**.
+
+After the 2026-07-29 MCP restart, Codex repeated the tightened eligibility decision against a fresh,
+persisted aligned RGB-D observation. The camera returned 640×480 color and depth, 78.7% valid depth
+coverage, and 0.5133 m center depth; the arm was nominal at its canonical home pose. The selector
+again returned **zero eligible targets**, which is the expected abstention rather than an execution
+failure. The strongest candidate was a 1,637 px blue block at `(538.9,271.2)`, predicted yaw `+2°`
+and 113 px neighbor clearance, rejected solely because its 100.1 px edge/controller margin missed
+the 110 px cohort threshold. The centered red candidate at `(188.8,337.5)` was rejected solely for
+area (898 px). Repeating a grasp on either would intentionally sample a known boundary/noisy regime,
+not the desired repeatability cohort. This confirms that the selector survives reload and prevents
+volume collection from silently degenerating into boundary-condition retries. No motion was issued;
+the next high-information step requires either arranging several blocks inside the eligible visual
+domain or explicitly declaring a capability-expansion trial with relaxed, recorded criteria.
+
+Codex then attempted autonomous scene arrangement with two deliberately short `shove` trials,
+persisting aligned RGB-D observations and returning home before every comparable selector decision.
+The first trial pushed the near-threshold blue instance image-left by a commanded 60 mm. Its home-view
+edge margin improved from **100.1 px to 116.9–118.4 px**, but contact rotated the block from predicted
+grasp yaw **+2° to −43°**. It therefore exchanged an edge-margin rejection for a yaw-domain rejection
+instead of producing an eligible volume target. An immediate post-shove selector observation also
+exposed a protocol mistake: `shove` retreats only to about z=0.20 m, where component scale and apparent
+geometry are incomparable with home-view eligibility thresholds. All subsequent comparisons were made
+only after explicit homing.
+
+The second trial requested a 100 mm image-left shove of the low-yaw green instance seen at
+approximately `(612.5,366.2)`. After homing, that right-edge instance was essentially unchanged at
+`(609.9,368.0)`, while a different green instance had moved from about `(378.5,409.6)` to
+`(279.0,400.5)` and appeared at **46°** predicted yaw. Both motions completed without robot fault and
+the arm returned nominally home, but the declared stop condition was invoked after the second
+uncontrolled pose/identity result. The architectural conclusion is that `shove` cannot yet serve as
+an autonomous scene arranger: its home-view target pixel is apparently resolved after a viewpoint
+transition without preserving object identity, and free pushing does not control final yaw. The
+smallest meaningful follow-up is to give `shove` the same persistent RGB-D instance/relational identity
+used by grasp, and to verify target identity before contact and after retreat. Until then, manual
+placement or explicitly sampled capability-expansion grasps are more scientifically honest than
+repeated open-loop shoves.
+
+Codex implemented the smallest identity-preserving `shove` revision. Before any camera motion, the
+skill now binds the requested overview pixel to a connected raised RGB-D body and records its
+top-height fingerprint. During servoing, every observation must reacquire a body of the requested
+colour within a bounded pixel gate and within 18 mm of that physical height. Loss of continuity is
+now an explicit pre-contact refusal; critically, the previous code merely broke out of its tracking
+loop and proceeded to push from the last arm pose. Contact is authorized only after the same body is
+observed at the bottom view within the existing 4 px alignment criterion. After the push and retreat,
+the skill attempts another same-height RGB-D observation and records it as evidence rather than
+silently assuming the requested object moved. The outcome includes the complete identity history,
+rejected-frame counts, expected height, and post-push identity result. A focused offline regression
+forces identity loss after initial acquisition and verifies that no commanded pose drops below 0.20
+m. The complete offline suite is **69/69 passing** and `git diff --check` is clean. A server reload is
+required before the live falsification: request the previously ambiguous right-edge green target and
+require either continuous identity through contact or a safe abstention—never movement of a different
+green instance.
+
+After reload, the live falsification selected the right-edge green instance at home-view
+`(610.1,368.0)`. `shove` bound it to a raised-depth body at `(621.63,377.34)` with **2,926 depth
+pixels** and a **31.2 mm** top-height fingerprint (one transient frame rejected). After the skill's
+legacy vertical transition to z=0.34 m, three frames failed the bounded identity gate. The revised
+skill returned `pushed=false` and `target identity/alignment unavailable before contact`; no low-Z
+motion, contact, or movement of either green block occurred. After homing, the requested instance
+remained at `(609.7,366.6)` and the other green remained at `(279.1,399.8)`. The arm was nominal
+(home maximum joint error 0.00402 rad). This validates the refusal and localizes the remaining issue:
+the old shove pipeline narrows the view before centering an edge target.
+
+The servo now starts at the calibrated **z=0.45 m overview ceiling**, centers the same depth-bound
+body there, and descends through the existing error-gated staircase only after it remains visible.
+The bounded location/height continuity and pre-contact refusal are unchanged. The regression now
+also fixes the initial z=0.45 behavior; the complete suite remains **69/69 passing** and
+`git diff --check` is clean. Another MCP reload is required for the direct retry.
+
+The reloaded direct retry preserved the right-edge green identity throughout the complete overview
+servo. The initial body was `(618.41,367.79)`, **2,214 depth pixels**, and **27.8 mm** high. Across
+15 observations at z=0.45 m, the body remained inside the bounded gate with observed height
+20.8–31.8 mm. Servo error improved from **294.61 px to 33.34 px**, but then occupied a noisy
+33–42 px plateau. The old shove controller required ≤22 px before descending, so it repeated all
+corrections at the same height, exhausted its loop, and correctly returned `pushed=false`. No contact
+or block displacement occurred; the requested green returned at `(606.0,362.8)` and the other at
+`(275.9,401.4)` within ordinary viewpoint/segmentation variation. The arm homed normally (maximum
+joint error 0.00828 rad). Identity preservation is therefore validated; the remaining failure is the
+same fixed-height correction anti-pattern previously removed from grasp.
+
+`shove` now uses ten distinct observation heights from **z=0.45 to 0.20 m**. Each level permits at
+most one combined X/Y correction and immediately moves closer; it no longer waits for a 22 px gate
+at a fixed overview height. At the final height, one correction is followed by one observation-only
+verification, and the unchanged 4 px criterion alone authorizes contact. A focused unit test fixes
+the strictly descending, unique-height schedule. The complete suite is **70/70 passing** and
+`git diff --check` remains clean. This change needs an MCP reload before the next live retry.
+
+The reloaded staircase retry retained the same green body through all ten distinct heights and final
+verification: initial **2,860 depth pixels / 31.5 mm**, with observed heights 23.1–33.3 mm. Error
+fell from **298.27 px at z=0.45** to 32.55 px at z=0.3111, then remained 31–36 px through z=0.20;
+final observation-only verification was **33.54 px**. The skill correctly refused contact and the
+block did not move. A state observation before homing located the cause: EE y was **+0.27864 m**,
+effectively pinned at the hard-coded +0.28 m servo clamp, while x and z remained ordinary. Thus the
+stable residual is a recorded software controller-envelope boundary, not target loss, depth noise,
+or Franka reach failure. The arm homed normally (maximum joint error 0.00844 rad).
+
+For `shove` only, the lateral controller envelope is expanded from ±0.28 to **±0.34 m**. This is a
+narrow capability-expansion policy for moving edge blocks inward; grasp policies and their cohort
+limits are unchanged, as are the 4 px pre-contact gate and hardware protections. Every servo history
+entry now records commanded XY and whether software clipping occurred, and the shove outcome records
+the active y limit. A focused regression verifies that the arranger can command y=+0.34 m without
+altering other skills. The complete offline suite is **71/71 passing** and `git diff --check` is
+clean. An MCP reload is required for the direct capability-expansion retry.
+
+The capability-expansion retry did command beyond the former envelope without clipping. The same
+green body remained depth-verified from z=0.45 through z=0.3389 while commanded y progressed from
+0.0606 to **0.2965 m**. Height remained 24.9–33.3 mm. At z=0.3389 the residual was still **117.09
+px**; after the full correction and descent to z=0.3111, three frames failed the fixed 90 px
+continuity gate. The skill safely refused before contact and the arm homed normally. This falsifies
+the hypothesis that ±0.28 m saturation was the only blocker, while confirming that the ±0.34 m
+capability is reachable without a Franka fault.
+
+The trace exposes a tracker/controller mismatch: a controller-authorized correction larger than the
+tracker's next-frame displacement gate guarantees rejection of the motion it just commanded. Shove
+continuity is now command-aware: the next observation gate is `clip(previous_error + 40 px, 90,
+180)`, recorded per observation. The other same-colour green is over 300 px away in the overview and
+the physical height fingerprint remains mandatory, so this bounded expansion admits predicted servo
+motion without restoring unbounded nearest-colour substitution. Offline checks cover the lower,
+live-relevant, and upper gate bounds; the full suite remains **71/71 passing** and `git diff --check`
+is clean. Another MCP reload is required for the direct retry.
+
+## 2026-07-30 — Codex literature/project review: Gemini Robotics ER 2
+
+*Added by Codex. Earlier notebook entries were written by Claude; Claude may return to review,
+comment on, and contribute to this work.*
+
+Primary source: Steven Hansen and Peng Xu, [“Introducing Gemini Robotics ER
+2”](https://blog.google/innovation-and-ai/models-and-research/google-deepmind/gemini-robotics-er-2/),
+Google DeepMind, 2026-07-30. Context: Google’s prior public
+[Gemini Robotics-ER 1.6 announcement](https://blog.google/innovation-and-ai/models-and-research/google-deepmind/gemini-robotics-er-1-6/),
+2026-04-14.
+
+### What Google is claiming
+
+Gemini Robotics ER 2 is an embodied-reasoning model intended to act as a **high-level robot brain**,
+not as the motor controller itself. It accepts streaming video, audio, and text; converses with a
+human; plans multi-step physical tasks; calls user-defined functions, conventional robot APIs, or a
+lower-level vision-language-action (VLA) model; monitors execution; and adapts when progress or
+failure evidence changes. The model is integrated with the bidirectional Gemini Live API so planning
+can overlap ongoing execution rather than creating a serial stop–think–act loop. Google states that
+it is publicly available through the Gemini API and Google AI Studio, with Gemini Enterprise Agent
+Platform access in private preview.
+
+The announcement emphasizes four advances over ER 1.6:
+
+- improved orchestration across real VLA control, simulated VLA control, and human teleoperation;
+- continuous video-based progress and success/failure understanding;
+- temporal “moment finding” for identifying when a critical event or task transition occurs;
+- collaboration among heterogeneous robots through a shared semantic task representation.
+
+Reported temporal evaluation numbers deserve calibrated interpretation. Five-bin progress
+classification reaches **57.4% accuracy**. This is potentially useful supervisory context, but is
+far from reliable enough to serve as physical ground truth. Moment finding reaches **91.3% accuracy**
+with **0.96 s mean absolute temporal error**, reportedly at four times the execution speed of the
+larger comparison category. That is promising for task-level transitions such as “pouring is done,”
+but roughly one second remains far too coarse for contact servoing, collision response, or grasp
+closure. Google also reports improvements in raw-video success/failure detection, spatial VQA,
+generalized instrument reading, safety-instruction following, and human-proximity evaluation, but
+the announcement does not provide enough methodological detail to treat those claims as independent
+evidence of deployment reliability.
+
+### Architectural correspondence with Hebbot
+
+The correspondence is unusually direct:
+
+| Gemini Robotics ER 2 | Hebbot |
+| --- | --- |
+| high-level embodied-reasoning model | deliberate foundation-model layer |
+| declared robot/VLA/navigation tools | registered Hebbot MCP skills |
+| lower-level VLA execution | future reflexive learned skill/policy |
+| continuous multimodal observation | wrist RGB-D, robot state, force, and episode checkpoints |
+| progress classification | episode phase/progress labels |
+| moment finding | contact, closure, lift, slip, completion, and failure boundaries |
+| success/failure monitoring and retry | verification, recovery selection, and adapted replay |
+| robot APIs | Franka, gripper, D405, cuRobo, and hardware processes |
+
+This supports Hebbot’s deliberate separation of concerns. A foundation model should choose goals,
+decompose tasks, interpret ambiguous evidence, and select tools. The substrate should expose stable,
+inspectable skills and preserve their complete outcomes. Fast contact-sensitive execution should
+remain in classical controllers or learned reflexive policies. Hardware processes should remain
+below all three. ER 2’s explicit handoff to arbitrary VLAs and robot APIs is strong external evidence
+that this layered design is not merely scaffolding on the way to an end-to-end policy; it is a useful
+long-term interface between semantic reasoning and heterogeneous embodiments.
+
+Our current `shove` investigation is a concrete example. A model like ER 2 might recognize that the
+block has not moved, classify the step as incomplete, and propose a recovery. It cannot substitute
+for the substrate’s millimetre-scale RGB-D identity gate, Cartesian-envelope telemetry, 4 px contact
+authorization, or Franka force/controller reflexes. Conversely, Hebbot’s present synchronous tool
+loop cannot yet watch video continuously, reason ahead during motion, or recognize task-level
+progress with the semantic breadth Google demonstrates. The two systems address complementary
+parts of the stack.
+
+### What the announcement does not demonstrate
+
+ER 2 is not presented as an online or continually self-improving robot. The announcement does not
+claim persistent episode storage, retrieval of analogous physical experience, adapted replay,
+cross-episode credit assignment, local policy training from verified executions, or distillation of
+repeated deliberation into faster reflexes. It improves the **deliberate orchestration layer**; it
+does not by itself close Hebbot’s central learning loop:
+
+`deliberate execution → complete episode → retrieval → adapted replay → verified dataset → distilled reflex`
+
+This distinction is strategically important. Hebbot should not attempt to out-train Google on a
+general embodied foundation model. Its scientific opportunity is to become the embodiment-specific,
+experience-preserving substrate beneath frontier reasoners: the system that grounds their proposals
+in depth, force, kinematics, controller state, and remembered consequences, and then converts repeated
+verified experience into a cheaper local execution policy.
+
+### Practical implications and proposed evaluation
+
+ER 2 could contribute to Hebbot in at least five bounded roles:
+
+1. deliberate planner and Hebbot MCP tool caller;
+2. offline critic that labels task phase, progress, failure moments, and recovery opportunities;
+3. teacher that proposes structured skill parameters and relational recovery plans;
+4. semantic retriever or reranker over stored episodes;
+5. label generator for the verified corpus used to train a small local policy.
+
+The smallest high-value evaluation should be **offline**, preserving the distinction between model
+judgment and hardware truth. Construct short episode videos from saved Hebbot RGB frames, optionally
+paired with human-viewable depth visualizations and structured state/force summaries. Include:
+
+- verified grasp/lift successes;
+- pre-contact alignment refusals;
+- the wrong-instance open-loop shove;
+- the corrected identity-preserving abstention;
+- controller-envelope saturation;
+- temporal tracking loss after a commanded displacement.
+
+Ask ER 2 to emit a fixed schema containing target identity, task phase, progress bin, success/failure,
+critical-event timestamp, causal hypothesis, confidence, and recommended next Hebbot skill/parameters.
+Score those fields against the episode database, depth/force evidence, and our written causal analyses.
+The main scientific question is not whether the prose sounds intelligent; it is whether its labels
+and recovery rankings are calibrated enough to improve retrieval, episode triage, or subsequent live
+success over our current structured heuristics.
+
+If that offline gate passes, the next controlled integration would allow ER 2 to select among a
+small whitelist of no-contact Hebbot observations/probes while Hebbot retains parameter validation,
+episode recording, and all motion/contact authorization. Only after measured improvement should it
+orchestrate live contact skills. Meanwhile, its video annotations could immediately enrich the
+training corpus for the tiny local feasibility/progress models that advance Hebbot’s compression
+thesis.
+
+### Conclusion
+
+Gemini Robotics ER 2 is the clearest external validation so far of Hebbot’s proposed deliberate
+layer: a multimodal physical-world reasoner coordinating inspectable lower-level tools while
+monitoring temporal progress. Its strongest lesson for Hebbot is to evolve from isolated tool-call
+snapshots toward concurrent observation, explicit task progress, and event-boundary records. Its
+most important limitation is equally clarifying: a stronger reasoner is not the same as a system
+that learns persistently from its own embodied history. Hebbot’s differentiating milestone remains
+turning verified deliberate episodes into retrieval gains and ultimately distilled local reflexes.
+
+### 2026-07-30 Codex continuation: adaptive tracking succeeds; close-view parallax remains
+
+After the Gemini Robotics ER 2 review, the command-aware `shove` retry resumed. The right-edge green
+body remained continuously depth-verified through all ten staircase levels and final verification.
+Its initial identity was **3,182 depth pixels / 26.5 mm** high; observed height remained 20.0–32.5
+mm. The adaptive tracker gate expanded from 90 to 180 px for the large overview corrections, then
+contracted to 124.1 and 90 px as residuals shrank. No frame was rejected and no same-colour identity
+substitution occurred. Commands reached y=**0.3049 m** without software clipping.
+
+Servo error fell from **297.27 px at z=0.45** to 13.93 px at z=0.3111, 7.42 px at z=0.2833, and
+**4.87 px at z=0.2556**. Continuing closer made the estimate worse: 9.35 px at z=0.2278 and 14.95
+px at z=0.20. The one permitted final correction recovered only to **8.42 px**, so the unchanged
+4 px contact guard correctly refused the shove. No block moved, and the arm homed normally (maximum
+joint error 0.00825 rad). This validates command-aware continuity and reproduces the close-view
+hand-eye/parallax boundary previously measured in `vision_grasp`: more proximity below roughly
+0.25 m reduces alignment accuracy rather than improving it.
+
+Visual authorization for `shove` now terminates at calibrated **z=0.255 m**. This changes only the
+perception/execution handoff: after authorization, the closed gripper still stages beside the block
+at z=0.20 and performs the physical push at the requested z=0.006. Thus the controller does not
+pretend the closest camera view is the most accurate, while the contact trajectory remains unchanged.
+The active alignment height is recorded in both refusal and push outcomes. Offline coverage fixes
+the calibrated value; the full suite remains **71/71 passing** and `git diff --check` is clean. An
+MCP reload is required for the direct contact retry.
+
+The z=0.255 handoff retry again retained the same right-edge green identity through every scheduled
+view, with no rejected frames or controller clipping. The initial body was **2,572 depth pixels /
+34.3 mm**; observed heights remained 23.1–27.9 mm after the overview. Error fell from **297.33 px**
+to 22.72 px at z=0.3417, 18.95 px at z=0.3200, and a near-gate **4.11 px at z=0.2983**. The
+controller applied its one correction there but immediately descended without observing its result.
+Subsequent views worsened to 9.46 px and then 25.22 px at z=0.255; final verification was **20.18
+px**, so contact was correctly refused. No block moved and the arm homed normally (maximum joint
+error 0.00838 rad). This shows that a universal fixed “best Z” is too brittle under frame-to-frame
+variation, while also revealing that the staircase discarded a potentially successful correction.
+
+`shove` now performs an **observation-only verification** after any level whose pre-correction error
+is ≤8 px. A verified residual ≤4 px authorizes execution at that current, reliable view. If it does
+not pass, the arm descends to the next level without a second correction at the same Z. The bottom
+level retains the same correction-plus-verification behavior. This preserves the one-correction-per-Z
+rule while allowing the controller to accept demonstrated convergence before entering a worse
+close-view regime. The 8 px threshold is recorded as a calibrated controller constant; the complete
+offline suite remains **71/71 passing** and `git diff --check` is clean. Another MCP reload is
+required for the direct retry.
+
+The near-gate verification retry produced the first identity-preserving autonomous shove. The same
+right-edge green body remained continuous from the overview through z=0.2767, with observed height
+22.0–33.2 mm and no controller clipping. A verification at z=0.320 worsened 2.36→10.16 px and the
+staircase correctly continued; z=0.2983 verified 4.22→5.26 px and also continued. At z=0.2767, the
+single correction verified **2.42→1.83 px**, authorizing contact. The closed gripper executed the
+configured 100 mm inward shove path from `(0.4121,0.3323)` to `(0.4089,0.1983)` at z=0.006. The
+immediate close-view post-identity check did not see the displaced body, but the home-view comparison
+verified that the requested green moved from `(604.5,362.4)` to `(587.0,354.6)` while the other green
+remained `(275.2,400.5)`→`(276.1,401.3)`. The arm homed normally (maximum joint error 0.00832 rad).
+
+The physical result was only a partial arrangement success. The target's image-edge margin improved
+from **34.5 to 52.0 px**, but its predicted grasp yaw changed from **+10° to −75°** and translation
+was only about 20 px despite the longer commanded path. The pre-push scene explains this surprise:
+the red block at `(517.9,376.0)` was only 87.7 px away and lay directly across the image-left push
+corridor. The green appears to have translated into that neighbour and pivoted rather than sliding
+freely. Thus identity tracking, staged alignment, authorization, and contact execution are now
+demonstrated; the next missing arranger capability is **corridor occupancy**, not further servo
+tuning. A deliberate next step is to move the obstructing red block into open central space before
+attempting another inward green shove, and eventually make corridor clearance an explicit recorded
+precondition rather than relying only on nearest-neighbour distance.
+
+A follow-up attempt tried to clear that corridor by moving the obstructing red instance at
+`(503.8,374.6)` image-left by 80 mm. The skill initially bound a **23.6 mm** raised red body, made
+one overview correction, then lost bounded identity at z=0.4283 and safely refused before contact.
+After homing, the red remained at `(503.8,374.7)` and both greens were unchanged. The arm was nominal
+(maximum home joint error 0.00827 rad). This failed attempt is retained: an object that is a valid
+home-view colour component may still be a poor depth-body servo target near adjacent objects. One
+eligible, well-separated low-yaw red target remains at approximately `(185,335)`, so the scientifically
+useful next step is to resume verified grasp collection on that admitted target rather than repeatedly
+forcing the blocked arrangement corridor.
+
+The selector-admitted red target was then used for a record-mode `vision_grasp` episode with the
+calibrated low-yaw staircase. It failed safely before descent. The first aligned-depth body measured
+**48.3 mm** high; subsequent accepted frames measured 31.3 and 35.8 mm. Because continuity remained
+anchored to the anomalous initial height, six stationary frames were rejected and the episode ended
+`target lost or rejected by aligned-depth gate`. There was no controller clipping, contact, or
+mechanical attempt. RGB plus aligned depth were stored, and the arm homed normally (maximum joint
+error 0.00516 rad). The selector's RGB-only area/margin/yaw eligibility therefore admitted a target
+whose physical depth identity was not stable enough for the executor—a cohort-definition mismatch,
+not evidence against the grasp policy.
+
+`select_grasp_target` now evaluates every RGB candidate against **three stationary aligned RGB-D
+captures**. Admission requires a connected raised body in all three frames and top-height spread
+≤**12 mm**. It records observation count, median physical height, height spread, and median depth-body
+area for every candidate. Failed physical continuity adds the explicit rejection reason
+`depth_identity`; the existing RGB area, image/controller margin, yaw-domain, and neighbour-clearance
+reasons remain independently visible. This moves a proven executor precondition into the deliberate
+volume-cohort decision without conflating selection with execution. Focused ranking coverage checks
+the new reason; the complete suite remains **71/71 passing** and `git diff --check` is clean. An MCP
+reload is required before asking the selector for the next volume target.
