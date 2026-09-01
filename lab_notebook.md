@@ -3695,3 +3695,119 @@ so the answer is probably not simply "trust colour".
    none of the above addresses.
 4. Only then resume collection. Running `practice` on the current `vision_grasp` would generate
    failures, not a corpus.
+
+---
+
+## 2026-09-01 (cont.) — ab initio: rebuilding perception from scratch, and what it exposed
+
+*Added by Claude. Doug's instruction was to set everything aside and build two functions from
+nothing: one that says where the target is in the image, and one that loops movement commands
+until the gripper straddles it, re-looking every iteration. Doing that took four hours of
+accumulated assumptions out of the loop, and three of them turned out to be wrong.*
+
+### Finding #151 — the servo was never the problem; the map between the camera and the hand is
+
+| # | Finding |
+|---|---------|
+| 151 | **A from-scratch locate-and-servo loop converged to 0.8 mm — an order of magnitude better than the production pipeline managed all day — and the grasp still closed on air, which localises the fault precisely: image-space alignment is excellent and the camera-to-hand map is wrong.** The ab initio loop reached **1.3 px (0.8 mm)** in two corrections (154 → 25 → 1.3 px) against production's best of 3.45 px. It then failed at contact exactly as the production skill had, stalling with the fingertips **26.5 mm** up against a **24.9 mm** block. Eight touch probes followed, at every position implied by `_vg_grasp_pixel`, by two bisections toward the camera axis, by the camera axis itself, by the stored `calib_result_2026-06-09.json`, and at four points around the pose that put the block dead-centre in frame. **All eight hit bare table** (contact_z 0.0170–0.0181). Meanwhile `probe_table` at the plane origin read **0.0164 against June's 0.0165**, so forward kinematics and the table reference are intact to 0.1 mm. Kinematics sound, image servo sound, and the transform between them broken — one fault that explains every failure of the day, including why the production skill aligns to 2.9 px and then descends somewhere else. |
+
+### Three assumptions measured and found wrong
+
+**The pixel-to-metre gain is 11% too high.** Two 40 mm test moves gave a full Jacobian:
+
+```
+J = [[ -31, -679],     du/dx  du/dy
+     [-683,  -18]]     dv/dx  dv/dy     px/m
+```
+
+Clean and symmetric — u tracks y, v tracks x, 3–4% cross-coupling (≈2.3° of camera yaw). But
+both dominant gains are **681 px/m where the pinhole model on the measured depth predicts 765**.
+The effective focal length is 353.6 px, not the 394.5 px the intrinsics report. Every correction
+computed from `fx/z` overshoots by 11%.
+
+**Fixed colour thresholds are not stable across the frame.** The first locate() lost the block
+completely at the image centre: it separates from blue by up to 82 counts but from red by as
+little as **24**, depending where it sits. Replacing the thresholds with the target's own
+normalised chromaticity — learn what it looks like, then find that — gave npix **729 / 765 / 762**
+across three poses, against the production path's **3293 vs 762 from an identical pose**. The
+production `npix` instability is a thresholding artefact, not a perception limit.
+
+**Both sensors are worse far away, not closer.** Descending straight down over a fixed block:
+
+| EE z | camera→block | chroma_g | npix | depth height (true ≈28 mm) | depth σ |
+|---|---|---|---|---|---|
+| 0.479 | 0.506 | 0.497 | 833 | **8.2 mm** | **146 mm** |
+| 0.398 | 0.420 | 0.538 | 1392 | 23.5 mm | 10 mm |
+| 0.337 | 0.355 | 0.541 | 1946 | 19.1 mm | 4.7 mm |
+| 0.277 | 0.294 | 0.546 | 2895 | 25.2 mm | 4.8 mm |
+| 0.228 | 0.243 | **0.558** | **4231** | **25.5 mm** | 7 mm |
+
+Colour recovers toward its reference and gains 5× the pixels; depth goes from a 146 mm-σ reading
+that calls a 28 mm block 8 mm tall, to a stable 25.5 mm. **The pipeline takes its identity anchor
+and its geometry at acquire_z=0.45, the one distance where both sensors are worthless**, and then
+spends the episode defending that measurement against better ones. This is the mechanism behind
+attempt 5's 58.1 mm anchor and the 07-30 entry's 48.3 mm one — not bad luck, the expected σ at
+that range. (Worth confirming against the datasheet: at EE z=0.45 the camera sits ~0.52 m from the
+table, which may be at or past the D405's rated maximum.)
+
+### On borrowed constants
+
+The ab initio loop was honest right up to the point where it needed to know where the gripper
+is, and there it borrowed `_vg_grasp_pixel` — the one constant the day's evidence already
+implicated. The alignment to that target was excellent and the target was wrong. Worth recording
+as a methodological note: the value of building from scratch was entirely in the parts that were
+rebuilt, and the single borrowed constant is where it failed.
+
+The stored hand-eye file is no better. `calib_result_2026-06-09.json` places the camera origin
+17 mm from the tool axis, which is plausible, but its rotation puts the camera's x-axis **21.6°
+away** from where the measured Jacobian puts it, and the block position it predicts sits **15 mm
+below the table**. Probed, it is bare table.
+
+### What was built instead
+
+Doug's framing settled the design: *"No one has to calibrate a toddler; they do it themselves"*,
+and *"bench time is there to burn — our incentive is to use the hardware more, not less."*
+
+`touch_find` (`skills/selfcal.py`) is the toddler loop. Look from close range, predict where the
+target is, then spiral-probe outward with the fingers nearly shut — a point probe — until they
+stop above the table. The table plane comes from the run's own low contacts rather than a stored
+constant, so a drifted table cannot corrupt it. What it returns is the **see-versus-feel
+residual**, which is the correction itself. The search is deliberately brute, up to 121 probes
+over ±90 mm, because that is the trade the bench allows: many cheap probes in exchange for
+deleting a constant nobody trusts.
+
+`perception/target.py` carries the validated chromaticity perception, and the measured
+`EFFECTIVE_FX = 353.6` replaces the intrinsic value in the seed prediction. Nothing in either
+module reads `_vg_grasp_pixel` or the June calibration file.
+
+### The toddler loop ran, and broke on something worth knowing
+
+`touch_find` worked as a mechanism on its first live run. It looked, predicted, spiral-probed
+**51 times**, and found an object: five hits reading contact_z **0.0441–0.0446** against a
+self-measured table plane of 0.0173 — an object **27.0 mm** tall, matching the green block's 28 mm.
+No stored constant was consulted anywhere in that chain. The see-versus-feel residual came out at
+**76.5 mm**, which if it were a clean camera-to-hand offset would be the correction the whole day
+had been missing.
+
+It is not clean, and the reason is the finding:
+
+| # | Finding |
+|---|---------|
+| 152 | **A point probe moves the thing it is measuring, so a touch search that presses many times cannot be compared against a single earlier look.** The touched "object" spanned **45 mm in x and 54 mm in y** — far too large for one 60×26 mm block, and a photograph of the region afterwards showed exactly one block there. Fifty-one 5 N presses, several of them landing on the block, had walked it across the table; the footprint recorded was the union of its positions over time, not its shape. Consequently the 76.5 mm residual pairs a *feel* from one moment with a *look* from another, and it does not transfer: re-observing the block cleanly and probing both the corrected and the uncorrected prediction produced bare table at each (0.0179 and 0.0185). **The measurement disturbed its own subject, which is a property of touch-based self-calibration and not a bug in this implementation.** The fix is structural rather than a threshold: re-observe visually immediately before and after every hit, and admit a (see, feel) pair only when the target did not move between them. Gentler probes help — the confirming probes at force_thresh 3 read Fz −0.04 and +0.06, barely touching — but they do not remove the need for the visual guard. |
+
+So the day ends with the fault localised and the instrument for measuring it built and demonstrated,
+but the correction itself not yet honestly measured. What is established: kinematics are sound to
+0.1 mm, image-space servoing reaches 0.8 mm, both sensors are far better close than far, the
+colour instability is a thresholding artefact, the gain is 11% high, and the camera-to-hand map is
+wrong by an amount large enough to put the fingers on bare table every time. What is not
+established is the correction, because every attempt to measure it so far has moved the target.
+
+### Next
+
+1. **Add the visual guard to `touch_find`**: observe, probe once, re-observe, and keep the
+   correspondence only if the target's image position is unchanged. Discard and re-seed if it moved.
+2. **Prefer a target that cannot be pushed** for the calibration itself — a heavy object, or a
+   feature of the table — and keep blocks for verification rather than measurement.
+3. Collect several guarded correspondences across the workspace and fit the correction, then store
+   it as a promoted artifact through the registry, so the calibration becomes something the arm
+   re-learns on its own under the same promotion gate as every other distilled policy.
