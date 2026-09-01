@@ -183,8 +183,10 @@ def main() -> int:
     if args.register_primitives:
         from .skills.primitives import register_all as register_primitives
         from .skills.composed import register_all as register_composed
+        from .skills.selfcal import register_all as register_selfcal
         register_primitives(substrate)
         register_composed(substrate)
+        register_selfcal(substrate)
         logger.info(f"Registered primitives. Skill count: {len(substrate.list_skills())}")
 
     hardware_ctx = make_hardware_context(
