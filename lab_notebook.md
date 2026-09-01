@@ -3793,7 +3793,7 @@ It is not clean, and the reason is the finding:
 
 | # | Finding |
 |---|---------|
-| 152 | **A point probe moves the thing it is measuring, so a touch search that presses many times cannot be compared against a single earlier look.** The touched "object" spanned **45 mm in x and 54 mm in y** — far too large for one 60×26 mm block, and a photograph of the region afterwards showed exactly one block there. Fifty-one 5 N presses, several of them landing on the block, had walked it across the table; the footprint recorded was the union of its positions over time, not its shape. Consequently the 76.5 mm residual pairs a *feel* from one moment with a *look* from another, and it does not transfer: re-observing the block cleanly and probing both the corrected and the uncorrected prediction produced bare table at each (0.0179 and 0.0185). **The measurement disturbed its own subject, which is a property of touch-based self-calibration and not a bug in this implementation.** The fix is structural rather than a threshold: re-observe visually immediately before and after every hit, and admit a (see, feel) pair only when the target did not move between them. Gentler probes help — the confirming probes at force_thresh 3 read Fz −0.04 and +0.06, barely touching — but they do not remove the need for the visual guard. |
+| 152 | **RETRACTED — see #153. This finding was wrong.** It claimed a point probe had walked the block across the table, inferring that from a touched footprint of 45 x 54 mm which seemed too large for one 60x26 mm block. Doug disproved it in one call, using the obvious check this entry never ran: return to the pose the scene was first photographed from and compare. All three blocks were within 1.2-2.7 px of where they started, far inside the 9 px threshold #145 set for calling something moved. Nothing had been touched at all in the sense claimed. The footprint was never anomalous: it is the block dilated by the ~20 mm fingertip width, which is what any probe of finite width measures. The error was not the inference but the order of work — a satisfying mechanism was written up before the cheapest available check was run against it, which is exactly the failure #141 named ("measuring instead of theorising") reappearing in the same notebook. |
 
 So the day ends with the fault localised and the instrument for measuring it built and demonstrated,
 but the correction itself not yet honestly measured. What is established: kinematics are sound to
@@ -3811,3 +3811,40 @@ established is the correction, because every attempt to measure it so far has mo
 3. Collect several guarded correspondences across the workspace and fit the correction, then store
    it as a promoted artifact through the registry, so the calibration becomes something the arm
    re-learns on its own under the same promotion gate as every other distilled policy.
+
+---
+
+## 2026-09-01 (cont.) — the block is picked up, and calibration turns out to be optional
+
+*Added by Claude, correcting the two preceding entries. Doug caught both errors from the bench.*
+
+### Finding #153 — touch found the block on its first run, and the grasp needed no hand-eye calibration at all
+
+| # | Finding |
+|---|---------|
+| 153 | **`touch_find` located the green block correctly on its first live run, the block was grasped and lifted from the position it reported, and the 76.5 mm camera-to-hand error was never repaired — it simply stopped mattering.** Everything the search reported was right and was misread. It found an object **27.0 mm** tall (the block measures 26.5 mm by the same probe), centred near **(0.404, −0.188)**, with a touched footprint of 45 x 54 mm that is not anomalous at all: it is a 55 x 28 mm block dilated by the ~20 mm fingertip, which is what a probe of finite width always measures. The two readings that were treated as contradictory are the signature of a real block: with fingers nearly shut the descent stops at **0.0440** because they land on the block's top, and with fingers open to 60 mm it reaches **0.0197** because they straddle it and go down either side. A contact height that depends on finger width is exactly what a solid object of known size produces. Grasping at that touched position with grasp_z 0.027 succeeded first attempt — `grasped: true`, gripper closing to **29.0 mm** on the block's short axis, `grip_high_mm` 2.2, lifted and held at 29.2 mm with 6.4 N of load. **The significance is what was not required: no hand-eye transform, no `_vg_grasp_pixel`, no re-calibration.** `touch_find` reports the target in robot coordinates, which is the only frame the grasp needs; the camera was used solely to seed the search within ~10 cm, and touch resolved the rest. The day's plan had been to repair the calibration so the camera could aim the hand. That plan was wrong in an instructive way — a system that feels does not need the camera to be accurate, only approximately right, and the calibration becomes a convenience rather than a dependency. |
+
+### The methodological failure, recorded plainly
+
+Two findings were written today from the bench, and one of them (#152) was false. Its content was a
+mechanism — "the probe moves its subject" — invented to explain a footprint that required no
+explanation, and committed before the cheapest available check had been run against it. Doug ran
+that check in one call: go back to the pose the first photograph was taken from, take another, and
+compare. All three blocks were within 1.2–2.7 px of their starting positions.
+
+Both of the day's wrong turns share a shape. The parallax hypothesis, the "probe moves the block"
+hypothesis, and the reading of the straddle as evidence *against* an object were all cases of a
+story being fitted to partial data and then defended, when a measurement was cheap and available.
+#141 already named this failure — *measuring instead of theorising* — and it recurred here in the
+notebook that records it. The bench is not the scarce resource; the discipline to check before
+writing is.
+
+### What this changes about the roadmap
+
+The camera-to-hand error is real and unrepaired, and #151's other measurements stand: the gain is
+11% high, both sensors are better close than far, and colour instability is a thresholding
+artefact. But the priority order inverts. Repairing the calibration is no longer the blocking item,
+because a grasp does not depend on it. The higher-value direction is to make `touch_find` the
+normal path to a grasp: seed from vision, confirm by touch, grasp from the touched coordinates —
+and let the accumulated (see, feel) pairs improve the camera model in the background as a learned
+artifact, gated by the promotion rules, rather than as a procedure anyone has to run.
