@@ -3848,3 +3848,34 @@ because a grasp does not depend on it. The higher-value direction is to make `to
 normal path to a grasp: seed from vision, confirm by touch, grasp from the touched coordinates —
 and let the accumulated (see, feel) pairs improve the camera model in the background as a learned
 artifact, gated by the promotion rules, rather than as a procedure anyone has to run.
+
+---
+
+## 2026-09-01 (cont.) — the local VLM, scored offline against hardware truth
+
+*Added by Claude. The 2026-07-30 ER 2 entry specified how a frontier reasoner should first be
+evaluated here: "offline, preserving the distinction between model judgment and hardware truth",
+scored on "whether its labels are calibrated enough to improve retrieval, episode triage, or
+subsequent live success over our current structured heuristics." That test is now run, against a
+local model, on frames whose outcomes the bench already settled.*
+
+### Finding #154 — qwen2.5vl:7b enumerates correctly and judges geometry wrongly, including the one safety call that mattered
+
+| # | Finding |
+|---|---------|
+| 154 | **The local VLM is accurate about *what* is on the table and unreliable about *where* and *whether* — and on the single frame where a geometric judgment had a known hardware answer, it got it backwards.** Model: `qwen2.5vl:7b` (6.0 GB, ollama 0.32.6), ~2–6 s per query on the RTX 5060 Ti, running comfortably alongside cuRobo (546 MB of 16 GB). **Enumeration is right:** on the isolated-green frame it reported one green block; on the crowded frame it reported green, red and blue, matching the scene. **Geometry is wrong:** it called every block "standing" when all were lying flat (the successful grasp closed on 29 mm, the short axis of a lying block), and asked whether the nearest neighbour was clear it answered `true` on **the exact frame whose grasp failed because a finger landed on a neighbour 59 mm away**. A wrong "clear" is the dangerous direction — it authorises the contact that the day's #150 catalogued as a real failure mode. **Localisation is coarse but not useless:** raw pixel output is meaningless (v=502, 715 on a 480-row image) because the model emits normalised 0–1000 coordinates; decoded, it lands **40–68 px** from the chromaticity tracker across three frames, roughly 20–35 mm. That is far too coarse to grasp from, where the requirement is single-digit millimetres — but the coarse touch search steps at **45 mm**, so it is precise enough to *seed* one. |
+
+### The role this argues for
+
+Not a critic, and certainly not an authority over contact. A **semantic seed**. `touch_find` currently
+starts from a colour threshold that only knows blue, green and red; a VLM seed accepts "the green
+block", "the one nearest the edge", "the block that is not like the others" and lands inside the
+coarse search radius, after which touch resolves the millimetres. That is the same division of
+labour the day arrived at everywhere else: vision to get approximately right, contact to get exactly
+right. The model's confident wrong answers about clearance and pose are precisely the questions
+touch already answers correctly and cheaply, so there is no reason to ask it.
+
+Recorded also as a caution about the ER 2 roadmap in the 07-30 entry: the proposal there was to let a
+strong reasoner "select among a small whitelist of no-contact observations/probes" once an offline
+gate passed. On this evidence a 7B local model does not pass that gate for any geometric field, and
+the useful integration is narrower and further from the arm than the roadmap assumed.
