@@ -3561,3 +3561,137 @@ Items 1, 2 and 4 are built and tested; the two that remain are the two I cannot 
 The three bench threads from 2026-07-30 remain open and unaffected: corridor occupancy as a
 recorded precondition, the selector/executor cohort mismatch, and verified grasp collection on the
 admitted low-yaw red target near (185, 335).
+
+---
+
+## 2026-09-01 — seven live grasp attempts, zero successes, and the reason: July hardened `shove`, not `vision_grasp`
+
+*Added by Claude, at the bench, first hardware session since 2026-07-30. The network move put omen
+behind a second NAT and the MCP transport was down until it was moved onto the AT&T subnet; the
+robot link (192.168.0.253) was never affected. All seven attempts recorded under policy version
+`d0c8b03f95` — the first episodes in the project's history with policy attribution.*
+
+### Finding #150 — every failure mode observed today, except one, is a defect `shove` was hardened against in July and `vision_grasp` never received
+
+| # | Finding |
+|---|---------|
+| 150 | **Seven consecutive `vision_grasp` attempts on an uncluttered bench produced zero verified grasps, and six distinct failures — of which four are verbatim reproductions of problems the July `shove` work diagnosed and fixed in a sibling skill.** July's hardening went into `shove`: adaptive depth-identity gating, median aggregation of raised observations, near-gate verification that accepts a demonstrated convergence rather than descending into a worse view, and a calibrated visual-authorization ceiling at z=0.255. **None of it was back-ported to `vision_grasp` — the skill the entire learning corpus depends on.** That is a far better explanation of "5 verified successes out of 76 lifetime grasps" (#149) than anything proposed before it: the corpus is thin because the collecting skill still carries its June robustness while its sibling moved on. Concretely, today: (1) *discarded converged view* — attempt 4 reached **3.45 px at z=0.2667**, inside the 4 px jaw-clearance tolerance, and descended anyway to 11.17 px and then 23.55 px, refusing at the bottom; this is exactly the "staircase discarded a potentially successful correction" that `shove` fixed on 07-30 with observation-only near-gate verification. (2) *anomalous first-frame depth anchor* — attempt 5 anchored identity to a **58.1 mm** first reading of a 28 mm block and then rejected six stationary frames measuring it correctly at 27.6 mm, ending `target lost or rejected by aligned-depth gate`; the 07-30 entry records the same failure with a 48.3 mm anchor and the same six rejected frames. (3) *neighbour occupancy* — attempt 3 aligned perfectly (final-pose verification **2.9 px**), descended, and stalled **20.6 mm high** with `persistent_high_contact`, closing on air at 62.7 mm: fingers spanning 62.9 mm at 46° yaw onto a block 59 mm away. Same corridor-clearance precondition the 07-30 shove entry called for, unrecorded in the grasp approach too. (4) *unstable colour identity* — the red target's silhouette measured **npix 3293 and 762 on two consecutive runs from an identical pose**, reproducing the selector/executor cohort mismatch on the very target the 07-30 entry admitted for collection. |
+
+### The one new failure: depth top-face corrections do not converge
+
+Not a reproduction — measured for the first time today. The depth top-face alignment stage
+corrects, then re-measures, and the re-measurement is frequently *worse* than what it corrected:
+
+| attempt | alignment error sequence (px) |
+|---|---|
+| 4 | 28.1 → 3.45 → 11.17 → 23.55 |
+| 6 | 21.9 → 32.81 |
+| 7 | 17.48 → 7.72 → **verified 12.53** |
+
+In attempt 7 the coarse colour servo reported **3.5 px at z=0.28** while the depth top-face stage
+reported **17.5 px at z=0.30** in the same episode. The two stages disagree about where the block is
+by 10–17 px, and corrections driven by the depth measurement oscillate rather than converge. This is
+not reachable by parameter tuning and is the deepest of today's problems.
+
+### What it is NOT: the geometry is intact
+
+The obvious suspicion after two months and a bench that had been moved was that something physical
+had drifted. `probe_table` at the plane origin (0.45, 0) settles it:
+
+**contact_z = 0.0164 m, `contacted: true`, Fz −2.55 N, dFz −4.13 N.**
+
+**#144 measured 0.0165 m at the same point on 2026-06-30. The difference is 0.1 mm.** Forward
+kinematics and the table reference are exactly where they were when the grasp was working. Whatever
+regressed is in perception, not in geometry — which is worth knowing before anyone recalibrates
+anything. (The contact moments, Mx 0.634 / My 1.266, sit in the same band #143 found too noisy to
+self-calibrate against; consistent with that finding, and uninformative.)
+
+### A parameter that lies
+
+`precision_z` is advertised in the MCP schema as accepting 0.10–0.30, and is then silently clamped:
+
+```python
+precision_z = max(0.10, min(float(approach_z), precision_z))     # primitives.py:2124
+```
+
+Since `approach_z` defaults to 0.20, a requested `precision_z=0.27` becomes 0.20 with no error and no
+note in the result — the alignment record simply reports `precision_z: 0.2`. One experiment was run
+and interpreted before the clamp was noticed. Either the schema should declare the coupling or the
+call should refuse the combination; silently substituting a different value than the caller asked for
+is the kind of thing that makes a whole afternoon's data untrustworthy.
+
+### What the instrumentation did
+
+Item 4 was validated under adversarial conditions: all seven failures produced complete rollout
+records, including the refusals, and the `before_close` anchor was captured on real hardware for the
+first time — **ee_pose (0.4329, −0.1213, 0.1982)** with gripper width, force, and both frames, on
+attempt 3. That is the warm start's training target recorded exactly rather than reconstructed by
+nearest timestamp. Every episode also carries `policy_version: d0c8b03f95`, so from today the
+ablation has something to attribute.
+
+The record is also honest about the day: seven attempts, zero verified grasps, and the ablation will
+show that when it next runs.
+
+### The gate that refuses grasps the hardware would make (Doug: "what would a five-year-old do")
+
+Doug watched the probe land and asked the question that reframes the whole day. A five-year-old does
+not align to sub-millimetre before closing their hand — they reach, touch, and let the hand close
+around the thing. The arm had just demonstrated it can *feel* the table to 0.1 mm. And yet
+`vision_grasp` refuses to touch anything until it is aligned to 4 px.
+
+Following that thought into the code found a defect. `_final_pose_alignment_tolerance_px` computes
+the right thing: the physical budget for how far off-centre the jaws may be before a finger overlaps
+the block's top face. For today's green block that budget is **≈8.2 px**. Then the return line throws
+it away:
+
+```python
+return float(min(
+    float(requested_tol),                              # <- pixel_tol, default 4.0
+    max(3.0, clearance_px - float(uncertainty_px)),    # <- the physics: 8.2
+))
+```
+
+`requested_tol` is fed `pixel_tol` — the **coarse image servo's convergence threshold**. Two unrelated
+quantities shared one parameter, and the stricter one silently wins. **Attempt 4 verified at 6.83 px:
+inside the physical budget, refused by the arbitrary cap.** The gripper had its hand in the right
+place and would not close because a number said no.
+
+The five-year-old's other lesson is about *where* to stop. Four independent runs today put the
+alignment minimum in the same place, and every one of them degrades on the way down:
+
+| attempt | best error | at z | then |
+|---|---|---|---|
+| 4 | 3.45 px (depth align) | 0.2667 | 11.17 → 23.55 |
+| 6 | 10.1 px (coarse) | 0.27 | 32.81 |
+| 7 | 3.5 px (coarse) | 0.28 | verified 12.53 |
+| 9 | 3.8 px (coarse) | 0.27 | 17.9 → 25.6 → 13.2 |
+
+Attempt 9's **3.8 px at z=0.27 beats even the strict 4 px gate** — and the code then descended to
+0.20 and failed at 13.2 px. The skill repeatedly reaches a pose good enough to grasp from and throws
+it away, which is precisely what `shove` was fixed to stop doing on 2026-07-30.
+
+One caveat kept honest: raising `pixel_tol` to 10 did not rescue the run, because that same parameter
+also governs the coarse servo's own convergence check, which then failed at the bottom. The parameter
+is overloaded three ways. It cannot be untangled from the outside.
+
+### The unresolved core: two perception stages that disagree
+
+In attempt 7 the coarse colour servo reported **3.5 px at z=0.28** while the depth top-face stage
+reported **17.5 px at z=0.30** in the same episode. Both are measuring the same block. Until that
+disagreement is understood, tightening or loosening either gate is guesswork — and #141 chose the
+depth top face for a reason (a standing block's colour centroid is pulled toward its lit side face),
+so the answer is probably not simply "trust colour".
+
+### Next
+
+1. **Stop capping the physical jaw-clearance budget with `pixel_tol`.** They are different
+   quantities; give the jaw gate its own parameter and let the physics govern it. Smallest change
+   here, and on today's evidence it alone would have let attempt 4 close.
+2. **Back-port the three `shove` mechanisms into `vision_grasp`** — near-gate verification, median
+   aggregation of the initial depth observation instead of a single-sample anchor, and corridor /
+   neighbour clearance as a recorded precondition. All three are already calibrated on this hardware;
+   this is transplanting proven code, not new design.
+3. **Then investigate the coarse/depth disagreement and the non-convergent depth correction**, which
+   none of the above addresses.
+4. Only then resume collection. Running `practice` on the current `vision_grasp` would generate
+   failures, not a corpus.
