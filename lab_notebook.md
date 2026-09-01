@@ -3879,3 +3879,46 @@ Recorded also as a caution about the ER 2 roadmap in the 07-30 entry: the propos
 strong reasoner "select among a small whitelist of no-contact observations/probes" once an offline
 gate passed. On this evidence a 7B local model does not pass that gate for any geometric field, and
 the useful integration is narrower and further from the arm than the roadmap assumed.
+
+---
+
+## 2026-09-01 (cont.) — the practice loop's own data gives the calibration, and says why the correction could not converge
+
+*Added by Claude while `practice_touch` was still running. The loop's (see, feel) pairs were being
+written to the events table by the rollout record built this morning, so they could be analysed
+mid-run without touching the arm.*
+
+### Finding #155 — the camera-to-hand error is a rotation and scale, not an offset; a running mean was structurally incapable of learning it
+
+| # | Finding |
+|---|---------|
+| 155 | **Four touch correspondences are enough to show that the error scales with distance from the image centre and is rotated, which is why the accumulated translation correction did not converge and the loop did not get faster.** `touch_find` learns a running-mean offset. Its four residuals were **(−48.1, −30.0), (−80.9, −77.0), (−107.5, −12.5), (−129.8, −96.8) mm** — a spread of 82 mm in x and 84 mm in y, as large as the mean itself. Fitting the measured offsets against the predicted ones: **translation only leaves 45.8 mm rms; a full affine leaves 17.1 mm**, and the fitted matrix has both eigenvalue magnitudes equal at **0.8293**, i.e. it is a rotation-plus-uniform-scale rather than an arbitrary affine — **scale 0.83, rotation ≈14°**. An error proportional to the target's distance from the principal point cannot be absorbed by a constant, so the running mean was chasing a quantity that changes with every observation. The loop was therefore doing ~6.75 min per find with no downward trend, which is the same fact seen from the outside. |
+
+### The measurement that misled me, and why touch beat it
+
+Earlier today the image Jacobian was measured from two 40 mm robot moves and reported here as
+"clean and symmetric, u tracks y, v tracks x, 3–4% cross-coupling, ≈2.3° of camera yaw". The
+diagonal terms of that measurement are sound — 27 px of image motion over 40 mm of travel is a
+strong signal, and the 681 px/m gain it gave is why the servo converged to 0.8 mm. **The
+cross-terms were not.** They amounted to about **1 px** of motion over the same 40 mm, which is
+below the noise of a colour centroid, and a 14° rotation was read as 2.3° from that noise. The
+touch data resolves it because it works over a 200 mm baseline against a hard contact, not a
+one-pixel difference against a segmentation.
+
+The general lesson is the one this notebook keeps relearning in new costumes: a quantity can be
+measured, reported with a number, and still be noise. The diagonal and the off-diagonal of the same
+matrix, measured in the same experiment, had completely different signal-to-noise, and nothing in
+the presentation of the result said so.
+
+### Consequence for the design
+
+`touch_find` should fit a similarity (rotation + scale + offset) over its accumulated
+correspondences rather than averaging an offset, and it should refuse to apply the fit until the
+residual is small enough to be worth applying — the same promotion-gate discipline as every other
+distilled artifact here. On four points the affine fit is close to underdetermined (8 equations, 6
+parameters, 17 mm rms), so the honest gate would still reject it; but it is already three times
+better than the model in use, and it is the right shape.
+
+The deeper point stands from #153: none of this is required to grasp. Touch finds the block in
+robot coordinates whatever the camera model says. A better camera model buys **search time** — a
+smaller radius and fewer probes — not capability.
