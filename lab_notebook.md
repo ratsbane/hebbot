@@ -3922,3 +3922,109 @@ better than the model in use, and it is the right shape.
 The deeper point stands from #153: none of this is required to grasp. Touch finds the block in
 robot coordinates whatever the camera model says. A better camera model buys **search time** — a
 smaller radius and fewer probes — not capability.
+
+---
+
+## 2026-09-01 (cont.) — the bracket was loose; #155's constants are expired, and no stack was achieved
+
+*Added by Claude. Recorded before the GEN-1.5 note because it invalidates a constant committed
+earlier the same day, and a notebook carrying a known-wrong number is worse than one with a gap.*
+
+### Finding #156 — the camera mount was physically twisted, which is probably what "the camera-to-hand rotation" was measuring
+
+| # | Finding |
+|---|---------|
+| 156 | **Doug noticed the wrist camera's mounting bracket was twisted and straightened it. That almost certainly *is* the ~14° rotation #155 fitted and attributed to geometry, which means every camera-side constant fitted on 2026-09-01 is expired.** #155 fitted a similarity to four touch correspondences and reported scale 0.83, rotation ≈14°, residual 17.1 mm against 45.8 mm for a translation model. The conclusion that the error is *not* a constant offset still stands — that was established from residuals spreading 82 mm, which no mounting angle explains away. But the specific matrix is now wrong in a new direction, and after the bracket was straightened it will over-rotate every prediction. **The wider point is worse and more useful: a loose mechanical part was being modelled as if it were a fixed property of the geometry.** Four hours went into fitting increasingly sophisticated transforms to a bracket that was moving. Nothing in the software could have caught this, because the model had no term for "the mount might not be rigid" and no way to notice that its own residuals were drifting rather than scattering. The residual *history* — not the mean, not the fit — was the signal, and it was recorded but never examined as a time series. |
+
+### And the honest record on stacking: none achieved
+
+Across roughly two hours the arm grasped blocks repeatedly and well — the best grasps closed to
+29.0 mm on the short axis at 2.2 and 4.6 mm above the intended height — but **no verified stack was
+produced.** The final attempt picked a block up and set it down 40 mm away on bare table, verified at
+29.1 mm, one block tall. Its cause is a one-line error: the touch clustering links hits within
+**45 mm**, and the blocks are **55 mm long**, so a single block reliably presents as two objects and
+the arm dutifully "stacked" one onto the other half of itself. The cluster radius has to exceed the
+longest object dimension, not the probe spacing.
+
+The failure chain over the session is worth listing plainly because none of it was about learning or
+policy, and all of it was geometric bookkeeping:
+
+| failure | cause |
+|---|---|
+| fingers on bare table | camera-to-hand offset, itself partly a loose bracket |
+| release bounced the block off | drop height 14 mm instead of 3 mm |
+| block "walked" (#152, retracted) | never happened; the check was never run |
+| grasp stalled 17 mm high | 80 mm pre-open with the neighbour 78 mm away |
+| grasp stalled 8.7 mm high | wrist yaw closing along the block's long axis |
+| orientation measured wrong | touch extent probe reached the neighbour |
+| "two objects" that were one | cluster radius 45 mm < block length 55 mm |
+
+Seven distinct defects, every one of them in the explicit-geometry pipeline, none in perception or
+control as such. That observation is what makes the next entry uncomfortable rather than reassuring.
+
+---
+
+## 2026-09-05 — literature: GEN-1.5, and the sharpest challenge to this project's premise so far
+
+*Added by Claude, at Doug's request. Primary source: Generalist AI, ["GEN-1.5"](https://generalistai.com/blog/gen-1.5).*
+
+### What it is
+
+A robot foundation model taking a 30-second video context with proprioception and language and
+emitting 100 Hz action trajectories. Roughly eight months of continuous pretraining on real-world
+interaction data captured in homes, warehouses and factories, with **no simulation data**. The
+headline claim is *emergent in-context learning of physical skills*: **59% ±10%** one-shot across ten
+manipulation tasks from a 3–12 s demonstration with **zero gradient updates**, rising to **83% ±9%**
+with ten gradient steps on ~50 demonstrations. The authors emphasise that none of this was designed
+for — "no architectural changes to promote in-context learning, no inner or outer meta-learning
+loop." It emerged from scale.
+
+The qualitative results are more striking than the numbers: ambidexterity from single-hand training
+data, zero-shot sim-to-real despite no simulation in pretraining, human-hand-to-robot transfer, and
+improvising a banana as a brush — composing a contact sequence absent from training.
+
+### Finding #157 — GEN-1.5 is the strongest published argument against this project's premise, and this week's failures are evidence for its side
+
+| # | Finding |
+|---|---------|
+| 157 | **GEN-1.5's list of things it does not claim — no world model, no persistent memory, no lifelong learning, no RL, no long-horizon planning — is an inventory of nearly everything Hebbot is built out of, and it reaches 59% one-shot on novel manipulation tasks anyway.** If skill acquisition emerges from scale plus demonstrations, the episode store, the promotion gates and the verification machinery are scaffolding on the way to something that did not need them. **The honest concession is that essentially nothing that defeated this project on 2026-09-01 was a policy-learning problem.** The seven failures above are all explicit-geometry bookkeeping: a hand-eye offset, a loose bracket, a drop height, a pre-open width, a wrist yaw, a probe threshold, a clustering radius. **A behavioural-cloning policy has no hand-eye transform to get wrong** — it maps pixels to actions and never represents the quantity that was miscalibrated. GEN-1.5 might plausibly have stacked these blocks during the hours spent fitting similarity transforms to five touch correspondences. That is the case against the substrate, stated at full strength, and it should stay stated. |
+
+### What it structurally cannot do
+
+The counter is equally concrete, and this week supplies it rather than theory.
+
+GEN-1.5 has **no way to notice that the bracket moved**, no way to accumulate the fact, and no way to
+report it. Its context is a 30-second rolling buffer; nothing survives it, and improvement comes from
+more human demonstrations rather than from its own experience. It cannot form the proposition "my
+camera disagrees with my hand by 76 mm", because it has no representation in which the camera and
+the hand are separate things that could disagree.
+
+It also has **no verification**. 59% one-shot is four failures in ten, and nothing in the
+architecture distinguishes a success from a failure after the fact or explains one. Their own note
+that in-context skills are "more brittle than finetuned models" is the admission that matters most.
+
+And a gap visible only from a week spent on contact: **the post never mentions force or touch as a
+sensing modality.** It is vision plus proprioception. Every reliable measurement made here came from
+touch — `probe_table` reproduced June's table height to **0.1 mm** across two months, a network
+change and a camera remount, while vision was silently 76 mm out. A policy trained without contact
+as a sense inherits exactly the blind spot that broke this pipeline, and has no touch-based recourse
+when vision is wrong.
+
+### The synthesis worth pursuing
+
+GEN-1.5 reads less as a refutation of the layered thesis than as a strong candidate for the layer the
+thesis predicts. This project's framing has always been deliberate cognition compressing into
+reflex. GEN-1.5 is an excellent reflex with no deliberate layer, no memory, and no self-knowledge;
+the substrate here supplies precisely those. The productive question is therefore not which approach
+wins but **which failures each one owns**: this week's were geometric bookkeeping, fully attributable
+and each fixed by a line of code, while GEN-1.5's are the unexplained 41% — unattributed and
+unrepeatable, because nothing recorded why.
+
+### Reading it critically
+
+Undisclosed: architecture, data scale, hardware platform, and any baseline against π0- or
+RT-2-class models. Figure 3 shows validation loss, not a scaling law. **59% ±10% across ten tasks**
+is a wide interval on a small n, and with plausibly 10–20 trials per task that error bar carries a
+lot of weight. The emergence claim rests on qualitative demonstrations that are genuinely impressive
+but singular — one banana, one sim-to-real transfer — and singular demonstrations are what this
+notebook has repeatedly learned to distrust in its own work.
