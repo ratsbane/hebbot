@@ -4028,3 +4028,69 @@ is a wide interval on a small n, and with plausibly 10–20 trials per task that
 lot of weight. The emergence claim rests on qualitative demonstrations that are genuinely impressive
 but singular — one banana, one sim-to-real transfer — and singular demonstrations are what this
 notebook has repeatedly learned to distrust in its own work.
+
+---
+
+## 2026-09-06 — literature: a third-party LLM-on-robot-arms benchmark, and the precision cliff
+
+*Added by Claude at Doug's request. Source: ["GPT-6 Astra on Robot Arms"](https://openai.robocurve.org/gpt-6-astra/),
+dated 2026-09-04.*
+
+**Provenance caveat, stated first because the URL invites the wrong assumption.** `openai.robocurve.org`
+is a subdomain of **robocurve.org**, a third party; the `openai.` prefix is theirs, not OpenAI's, and
+this is **not an official announcement**. It is an independent benchmark report whose numbers cannot
+be verified from here, and it discloses nothing about the tested model's architecture, training data
+or method. It is recorded below for the *shape* of its result, not for its rankings.
+
+### What it measures
+
+A language model commanding **absolute end-effector poses** from three camera views (top, two wrist)
+plus proprioceptive state, on bimanual 6-DoF I2RT YAM arms with parallel-jaw grippers, under a
+**20-LLM-call budget** at medium reasoning effort. That is structurally the same loop this project
+ran by hand on 2026-09-01: look, reason, command a pose, repeat.
+
+| task | Astra | Fable 5.1 | Fable 5 |
+|---|---|---|---|
+| block into bowl | 19/20 (95%) | 8/20 (40%) | 1/20 (5%) |
+| puzzle piece into groove | 2/20 (10%) | 2/20 (10%) | 0/20 (0%) |
+
+Cost $0.94–$2.69 per run; 2.5–8.2 minutes per run.
+
+### Finding #158 — every model collapses at the same tolerance boundary, and none of them can feel
+
+| # | Finding |
+|---|---------|
+| 158 | **The informative number is not the ranking but the cliff: 95% → 10% between two tasks on the same rig with the same model, and every model tested collapses in the same place.** A bowl forgives roughly 20 mm of placement error; a groove forgives about one. The failure is therefore not a reasoning failure — it is that open-loop vision-to-pose cannot close the last few millimetres, however good the reasoning above it. **This reproduces exactly the boundary hit here on 2026-09-01**, where grasps succeeded on isolated forgiving targets and failed with 8.7 mm and 17 mm stalls the moment placement had to be exact, and where the measurement that finally worked was `probe_table` reporting contact to **0.1 mm**. **The benchmark's embodiment lists three cameras and proprioception and no force or contact sensing** — the same omission as GEN-1.5 (#157). Two independent systems, different architectures, both stuck at the same precision boundary, both blind in the same modality. That is strong external circumstantial support for the touch thesis, and it should be held loosely, because neither source set out to test it and neither reports having tried. |
+
+### The economics, which this project has never had a number for
+
+The cost figures make the compression argument quantitative rather than philosophical: **deliberate
+control of a pick-and-place costs roughly $1–3 and 2.5–8 minutes at 20 LLM calls.** If a distilled
+reflex costs microseconds and nothing, the value of moving a skill from the deliberate layer to the
+reflexive layer is measurable in dollars per pick. That is the y-axis the ENPIRE-style improvement
+curve (#146) has been missing, and it belongs in the scorecard.
+
+It is also an indictment of this session's own conduct. **Hundreds of tool calls went into a single
+grasp here.** A 20-call budget would have forced coarse-to-fine search from the outset — the
+discipline Doug had to prompt twice ("what would a five-year-old do", "you could binary search
+that"), and which when finally applied cut the search from 26 probes to 2. A call budget is worth
+adopting as a *discipline*, not merely as an economy.
+
+### Reading it critically
+
+The report is honest about its weaknesses and they are material: trials **not interleaved**, run on
+**different rigs** (rig-1 vs rig-3), **operator grading with model identity visible**, list-price
+costing that may overstate one model's true cost, and medium reasoning effort only. At n=20 per
+cell, 19/20 against 8/20 is a real difference; **2/20 against 2/20 is noise**, and should be read as
+a shared floor rather than a tie.
+
+Recorded without comment on the rankings, which include a Claude family member and are not in
+dispute here; the listed caveats apply symmetrically to every cell.
+
+### What to take into the project
+
+1. **The precision cliff is the target** — not better planning, but a contact-based last centimetre.
+   This is what the touch work is actually for, and there is now an external benchmark shape to aim at.
+2. **Adopt a bounded call budget** as a forcing function for efficient search.
+3. **Put the cost-per-deliberate-execution into the ENPIRE scorecard** as the denominator for the
+   distillation argument.
