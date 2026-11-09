@@ -94,16 +94,43 @@ def components(mask: np.ndarray, min_px: int = 150) -> list[dict]:
 
 
 def locate(rgb: np.ndarray, colour: str, depth: np.ndarray | None = None,
-           depth_scale: float = 1e-4, min_px: int = 150, tol: float = 0.10) -> dict:
-    """Find the target: seed on colour, learn its chromaticity, then re-find by that."""
+           depth_scale: float = 1e-4, min_px: int = 150, tol: float = 0.10,
+           max_px: int | None = None, use_reference: bool = True) -> dict:
+    """Find the target: seed on colour, learn its chromaticity, then re-find by that.
+
+    `max_px` is the largest area the target could physically cover at this distance. Close
+    up, glare washes out the patch the reference is learned from until the table matches it
+    too, or a shadow merges with the target. On 2026-11-09 that gave one blob of 200,000
+    pixels for a block of about 2,300. A ratio against the seed cannot catch this, because
+    a good far view can legitimately be 3-6x its seed when shadow halves the seed. If the
+    blob matching the seed is larger than a target can be, the reference is thrown away and
+    the seed blobs are reported instead.
+
+    `use_reference=False` skips the learning step and reports the seed blobs. Close views
+    want this: the seed centred the block in every close frame checked on 2026-11-09, while
+    the learned reference there is unreliable because glare sits on the patch it learns from.
+    """
     seeds = components(seed_mask(rgb, colour), min_px=min_px)
     if not seeds:
         return {"found": False, "reason": f"no {colour} seed blob", "blobs": []}
     reference = reference_from(rgb, seeds[0]["u"], seeds[0]["v"])
-    blobs = components(mask_by_reference(rgb, reference, tol=tol), min_px=min_px)
+    blobs = seeds if not use_reference \
+        else components(mask_by_reference(rgb, reference, tol=tol), min_px=min_px)
     if not blobs:
         return {"found": False, "reason": "reference matched nothing", "blobs": [],
                 "reference": reference}
+    reference_rejected = False
+    if max_px is not None:
+        seed = seeds[0]
+        match = min(blobs, key=lambda b: (b["u"] - seed["u"]) ** 2 + (b["v"] - seed["v"]) ** 2)
+        if match["npix"] > max_px:
+            reference_rejected = True
+            blobs = [blob for blob in seeds if blob["npix"] <= max_px]
+        else:
+            blobs = [blob for blob in blobs if blob["npix"] <= max_px]
+        if not blobs:
+            return {"found": False, "reason": "nothing of plausible size", "blobs": [],
+                    "reference": reference, "reference_rejected": reference_rejected}
     if depth is not None:
         for blob in blobs:
             vi, ui = int(round(blob["v"])), int(round(blob["u"]))
@@ -111,4 +138,5 @@ def locate(rgb: np.ndarray, colour: str, depth: np.ndarray | None = None,
             valid = patch[patch > 0]
             blob["depth_m"] = (float(np.median(valid)) * depth_scale
                                if valid.size else None)
-    return {"found": True, "reference": reference, "blobs": blobs, "n": len(blobs)}
+    return {"found": True, "reference": reference, "blobs": blobs, "n": len(blobs),
+            "reference_rejected": reference_rejected}

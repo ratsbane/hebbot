@@ -4172,3 +4172,29 @@ skill refused its bad measurement instead of acting on it. But finding edges by 
 them does not work on blocks this light. Whether a probe landing squarely on top also moves one is
 still untested. #153's conclusion needs narrowing: touch found a block and grasped it, but touch
 near an unsecured light object disturbs it.
+
+---
+
+## 2026-11-09 (cont.) — camera for the pose, touch to confirm
+
+*Added by Claude, at the bench with Doug. No grasp attempted yet; the blocks were taped down.*
+
+### Finding #161 — with the block fixed, touch measures well, and it calibrates a camera that then needs almost no touch
+
+| # | Finding |
+|---|---------|
+| 161 | **On two taped blocks, edge-finding gave a 1 mm rectangle fit, the right length (56 and 55 mm against 55) and the right yaw. Those two touch-measured positions then calibrated the camera from 60 no-contact photographs, and a far look followed by a re-look from directly above located a block held out of the fit to about 6 mm.** Far views on the held-out block were 6-19 mm; accepted close looks were 4.7-7.6 mm (one first look at 13.5 mm, corrected to 6.2 mm by the second). The complete skill then measured both blocks in 69 s and 7 probes rather than 14.6 minutes and 146, landing 3.2 and 1.3 mm from the touch positions. **Those last two numbers are in-sample, because the map was fit on those same blocks; the honest figure is the held-out 6 mm.** |
+
+The learned-chromaticity detector failed up close: glare washed out the patch it learns from until
+the table matched it, once producing a single 200,000-pixel blob. A size limit alone left bad
+frames, so close views now use the first-pass colour seed, which was within 20 px of image centre
+in all 32 saved close frames. Readings that jump more than 60 mm are discarded and re-looked at.
+That limit was added after an earlier test script drove the arm up to about 0.4 m off target on a
+bad detection, at safe height, and stopped only when inverse kinematics refused a target.
+
+The camera map lives in `hebbot-data/camera_map.json` and is valid only while the mount is unchanged
+(#156). Probing footprint is 20 mm along x and 37.5 mm across y, which biases touch-mode yaw at
+diagonal angles and widens the gap it needs along y; touch mode is reserved for fixed targets.
+
+Not yet shown: a real grasp and placement from these poses, the placement descent on hardware,
+whether a centre probe moves a loose block, and accuracy on a third, independent block.

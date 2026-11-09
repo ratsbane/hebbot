@@ -26,8 +26,9 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 
+from hebbot.perception.target import locate as locate_target
 from hebbot.skills.primitives import (
-    _extract, _qmul, grasp_at, move_to_pose, open_gripper, probe_table,
+    _extract, _qmul, _select_camera, grasp_at, move_to_pose, open_gripper, probe_table,
 )
 from hebbot.skills.selfcal import _observe, _spiral, image_to_world_offset
 
@@ -39,7 +40,11 @@ MIN_OBJECT_M = 0.010
 TOP_TOLERANCE_M = 0.006          # a contact this far from the object's top is another surface
 CONFIRM_BAND_M = 0.0025          # a reading further than this from the top is re-probed
 
-FINGERTIP_M = 0.020              # a probe of finite width measures the object dilated by this
+FINGERTIP_M = 0.020              # finger width along its pad: world x when probing
+# A probe of finite width measures the object dilated by its footprint. Closed to 8 mm the
+# pair is wider across the fingers than along them: two taped 55 x 28 mm blocks measured
+# 76 and 75 long along x and 66 wide along y on 2026-11-09, so 20 mm in x and 37.5 in y.
+PROBE_DILATION_M = (0.020, 0.0375)
 PROBE_OPEN_WIDTH = 0.008
 # Commanded floor. At 0.012 the 5-7 mm of free-space tracking lag lands the hand at about
 # 0.0175 whether or not a table is there, so the "reading" was floor plus lag. At 0.008 the
@@ -63,6 +68,16 @@ MAX_BODY_LONG_M = 0.080
 MAX_BODY_SHORT_M = 0.050
 
 WORKSPACE = ((0.30, 0.60), (-0.30, 0.30))
+WORKSPACE_FOR_TARGETS = ((0.28, 0.62), (-0.32, 0.32))
+# The camera finds the block, touch confirms it. Blocks this light turn aside if probed
+# near their edges (#160), so the search for edges only runs on fixed targets.
+FX_FOR_MAP, CX_FOR_MAP, CY_FOR_MAP = 353.6, 323.6427, 242.8864
+LOOK_Z = 0.31
+MAX_LOOK_JUMP_M = 0.060          # a new estimate further than this from the last is rejected
+MAX_LOOKS = 4
+LOOKS_WANTED = 2
+EE_LIMITS = ((0.33, 0.60), (-0.28, 0.28))    # no camera-derived command outside these
+MAX_BLOB_PX = 5500               # largest a block can cover from LOOK_Z, side faces included
 SURVEY_POSES = ((0.42, -0.05, 0.31), (0.42, -0.19, 0.31), (0.50, 0.06, 0.31),
                 (0.36, 0.04, 0.31), (0.52, -0.16, 0.31))
 
@@ -284,9 +299,141 @@ def feel_object(touch: _Touch, seed, *, coarse_step: float = 0.040,
     fit = fit_rectangle(edges)
     return {"found": True, **fit, "top": top, "first_hit": list(first),
             "n_edges": len(edges), "elongation": fit["long_m"] / max(fit["short_m"], 1e-3),
-            "body_long_m": max(fit["long_m"] - FINGERTIP_M, 0.0),
-            "body_short_m": max(fit["short_m"] - FINGERTIP_M, 0.0),
+            "body_long_m": max(fit["long_m"] - probe_dilation(fit["long_axis_deg"]), 0.0),
+            "body_short_m": max(fit["short_m"] - probe_dilation(fit["long_axis_deg"] + 90.0), 0.0),
             "edges": [[round(x, 4), round(y, 4)] for x, y in edges]}
+
+
+def probe_dilation(axis_deg: float) -> float:
+    """How much the probe's footprint widens an extent measured along this axis."""
+    a = math.radians(axis_deg)
+    return PROBE_DILATION_M[0] * abs(math.cos(a)) + PROBE_DILATION_M[1] * abs(math.sin(a))
+
+
+def fit_camera_map(rows: list, truth: dict) -> dict:
+    """Fit target_xy - ee_xy = A @ raw + b from photos of targets whose position is known.
+
+    `rows` are {color, ee, u, v, depth, npix}; `truth` maps color to touch-measured (x, y).
+    """
+    used = [r for r in rows if r["npix"] < 20000 and r.get("depth") and r["color"] in truth]
+    raw = np.array([_raw_image_offset(r["u"], r["v"], r["depth"]) for r in used])
+    target = np.array([np.asarray(truth[r["color"]]) - np.asarray(r["ee"][:2]) for r in used])
+    solution, *_ = np.linalg.lstsq(np.c_[raw, np.ones(len(used))], target, rcond=None)
+    A, b = solution[:2].T, solution[2]
+    residual = np.linalg.norm(target - (raw @ A.T + b), axis=1) * 1000
+    return {"A": A.tolist(), "b": b.tolist(), "n": len(used),
+            "median_residual_mm": round(float(np.median(residual)), 2),
+            "max_residual_mm": round(float(residual.max()), 2), "look_z": LOOK_Z}
+
+
+def _raw_image_offset(u: float, v: float, depth: float) -> np.ndarray:
+    metres_per_px = float(depth) / FX_FOR_MAP
+    return np.array([(v - CY_FOR_MAP) * metres_per_px, (u - CX_FOR_MAP) * metres_per_px])
+
+
+def predict_world_xy(camera_map: dict, ee_xy, u: float, v: float, depth: float) -> np.ndarray:
+    return np.asarray(ee_xy, dtype=float)[:2] \
+        + np.asarray(camera_map["A"]) @ _raw_image_offset(u, v, depth) + np.asarray(camera_map["b"])
+
+
+def image_axis_to_world_deg(camera_map: dict, angle_deg: float) -> float:
+    """World angle of an axis measured in the image; image v follows world x, u follows y."""
+    a = math.radians(angle_deg)
+    world = np.asarray(camera_map["A"]) @ np.array([math.sin(a), math.cos(a)])
+    return normalise_axis_deg(math.degrees(math.atan2(world[1], world[0])))
+
+
+def _camera_map_path(store):
+    from pathlib import Path
+    if store is None or not getattr(store, "db_path", None):
+        return None
+    return Path(store.db_path).parent / "camera_map.json"
+
+
+def load_camera_map(store) -> Optional[dict]:
+    import json
+    path = _camera_map_path(store)
+    try:
+        with open(path) as handle:
+            return json.load(handle)
+    except Exception:
+        return None
+
+
+def _fresh_blobs(color: str, camera: Optional[str], ctx, *, close: bool):
+    """One look with frames that post-date the last motion, and the pose it was taken from."""
+    cam = _select_camera(_extract(ctx, "cameras"), camera or "wrist")
+    time.sleep(0.8)
+    capture = None
+    for _ in range(6):
+        capture = cam.capture(with_depth=True)
+    rgb = capture["color"][:, :, ::-1]
+    found = locate_target(rgb, color, depth=capture.get("depth"), max_px=MAX_BLOB_PX,
+                          use_reference=not close)
+    blobs = [b for b in found.get("blobs", []) or [] if b["npix"] >= 400 and b.get("depth_m")]
+    return blobs, [float(v) for v in _extract(ctx, "panda").get_position()]
+
+
+def _within(point, limits) -> bool:
+    return limits[0][0] <= point[0] <= limits[0][1] and limits[1][0] <= point[1] <= limits[1][1]
+
+
+def look_twice(color: str, camera: Optional[str], camera_map: dict, ctx,
+               speed_factor: float) -> dict:
+    """Far look to get close, then re-look from directly above the block.
+
+    Measured on 2026-11-09 with the map fit on the other block: 8-14 mm from afar, about
+    6 mm from above. A reading that jumps is discarded and looked at again; nothing the
+    camera says moves the arm unless it stays on the table and inside the limits.
+    """
+    b = np.asarray(camera_map["b"])
+    far = None
+    for pose in SURVEY_POSES:
+        move_to_pose([pose[0], pose[1], LOOK_Z], speed_factor=speed_factor, _context=ctx)
+        blobs, ee = _fresh_blobs(color, camera, ctx, close=False)
+        if blobs:
+            blob = max(blobs, key=lambda q: q["npix"])
+            far = predict_world_xy(camera_map, ee, blob["u"], blob["v"], blob["depth_m"])
+            break
+    if far is None:
+        return {"found": False, "reason": f"{color} not seen from any survey pose"}
+    if not _within(far, WORKSPACE_FOR_TARGETS):
+        return {"found": False, "reason": f"{color} predicted off the table at {far.tolist()}"}
+
+    current, accepted, rejected, blob = far, 0, 0, None
+    for _ in range(MAX_LOOKS):
+        command = current - b
+        if not _within(command, EE_LIMITS):
+            return {"found": False,
+                    "reason": f"{color}: refused to move to {np.round(command, 3).tolist()}"}
+        move_to_pose([float(command[0]), float(command[1]), LOOK_Z],
+                     speed_factor=speed_factor, _context=ctx)
+        blobs, ee = _fresh_blobs(color, camera, ctx, close=True)
+        if not blobs:
+            rejected += 1
+            continue
+        nearest = min(blobs, key=lambda q: math.hypot(q["u"] - CX_FOR_MAP, q["v"] - CY_FOR_MAP))
+        estimate = predict_world_xy(camera_map, ee, nearest["u"], nearest["v"], nearest["depth_m"])
+        if not _within(estimate, WORKSPACE_FOR_TARGETS) \
+                or np.linalg.norm(estimate - current) > MAX_LOOK_JUMP_M:
+            rejected += 1
+            continue
+        current, blob = estimate, nearest
+        accepted += 1
+        if accepted >= LOOKS_WANTED:
+            break
+    if accepted == 0:
+        return {"found": False, "reason": f"{color}: no close look was believable ({rejected} rejected)"}
+
+    metres_per_px = float(blob["depth_m"]) / FX_FOR_MAP
+    # extent_px is 2 sigma of the blob; a filled rectangle's side is sqrt(12) sigma.
+    long_m, short_m = (math.sqrt(3.0) * float(e) * metres_per_px for e in blob["extent_px"])
+    return {"found": True, "xy": [float(current[0]), float(current[1])],
+            "long_axis_deg": image_axis_to_world_deg(camera_map, blob["angle_deg"]),
+            "long_m": long_m, "short_m": short_m, "body_long_m": long_m, "body_short_m": short_m,
+            "fit_rms_mm": 0.0, "far_xy": [float(far[0]), float(far[1])],
+            "accepted_looks": accepted, "rejected_looks": rejected, "method": "camera",
+            "npix": blob["npix"]}
 
 
 def wrist_quaternion(long_axis_deg: float) -> list[float]:
@@ -411,6 +558,7 @@ def touch_stack(
     base_xy: Optional[list] = None,
     pick_xy: Optional[list] = None,
     measure_only: bool = False,
+    locate_by: str = "camera",
     camera: Optional[str] = None,
     coarse_step: float = 0.040,
     search_radius: float = 0.135,
@@ -480,7 +628,31 @@ def touch_stack(
                 f"{len(touch.records)} probes" + (f"; {note}" if note else "")))
         return out
 
+    camera_map = load_camera_map(_store) if locate_by == "camera" else None
+
+    def locate_by_camera(label, color):
+        """The camera supplies the pose; touch confirms it from well inside the block."""
+        pose = look_twice(color, camera, camera_map, _context, speed_factor)
+        if not pose.get("found"):
+            return None, f"{label} ({color}): {pose.get('reason')}"
+        gripper.move(width=PROBE_OPEN_WIDTH, speed=0.1)
+        touch.top = None
+        top = touch.contact(*pose["xy"])
+        if top is None or top <= touch.table_ref + touch.min_object:
+            return None, (f"{label} ({color}): the camera put it at "
+                          f"{[round(v, 4) for v in pose['xy']]} but a probe there found no block")
+        pose["top"] = float(top)
+        emit("approach", "contact", f"felt_{label}",
+             {k: pose.get(k) for k in ("xy", "far_xy", "top", "long_axis_deg", "long_m", "short_m",
+                                       "accepted_looks", "rejected_looks", "method", "npix")})
+        return pose, None
+
     def locate(label, color, given):
+        if given is None and locate_by == "camera":
+            if camera_map is None:
+                return None, ("no camera map in the data directory: fit one, or pass "
+                              "base_xy and pick_xy to search by touch")
+            return locate_by_camera(label, color)
         seed = list(given) if given is not None \
             else _seed_from_camera(color, camera, speed_factor, _context)
         if seed is None:
@@ -515,6 +687,17 @@ def touch_stack(
     except _OutOfProbes as exc:
         return finish("touch_budget", note=str(exc))
 
+    # Camera-located blocks produce no table contacts. Take one, midway between them, only
+    # if that spot is well clear of both.
+    between = [(base["xy"][0] + pick["xy"][0]) / 2, (base["xy"][1] + pick["xy"][1]) / 2]
+    if base.get("method") == "camera" and pick.get("method") == "camera" \
+            and min(math.hypot(between[0] - o["xy"][0], between[1] - o["xy"][1])
+                    for o in (base, pick)) >= 0.09:
+        touch.top = None
+        try:
+            touch.contact(*between)
+        except _OutOfProbes:
+            pass
     table_z = touch.table_estimate()
     out["table_z"] = round(table_z, 4)
     base_height, pick_height = base["top"] - table_z, pick["top"] - table_z
@@ -660,6 +843,9 @@ PRIMITIVE_SPECS = [
                             "description": "search seed for the block to move"},
                 "measure_only": {"type": "boolean", "default": False,
                                  "description": "measure both blocks and stop before grasping"},
+                "locate_by": {"type": "string", "enum": ["camera", "touch"], "default": "camera",
+                              "description": "camera for loose blocks; touch only for fixed "
+                                             "targets, since edge probing turns light blocks"},
                 "camera": {"type": "string"},
                 "coarse_step": {"type": "number", "minimum": 0.015, "maximum": 0.048,
                                 "default": 0.040},
