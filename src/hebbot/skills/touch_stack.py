@@ -37,13 +37,25 @@ from hebbot.skills.selfcal import _observe, _spiral, image_to_world_offset
 DEFAULT_TABLE_Z = 0.0177
 MIN_OBJECT_M = 0.010
 TOP_TOLERANCE_M = 0.006          # a contact this far from the object's top is another surface
+CONFIRM_BAND_M = 0.0025          # a reading further than this from the top is re-probed
 
 FINGERTIP_M = 0.020              # a probe of finite width measures the object dilated by this
 PROBE_OPEN_WIDTH = 0.008
-PROBE_Z_FLOOR = 0.012
+# Commanded floor. At 0.012 the 5-7 mm of free-space tracking lag lands the hand at about
+# 0.0175 whether or not a table is there, so the "reading" was floor plus lag. At 0.008 the
+# hand can only stop at that height if something physical stopped it (2026-11-09).
+PROBE_Z_FLOOR = 0.008
+# Effectively removes the force trigger. The force zero is taken before the controller
+# engages and the estimate then shifts by up to 5 N in free air, so a 6 N trigger rode at
+# its threshold and fired in mid-air. Position lag is physical: at most 7.4 mm in free air
+# against the 10 mm trigger, measured over 60 probes.
+PROBE_FORCE_OFF_N = 30.0
 HOVER_Z = 0.09                   # clears a block lying on the table, saves ~4 s per probe
 GRASP_HEIGHT_M = 0.010           # EE this far above the table when closing on a lying block
 LIFT_Z = 0.22
+BASELINE_START_TICKS = 30        # at 100 Hz: skip the engagement transient, then
+BASELINE_END_TICKS = 50          # average the force estimate over the next 0.2 s
+CONTACT_SUSTAIN_TICKS = 5
 MIN_SEPARATION_M = 0.035         # two "objects" closer than this are one object
 # Largest bodies on this bench are about 67 x 37 mm. A ray can step across a narrow gap, so
 # two nearby blocks can measure as one big one; anything beyond these is refused, not fitted.
@@ -77,6 +89,8 @@ class _Touch:
         self.records: list[dict] = []
         self.cache: dict[tuple[int, int], Optional[float]] = {}
         self.excluded: list[dict] = []
+        self.top: Optional[float] = None   # the surface being measured, once one is known
+        self.describe: Optional[Callable[[], dict]] = None
 
     def _is_excluded(self, x: float, y: float) -> bool:
         return any(rect_distance((x, y), r["xy"], r["long_axis_deg"], r["half_long"],
@@ -90,13 +104,42 @@ class _Touch:
         key = (round(x * 1e4), round(y * 1e4))
         if key in self.cache:
             return self.cache[key]
+        readings = [self._read(x, y)]
+        if self._doubtful(readings[0]):
+            readings += [self._read(x, y), self._read(x, y)]
+        heard = [float(r) for r in readings if r is not None]
+        # One reading is taken at its word. Three are settled by the median, so a single
+        # false stop cannot decide. With fewer than two answers there is nothing to settle.
+        if len(readings) == 1:
+            z = readings[0]
+        else:
+            z = float(np.median(heard)) if len(heard) >= 2 else None
+        self.cache[key] = z
+        return z
+
+    def _read(self, x: float, y: float) -> Optional[float]:
         if len(self.records) >= self.max_probes:
             raise _OutOfProbes(f"probe budget of {self.max_probes} exhausted")
         z = self.sense(x, y)
-        self.cache[key] = z
-        self.records.append({"x": round(x, 4), "y": round(y, 4),
-                             "contact_z": None if z is None else round(float(z), 4)})
+        record = {"x": round(x, 4), "y": round(y, 4),
+                  "contact_z": None if z is None else round(float(z), 4)}
+        if self.describe is not None:
+            record.update(self.describe())
+        self.records.append(record)
         return z
+
+    def _doubtful(self, z: Optional[float]) -> bool:
+        """Is this a reading worth checking before believing it?
+
+        On 2026-11-09 about 7% of probes stopped in mid-air, at heights that are neither
+        table nor block top, and some landed within a few millimetres of the top. So only
+        a reading that matches the surface being measured, or the table, passes unchecked.
+        """
+        if z is None:
+            return True
+        if float(z) <= self.table_ref + self.min_object:
+            return False
+        return self.top is None or abs(float(z) - self.top) > CONFIRM_BAND_M
 
     def inside(self, x: float, y: float, top: Optional[float] = None) -> Optional[bool]:
         """True on the object, False off it, None if the probe could not tell."""
@@ -195,6 +238,7 @@ def feel_object(touch: _Touch, seed, *, coarse_step: float = 0.040,
     The coarse spacing is safe up to object width plus fingertip width: 28 + 20 mm for the
     narrowest block here, so 40 mm cannot step over one.
     """
+    touch.top = None
     first = None
     for dx, dy in _spiral(coarse_step, search_radius):
         point = (float(seed[0] + dx), float(seed[1] + dy))
@@ -205,6 +249,7 @@ def feel_object(touch: _Touch, seed, *, coarse_step: float = 0.040,
         return {"found": False,
                 "reason": f"nothing felt within {search_radius * 1000:.0f} mm of the seed"}
     top = float(touch.contact(*first))
+    touch.top = top
 
     # Rough centre, so the measuring rays start well inside and see every side.
     ends = {}
@@ -280,6 +325,10 @@ def _lower_until_contact(panda, *, start_z: float, floor_z: float, contact_force
     300 N/m about 13 mm, so the floor must sit far below the expected contact; it is the
     stop for a miss, not the target. The first 0.2 s is ignored because the controller's
     engagement transient once false-tripped and dropped a block from 19 cm (2026-06-28).
+
+    The force zero is averaged while already descending, after the estimate has settled:
+    measured on 2026-11-09 it takes about 0.3 s to shift by up to 5 N once the controller
+    engages, so a zero taken earlier leaves the trigger riding close to its threshold.
     """
     from panda_py import controllers
 
@@ -292,9 +341,10 @@ def _lower_until_contact(panda, *, start_z: float, floor_z: float, contact_force
     ctrl.set_nullspace_stiffness(1.0)
     dt = 0.01
     tz = float(position[2])
-    guard_z = start_z - 0.012
+    guard_z = start_z - 0.018
     fz0 = float(panda.get_state().O_F_ext_hat_K[2])
-    contact_z, settle, unload_ticks = None, 0, 0
+    contact_z, settle, unload_ticks, above = None, 0, 0, 0
+    baseline: list[float] = []
     panda.start_controller(ctrl)
     try:
         runtime = (start_z - floor_z) / speed + 2.0
@@ -313,11 +363,16 @@ def _lower_until_contact(panda, *, start_z: float, floor_z: float, contact_force
                 tz = max(floor_z, tz - speed * dt)
                 ctrl.set_control(np.array([x, y, tz]), quat, q0)
                 fz = float(panda.get_state().O_F_ext_hat_K[2])
-                if settle < 20:
+                if settle < BASELINE_END_TICKS:
                     settle += 1
-                    fz0 = fz
+                    if settle > BASELINE_START_TICKS:
+                        baseline.append(fz)
                     continue
-                if tz < guard_z and abs(fz - fz0) > contact_force:
+                if baseline:
+                    fz0, baseline = float(np.mean(baseline)), []
+                # A release is irreversible, so one noisy sample must not cause it.
+                above = above + 1 if abs(fz - fz0) > contact_force else 0
+                if tz < guard_z and above >= CONTACT_SUSTAIN_TICKS:
                     contact_z = actual
                     continue
                 if tz <= floor_z + 1e-4:
@@ -359,7 +414,7 @@ def touch_stack(
     camera: Optional[str] = None,
     coarse_step: float = 0.040,
     search_radius: float = 0.135,
-    max_probes: int = 180,
+    max_probes: int = 220,
     hover_z: float = HOVER_Z,
     lift_z: float = LIFT_Z,
     contact_force: float = 4.0,
@@ -390,15 +445,22 @@ def touch_stack(
             _record_event(phase, kind, label=label, data=data)
 
     hover = {"z": float(hover_z)}
+    last: dict = {}
 
     def sense(x, y):
         result = probe_table(x=x, y=y, open_width=PROBE_OPEN_WIDTH, z_floor=PROBE_Z_FLOOR,
-                             approach_z=hover["z"], retreat_z=hover["z"], _context=_context)
-        if result.get("contacted") is False:
-            return None                       # stalled in mid-air: no statement about height
+                             force_thresh=PROBE_FORCE_OFF_N, approach_z=hover["z"],
+                             retreat_z=hover["z"], _context=_context)
+        last.clear()
+        last.update({k: result.get(k) for k in ("trip", "lag_mm", "Fz", "dFz", "contacted")})
+        # `contacted` compares against the same unreliable force zero, so it is logged and
+        # not believed: it called 7 of 30 good table readings non-contact.
+        if result.get("trip") == "timeout":
+            return None
         return result.get("contact_z")
 
     touch = _Touch(sense, max_probes=int(max_probes))
+    touch.describe = lambda: dict(last)
     out: dict = {"_source": "live", "task_verified_success": False, "stage": "start",
                  "base_color": base_color, "pick_color": pick_color}
 
@@ -556,7 +618,8 @@ def touch_stack(
     a = math.radians(base["long_axis_deg"])
     readings, success = [], False
     touch.excluded.clear()
-    touch.max_probes = len(touch.records) + 3
+    touch.max_probes = len(touch.records) + 9
+    touch.top = None
     try:
         for offset in (0.0, 0.010, -0.010):
             z = touch.contact(bx + offset * math.cos(a), by + offset * math.sin(a))
@@ -602,7 +665,7 @@ PRIMITIVE_SPECS = [
                                 "default": 0.040},
                 "search_radius": {"type": "number", "minimum": 0.02, "maximum": 0.20,
                                   "default": 0.135},
-                "max_probes": {"type": "integer", "minimum": 10, "maximum": 300, "default": 180},
+                "max_probes": {"type": "integer", "minimum": 10, "maximum": 300, "default": 220},
                 "hover_z": {"type": "number", "minimum": 0.07, "maximum": 0.16, "default": 0.09},
                 "lift_z": {"type": "number", "minimum": 0.15, "maximum": 0.30, "default": 0.22},
                 "contact_force": {"type": "number", "minimum": 3.0, "maximum": 10.0,

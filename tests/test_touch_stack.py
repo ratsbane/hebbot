@@ -45,7 +45,8 @@ class World:
                 best = max(best, b.get("base_z", 0.0) + b["height"])
         return best
 
-    def probe_table(self, *, x, y, open_width, z_floor, approach_z, retreat_z, _context):
+    def probe_table(self, *, x, y, open_width, z_floor, approach_z, retreat_z, _context,
+                    force_thresh=6.0):
         self.probes.append((x, y))
         x += self.rng.gauss(0, self.noise)
         y += self.rng.gauss(0, self.noise)
@@ -159,6 +160,41 @@ def test_measurement_tolerates_probe_noise():
         pose = ts.feel_object(touch_for(world), (0.46, 0.0))
         errors.append(1000 * math.hypot(pose["xy"][0] - 0.45, pose["xy"][1] - 0.02))
     assert max(errors) < 7.0
+
+
+@pytest.mark.parametrize("seed", range(10))
+def test_mid_air_false_stops_do_not_corrupt_the_measurement(seed):
+    """The rate and height range measured on hardware on 2026-11-09."""
+    world = World([block(0.45, -0.05, angle=20)], seed=seed)
+    rng = random.Random(seed + 100)
+    real = world.probe_table
+
+    def glitchy(**kwargs):
+        result = real(**kwargs)
+        if rng.random() < 0.07:
+            result["contact_z"] = rng.uniform(0.033, 0.077)
+        return result
+
+    world.probe_table = glitchy
+    pose = ts.feel_object(touch_for(world, max_probes=300), (0.46, -0.04))
+    assert pose["found"]
+    assert 1000 * math.hypot(pose["xy"][0] - 0.45, pose["xy"][1] + 0.05) < 6.0
+    assert axis_error(pose["long_axis_deg"], 20) < 15.0
+    assert pose["body_long_m"] == pytest.approx(0.055, abs=0.012)
+
+
+def test_a_clean_table_reading_is_not_probed_twice():
+    world = World([])
+    touch = touch_for(world)
+    touch.contact(0.45, 0.0)
+    assert len(touch.records) == 1
+
+
+def test_a_stalled_probe_is_retried_and_can_recover():
+    answers = iter([None, TABLE, TABLE])
+    touch = ts._Touch(lambda x, y: next(answers))
+    assert touch.contact(0.45, 0.0) == pytest.approx(TABLE)
+    assert len(touch.records) == 3
 
 
 def test_a_neighbour_is_not_absorbed_into_the_object():
@@ -319,6 +355,114 @@ def test_merged_blocks_are_refused_by_size(bench, monkeypatch):
     monkeypatch.setattr(ts, "feel_object", merged)
     result, _ = run(bench(world))
     assert result["stage"] == "size_base" and world.grasps == []
+
+
+class FakeImpedance:
+    last = None
+
+    def __init__(self):
+        FakeImpedance.last = self
+        self.z = None
+
+    def set_impedance(self, matrix):
+        pass
+
+    def set_nullspace_stiffness(self, value):
+        pass
+
+    def set_control(self, position, quat, q0):
+        self.z = float(position[2])
+
+
+class FakeDescent:
+    """An arm that tracks its command, with a scripted force estimate per tick."""
+
+    def __init__(self, z, force_at):
+        self.z, self.force_at, self.tick, self.controller_on = z, force_at, 0, False
+
+    def get_position(self):
+        if FakeImpedance.last is not None and FakeImpedance.last.z is not None:
+            self.z = FakeImpedance.last.z
+        return [0.45, 0.0, self.z]
+
+    def get_orientation(self):
+        return [0.0, 1.0, 0.0, 0.0]
+
+    def get_state(self):
+        return type("S", (), {"q": [0.0] * 7, "O_F_ext_hat_K": [0, 0, self.force_at(self.tick), 0, 0, 0]})()
+
+    def start_controller(self, controller):
+        self.controller_on = True
+
+    def stop_controller(self):
+        self.controller_on = False
+
+    def create_context(self, frequency, max_runtime):
+        outer = self
+        limit = int(frequency * max_runtime)
+
+        class Context:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def ok(self):
+                outer.tick += 1
+                return outer.tick < limit
+
+        return Context()
+
+
+@pytest.fixture
+def fake_controllers(monkeypatch):
+    import sys
+    import types
+
+    FakeImpedance.last = None
+    module = types.ModuleType("panda_py")
+    module.controllers = types.SimpleNamespace(CartesianImpedance=FakeImpedance)
+    monkeypatch.setitem(sys.modules, "panda_py", module)
+
+
+def engaged_offset(tick):
+    """The free-air shift measured on 2026-11-09: starts at 0, reaches -5 N in 0.3 s."""
+    return 5.0 - min(tick / 30.0, 1.0) * 5.0
+
+
+def test_controller_engagement_shift_does_not_release_the_block(fake_controllers):
+    arm = FakeDescent(0.10, engaged_offset)
+    result = ts._lower_until_contact(arm, start_z=0.10, floor_z=0.04)
+    assert result["contact"] is False
+    assert arm.controller_on is False
+
+
+def test_one_noisy_sample_does_not_release_the_block(fake_controllers):
+    arm = FakeDescent(0.10, lambda t: engaged_offset(t) + (12.0 if t == 120 else 0.0))
+    assert ts._lower_until_contact(arm, start_z=0.10, floor_z=0.04)["contact"] is False
+
+
+def test_sustained_force_is_contact(fake_controllers):
+    arm = FakeDescent(0.10, lambda t: engaged_offset(t) + (7.0 if t >= 200 else 0.0))
+    result = ts._lower_until_contact(arm, start_z=0.10, floor_z=0.04)
+    assert result["contact"] is True
+    assert 0.04 < result["contact_z"] < 0.08
+    assert arm.controller_on is False
+
+
+def test_probing_does_not_use_the_force_trigger(bench):
+    world = World(two_blocks())
+    seen = []
+    real = world.probe_table
+
+    def spy(**kwargs):
+        seen.append((kwargs["force_thresh"], kwargs["z_floor"]))
+        return real(**kwargs)
+
+    world.probe_table = spy
+    run(bench(world), measure_only=True)
+    assert seen and all(f >= 20.0 and z == 0.008 for f, z in seen)
 
 
 def test_mock_mode_does_nothing():

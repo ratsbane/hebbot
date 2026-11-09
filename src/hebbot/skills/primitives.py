@@ -4099,6 +4099,7 @@ def probe_table(
     force_thresh: float = 6.0,
     approach_z: float = 0.16,
     retreat_z: float = 0.20,
+    record_trace: bool = False,
     _context: Optional[Any] = None,
 ) -> dict:
     """Compliant downward probe to calibrate gripper leveling. Opens the fingers, descends
@@ -4131,14 +4132,19 @@ def probe_table(
     z_start = float(panda.get_position()[2])
     tz = z_start
     fz0 = float(panda.get_state().O_F_ext_hat_K[2])
-    contact_z, wrench = None, None
+    contact_z, wrench, trip, lag_at_stop = None, None, "timeout", None
+    trace = []
     try:
         with panda.create_context(frequency=100, max_runtime=14.0) as cx:
+            ticks = 0
             while cx.ok():
                 tz = max(z_floor, tz - descent_speed * dt)
                 ctrl.set_control(np.array([x, y, tz]), quat, q0)
                 az = float(panda.get_position()[2])
                 fz = float(panda.get_state().O_F_ext_hat_K[2])
+                ticks += 1
+                if record_trace and ticks % 5 == 0:
+                    trace.append([round(az, 4), round(tz, 4), round(fz, 2)])
                 # Now that the arm actually REACHES the table and presses (nullspace freed, stiff
                 # Z), contact is clean: the actual z stalls on the surface while the commanded z
                 # keeps sinking below it, so (actual − commanded) opens up past the moving lag,
@@ -4146,10 +4152,12 @@ def probe_table(
                 if (z_start - az) > 0.010 and ((az - tz) > 0.010 or abs(fz - fz0) > force_thresh):
                     contact_z = az
                     wrench = [float(v) for v in panda.get_state().O_F_ext_hat_K]
+                    trip, lag_at_stop = ("lag" if (az - tz) > 0.010 else "force"), az - tz
                     break
                 if tz <= z_floor + 1e-4:
                     contact_z = az
                     wrench = [float(v) for v in panda.get_state().O_F_ext_hat_K]
+                    trip, lag_at_stop = "floor", az - tz
                     break
     finally:
         panda.stop_controller()
@@ -4162,7 +4170,12 @@ def probe_table(
     # corners the descent can't reach the surface and stalls with ~0 force — only a real press
     # (|ΔFz| ≳ 1.5 N) certifies the contact_z is the true surface (lab notebook 2026-06-27).
     contacted = bool(abs(wrench[2] - fz0) > 1.5)
+    diagnostics = {"trip": trip, "fz0": round(fz0, 2), "z_start": round(z_start, 4),
+                   "lag_mm": None if lag_at_stop is None else round(lag_at_stop * 1000, 1)}
+    if record_trace:
+        diagnostics["trace"] = trace
     return {"_source": "live", "contact_z": round(contact_z, 4), "contacted": contacted,
+            **diagnostics,
             "Fz": round(wrench[2], 2), "dFz": round(wrench[2] - fz0, 2),
             "Mx": round(wrench[3], 3), "My": round(wrench[4], 3), "Mz": round(wrench[5], 3),
             "orientation": [round(float(v), 4) for v in q]}

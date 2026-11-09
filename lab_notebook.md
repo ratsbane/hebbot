@@ -4123,3 +4123,52 @@ controller answering ping at 192.168.0.253.
 arm, FCI control, the cameras and cuRobo have not been run since the reboot. Kernel and NVIDIA
 updates on omen are now manual, including security updates. `docs/panda-setup.md` still describes the
 earlier Kbuild-edit method.
+
+---
+
+## 2026-11-09 — to read: RoboDojo
+
+*Noted by Claude at Doug's request; not yet read.* [RoboDojo](https://robodojo-benchmark.com/)
+([arXiv 2607.04434](https://arxiv.org/abs/2607.04434)) is a sim-and-real benchmark for generalist
+manipulation policies. Search summaries describe 42 Isaac Sim tasks and 18 real tasks, scored on
+generalization, memory, precision, long-horizon and open-vocabulary axes, with remote access to
+standardized hardware. Questions to answer when reading it: can an individual enter, and does an
+agent-plus-skills system fit its policy interface?
+
+---
+
+## 2026-11-09 (cont.) — the first touch_stack runs: the probe was lying, then the block was
+
+*Added by Claude, at the bench with Doug. `touch_stack` ran twice in `measure_only` on hardware;
+neither run produced a usable pose for both blocks, and no grasp was attempted. Doug saw the blocks
+shift during probing before the photos confirmed it.*
+
+### Finding #160 — a light block yields to a probe coming down beside it, so "the probe read table" does not mean nothing was there
+
+| # | Finding |
+|---|---------|
+| 160 | **Thirty probes along two lines read bare table every time, yet the blocks visibly turned as the lines passed them: green by very roughly 60 degrees and 61 px in u, blue by about 45 degrees and 49 px, photographed from one fixed pose after every probe, while look-only repeats differed by at most 2 px and the block not being probed stayed still.** The test was meant to compare contacts on the block's top against contacts at its edge, and it did not do that: the seed was wrong and no probe landed on a top. What it showed instead is worse for the method. A fingertip descending alongside a block can turn it aside and still arrive at the table, reading as an ordinary miss. The contact that moved the block is invisible in the height reading. The likely mechanism, not established here, is the fingertip side catching a corner on the way down. It also retroactively explains why both `measure_only` runs reported blocks larger than they are: the target moved during its own measurement. Unlike #152, this one was checked first, and Doug saw it happen. |
+
+### Two probe defects found on the way
+
+**False stops were a force-zero error, not the hover height.** The first run had 8 impossible
+readings in 114 probes. An interleaved test of 60 bare-table probes showed none at the 0.09 m hover
+and two at the old 0.16 m. `probe_table` zeroes force before the controller engages; once engaged, the
+estimate shifts by up to about 5 N in free air, so the 6 N trigger rides at its threshold. Free-air
+tracking lag peaked at 7.4 mm against the 10 mm lag trigger, so `touch_stack` now relies on lag.
+The same flaw existed in the placement descent, where a false trip would drop a block; it now
+averages its zero after the shift and requires 50 ms of sustained force. That descent has not yet
+run on hardware.
+
+**Table readings with a 0.012 m floor were floor plus lag.** About 5.5 mm of tracking lag lands the
+hand near 0.0175 whether or not a table is there, and 57 of 60 probes stopped this way. With the
+floor at 0.008 the table reads 0.0162, against 0.0165 from June. Treat earlier table heights taken
+with `z_floor=0.012` as not being contact measurements.
+
+### What holds and what does not
+
+Block tops read 0.0443-0.0462 m across 70 contacts with no false stops in the second run, and the
+skill refused its bad measurement instead of acting on it. But finding edges by descending near
+them does not work on blocks this light. Whether a probe landing squarely on top also moves one is
+still untested. #153's conclusion needs narrowing: touch found a block and grasped it, but touch
+near an unsecured light object disturbs it.
