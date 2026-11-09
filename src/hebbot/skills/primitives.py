@@ -4097,6 +4097,8 @@ def probe_table(
     descent_speed: float = 0.02,
     z_floor: float = 0.008,
     force_thresh: float = 6.0,
+    approach_z: float = 0.16,
+    retreat_z: float = 0.20,
     _context: Optional[Any] = None,
 ) -> dict:
     """Compliant downward probe to calibrate gripper leveling. Opens the fingers, descends
@@ -4114,7 +4116,7 @@ def probe_table(
     import numpy as np
     from panda_py import controllers
     q = orientation or [0.0, 1.0, 0.0, 0.0]
-    move_to_pose([x, y, 0.16], orientation=q, _context=_context)
+    move_to_pose([x, y, float(approach_z)], orientation=q, _context=_context)
     gripper.move(width=open_width, speed=0.1)
     quat = panda.get_orientation()
     q0 = np.array(panda.get_state().q)
@@ -4155,7 +4157,7 @@ def probe_table(
         wrench = [float(v) for v in panda.get_state().O_F_ext_hat_K]
         contact_z = float(panda.get_position()[2])
     p = panda.get_position()
-    move_to_pose([float(p[0]), float(p[1]), 0.20], orientation=q, _context=_context)
+    move_to_pose([float(p[0]), float(p[1]), float(retreat_z)], orientation=q, _context=_context)
     # `contacted`: did it actually PRESS the table (real contact) vs stall in mid-air? At hard
     # corners the descent can't reach the surface and stalls with ~0 force — only a real press
     # (|ΔFz| ≳ 1.5 N) certifies the contact_z is the true surface (lab notebook 2026-06-27).

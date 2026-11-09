@@ -187,6 +187,8 @@ def main() -> int:
         register_primitives(substrate)
         register_composed(substrate)
         register_selfcal(substrate)
+        from .skills.touch_stack import register_all as register_touch_stack
+        register_touch_stack(substrate)
         logger.info(f"Registered primitives. Skill count: {len(substrate.list_skills())}")
 
     hardware_ctx = make_hardware_context(
