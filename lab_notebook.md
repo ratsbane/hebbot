@@ -4198,3 +4198,10 @@ diagonal angles and widens the gap it needs along y; touch mode is reserved for 
 
 Not yet shown: a real grasp and placement from these poses, the placement descent on hardware,
 whether a centre probe moves a loose block, and accuracy on a third, independent block.
+
+**Later the same day: the first `touch_stack` stack.** With green taped as the base and blue loose,
+the skill picked blue and set it on green in 126 s and 10 probes: grasp closed at 29.0 mm, placement
+contact 0.1 mm from prediction, pile top 0.0753 m against 0.0754 expected, and the wrist photo shows
+blue on green. Six empty free-air descents first produced no false contacts. One trial, with a fixed
+base. Its log exposed a defect now fixed: the first verification probe returned a cached pre-placement
+reading, so only the second reading actually tested the pile.

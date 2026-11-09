@@ -801,6 +801,7 @@ def touch_stack(
     a = math.radians(base["long_axis_deg"])
     readings, success = [], False
     touch.excluded.clear()
+    touch.cache.clear()       # the scene has changed; an earlier reading here means nothing now
     touch.max_probes = len(touch.records) + 9
     touch.top = None
     try:

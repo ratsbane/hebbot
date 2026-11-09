@@ -526,6 +526,16 @@ def test_camera_located_blocks_stack_without_probing_edges(camera_bench):
     assert len(world.probes) <= 3 * 3 + 9
 
 
+def test_verification_probes_afresh_instead_of_reusing_the_earlier_reading(camera_bench):
+    world = World(two_blocks())
+    ctx, _ = camera_bench(world)
+    result = ts.touch_stack(_context=ctx)
+    assert result["stage"] == "stacked"
+    # The very first verification reading is at the base's centre, already probed once.
+    first = result["verify"]["readings"][0]
+    assert first == pytest.approx(result["verify"]["expected_top"], abs=0.002)
+
+
 def test_a_wild_close_reading_is_looked_at_again_and_never_acted_on(camera_bench):
     world = World(two_blocks())
     moves = []
