@@ -4094,3 +4094,32 @@ dispute here; the listed caveats apply symmetrically to every cell.
 2. **Adopt a bounded call budget** as a forcing function for efficient search.
 3. **Put the cost-per-deliberate-execution into the ENPIRE scorecard** as the denominator for the
    distillation argument.
+
+---
+
+## 2026-11-09 — omen would not boot: a lost NVIDIA patch left the realtime kernel with no initramfs
+
+*Added by Claude. Diagnosed from omen's apt, dpkg, DKMS and journal logs; the fix was verified by
+rebooting into the default kernel. Doug recalled the workaround of booting the previous kernel, and
+the logs bear that out: repeated reconfigure attempts on 2026-09-30.*
+
+### Finding #159 — a manual patch lived inside a package-owned folder, and its loss presented as a kernel panic
+
+| # | Finding |
+|---|---------|
+| 159 | **omen panicked on its GRUB default, `7.0.0-34-realtime`, because that kernel had no initramfs; the root cause was the loss of a hand edit, not a kernel or hardware fault.** The PREEMPT_RT bypass (`IGNORE_PREEMPT_RT_PRESENCE=1`) was a manual edit to `/usr/src/nvidia-595.84/dkms.conf`. The update to driver 595.91.07 replaced that folder, so DKMS began failing `preempt_rt_sanity_check` on every realtime kernel. `/etc/kernel/postinst.d/dkms` exited 1, run-parts stopped before the initramfs hook, and `/boot/initrd.img-7.0.0-34-realtime` was never written, while GRUB still listed the kernel as default. **The quieter consequence is that no NVIDIA module loaded on the realtime kernels after the boot ending 2026-09-11** (the last was `7.0.0-30-realtime` with 595.84). The last bench work recorded here was 2026-09-01, inside that boot, so no experiment in this notebook ran without the GPU. |
+
+**Fix.** `/etc/dkms/nvidia.conf` injects the bypass from outside the driver folder;
+`dpkg --configure -a` then built NVIDIA for `-34-realtime`, generated the initramfs and cleared the
+half-configured packages. NVIDIA was also installed for `-31-realtime` so the fallback kernel has a
+GPU. `/etc/apt/apt.conf.d/51hebbot-hold-kernel` excludes `linux-`, `nvidia-`, `libnvidia-` and
+`xserver-xorg-video-nvidia` from unattended-upgrades.
+
+**Verified after reboot:** `7.0.0-34-realtime`, `nvidia-smi` reporting the RTX 5060 Ti on driver
+595.91.07, `systemctl` state `running`, `ulimit -r` 99, no half-configured packages, and the Franka
+controller answering ping at 192.168.0.253.
+
+**Not verified:** the override has not yet been exercised by a real driver package update, and the
+arm, FCI control, the cameras and cuRobo have not been run since the reboot. Kernel and NVIDIA
+updates on omen are now manual, including security updates. `docs/panda-setup.md` still describes the
+earlier Kbuild-edit method.
