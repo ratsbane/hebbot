@@ -26,6 +26,7 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 
+from hebbot.memory.scene import load_scene_memory
 from hebbot.perception.target import locate as locate_target
 from hebbot.skills.primitives import (
     _extract, _qmul, _select_camera, grasp_at, move_to_pose, open_gripper, probe_table,
@@ -379,21 +380,32 @@ def _within(point, limits) -> bool:
 
 
 def look_twice(color: str, camera: Optional[str], camera_map: dict, ctx,
-               speed_factor: float) -> dict:
+               speed_factor: float, hint_xy: Optional[list] = None) -> dict:
     """Far look to get close, then re-look from directly above the block.
 
     Measured on 2026-11-09 with the map fit on the other block: 8-14 mm from afar, about
     6 mm from above. A reading that jumps is discarded and looked at again; nothing the
     camera says moves the arm unless it stays on the table and inside the limits.
+
+    A hint from the scene memory is tried before the survey poses: one look straight at
+    where the block last was. The hint never supplies the pose, only the viewpoint, so a
+    stale memory costs one wasted look and cannot shift the answer. A block seen from the
+    hint pose skips the survey sweep entirely.
     """
     b = np.asarray(camera_map["b"])
-    far = None
-    for pose in SURVEY_POSES:
+    survey = [(p[0], p[1]) for p in SURVEY_POSES]
+    if hint_xy is not None:
+        viewpoint = np.asarray(hint_xy, dtype=float)[:2] - b
+        if _within(viewpoint, EE_LIMITS):
+            survey.insert(0, (float(viewpoint[0]), float(viewpoint[1])))
+    far, hinted = None, False
+    for index, pose in enumerate(survey):
         move_to_pose([pose[0], pose[1], LOOK_Z], speed_factor=speed_factor, _context=ctx)
         blobs, ee = _fresh_blobs(color, camera, ctx, close=False)
         if blobs:
             blob = max(blobs, key=lambda q: q["npix"])
             far = predict_world_xy(camera_map, ee, blob["u"], blob["v"], blob["depth_m"])
+            hinted = hint_xy is not None and len(survey) > len(SURVEY_POSES) and index == 0
             break
     if far is None:
         return {"found": False, "reason": f"{color} not seen from any survey pose"}
@@ -433,7 +445,7 @@ def look_twice(color: str, camera: Optional[str], camera_map: dict, ctx,
             "long_m": long_m, "short_m": short_m, "body_long_m": long_m, "body_short_m": short_m,
             "fit_rms_mm": 0.0, "far_xy": [float(far[0]), float(far[1])],
             "accepted_looks": accepted, "rejected_looks": rejected, "method": "camera",
-            "npix": blob["npix"]}
+            "npix": blob["npix"], "hinted": hinted}
 
 
 def wrist_quaternion(long_axis_deg: float) -> list[float]:
@@ -612,6 +624,23 @@ def touch_stack(
     out: dict = {"_source": "live", "task_verified_success": False, "stage": "start",
                  "base_color": base_color, "pick_color": pick_color}
 
+    # The scene memory outlives this attempt: what is learned here seeds the next run.
+    memory = load_scene_memory(_store)
+
+    def commit_pose(color, pose):
+        """A located block becomes a belief: pose, error bar, and body size if touched."""
+        if memory is None:
+            return
+        by_camera = pose.get("method") == "camera"
+        memory.observe(color, sensor="camera+touch" if by_camera else "touch",
+                       xy=pose["xy"], top_z=pose.get("top"), yaw_deg=pose["long_axis_deg"],
+                       precision_m=0.006 if by_camera else 0.003,
+                       data={"fit_rms_mm": pose.get("fit_rms_mm"), "hinted": pose.get("hinted")})
+        if not by_camera:
+            # Camera sizes come from blob extents and are rough; only touch fits are kept.
+            memory.note(color, body_long_m=round(pose["body_long_m"], 4),
+                        body_short_m=round(pose["body_short_m"], 4))
+
     def finish(stage, *, success=False, note=None, refusal=False):
         out.update({"stage": stage, "task_verified_success": success, "note": note,
                     "n_probes": len(touch.records), "elapsed_s": round(time.time() - started, 1),
@@ -626,13 +655,20 @@ def touch_stack(
             _log_decision("orchestrator", reasoning=(
                 f"touch_stack {pick_color} on {base_color}: {stage}, "
                 f"{len(touch.records)} probes" + (f"; {note}" if note else "")))
+        if memory is not None:
+            memory.close()
         return out
 
     camera_map = load_camera_map(_store) if locate_by == "camera" else None
 
     def locate_by_camera(label, color):
         """The camera supplies the pose; touch confirms it from well inside the block."""
-        pose = look_twice(color, camera, camera_map, _context, speed_factor)
+        hint = None
+        if memory is not None:
+            believed = memory.belief(color)
+            if believed and believed.get("xy") and not believed["properties"].get("in_gripper"):
+                hint = believed["xy"]
+        pose = look_twice(color, camera, camera_map, _context, speed_factor, hint_xy=hint)
         if not pose.get("found"):
             return None, f"{label} ({color}): {pose.get('reason')}"
         gripper.move(width=PROBE_OPEN_WIDTH, speed=0.1)
@@ -644,7 +680,8 @@ def touch_stack(
         pose["top"] = float(top)
         emit("approach", "contact", f"felt_{label}",
              {k: pose.get(k) for k in ("xy", "far_xy", "top", "long_axis_deg", "long_m", "short_m",
-                                       "accepted_looks", "rejected_looks", "method", "npix")})
+                                       "accepted_looks", "rejected_looks", "method", "npix",
+                                       "hinted")})
         return pose, None
 
     def locate(label, color, given):
@@ -677,6 +714,7 @@ def touch_stack(
         if base is None:
             return finish("find_base", note=problem)
         out["base"] = _public(base)
+        commit_pose(base_color, base)
         touch.excluded.append({"xy": base["xy"], "long_axis_deg": base["long_axis_deg"],
                                "half_long": base["long_m"] / 2,
                                "half_short": base["short_m"] / 2, "margin": 0.006})
@@ -684,6 +722,7 @@ def touch_stack(
         if pick is None:
             return finish("find_pick", note=problem)
         out["pick"] = _public(pick)
+        commit_pose(pick_color, pick)
     except _OutOfProbes as exc:
         return finish("touch_budget", note=str(exc))
 
@@ -740,9 +779,15 @@ def touch_stack(
                                               "grip_high_mm", "note")}
     emit("grasp", "closure", "touch_grasp", out["grasp"])
     if not grasp.get("grasped"):
+        if memory is not None:
+            # The fingers reached the block and may have nudged it: the epoch moves on.
+            memory.act("grasp_failed", obj=pick_color, xy=pick["xy"])
         open_gripper(_context=_context)
         move_to_pose([px, py, lift_z], speed_factor=speed_factor, _context=_context)
         return finish("grasp", note=grasp.get("note") or "grasp failed")
+    if memory is not None:
+        memory.act("grasp", obj=pick_color, xy=pick["xy"])
+        memory.note(pick_color, in_gripper=True)
 
     # How far the block's underside hangs below the fingertips, from where the jaws actually
     # closed rather than where they were told to.
@@ -785,6 +830,14 @@ def touch_stack(
         move_to_pose([px, py, lift_z], orientation=pick_quat, speed_factor=speed_factor,
                      _context=_context)
         out["holding"] = not returned["contact"]
+        if memory is not None:
+            memory.act("return", obj=pick_color, xy=[px, py])
+            if returned["contact"]:
+                memory.note(pick_color, in_gripper=None)
+                memory.observe(pick_color, sensor="placement", xy=[px, py],
+                               precision_m=0.004, data={"returned": True})
+            else:
+                memory.note(pick_color, in_gripper=True)
         return finish("place_no_contact", note="no contact at the pile; block taken back")
 
     # A narrow, slow opening: the fingers still straddle only the block just placed.
@@ -792,6 +845,11 @@ def touch_stack(
     move_to_pose([bx, by, lift_z], orientation=place_quat, speed_factor=speed_factor,
                  _context=_context)
     open_gripper(_context=_context)
+    if memory is not None:
+        memory.act("place", obj=pick_color, xy=[bx, by])
+        memory.note(pick_color, in_gripper=None)
+        memory.observe(pick_color, sensor="placement", xy=[bx, by],
+                       yaw_deg=base["long_axis_deg"], precision_m=0.004)
 
     # The reading that settles it, and the only one that can: how tall is the pile now?
     # A wrist image cannot resolve height (#134).
@@ -818,6 +876,18 @@ def touch_stack(
     gripper_home_z = max(float(lift_z), expected_top + 0.06)
     move_to_pose([bx, by, gripper_home_z], speed_factor=speed_factor, _context=_context)
     open_gripper(_context=_context)
+    if memory is not None:
+        if success:
+            heard = next(z for z in reversed(readings) if z is not None)
+            memory.observe(pick_color, sensor="touch", xy=[bx, by], top_z=float(heard),
+                           precision_m=0.004, data={"verified": True})
+            memory.note(pick_color, resting_on=base_color)
+        else:
+            # The block left the gripper near here, but the pile did not verify: a vague
+            # memory is the honest one. The deleted resting_on says "whereabouts unsure".
+            memory.observe(pick_color, sensor="inference", xy=[bx, by], precision_m=0.030,
+                           data={"verified": False})
+            memory.note(pick_color, resting_on=None)
     return finish("stacked" if success else "not_stacked", success=success,
                   note=None if success else "pile is not one block taller")
 

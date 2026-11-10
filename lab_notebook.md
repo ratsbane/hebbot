@@ -4204,4 +4204,39 @@ the skill picked blue and set it on green in 126 s and 10 probes: grasp closed a
 contact 0.1 mm from prediction, pile top 0.0753 m against 0.0754 expected, and the wrist photo shows
 blue on green. Six empty free-air descents first produced no false contacts. One trial, with a fixed
 base. Its log exposed a defect now fixed: the first verification probe returned a cached pre-placement
-reading, so only the second reading actually tested the pile.
+reading, so only the second reading actually tested the pile. Doug inspected the stack by eye and
+found blue centred on green; that is a visual check, not a measured offset.
+
+## 2026-11-09 (cont.) — scene memory: beliefs with error bars, not a map
+
+Doug raised the day's design question: coding agents work partly because of external memory,
+and the robot needs its equivalent — muscle memory ("the cup only fit by its handle, wrist at
+90°"), spatial memory that is sometimes vague ("over there to the right"), and a fourth
+dimension, since things move. The day had already run the experiment twice: the stale
+verification cache was perceptual memory failing (a reading outlived the action that
+invalidated it), and the camera map is perceptual memory working (60 observations compressed
+into an affine map stamped "valid while the mount is unchanged").
+
+The design conclusion: a fact about code stays true until an observable edit; a fact about the
+table decays silently at a rate set by what it is about. So the store holds *beliefs* —
+every observation carries sensor, error bar, timestamp and a scene epoch — and the hard part
+is not storage but knowing when to stop believing. Vagueness is a coordinate with an honest
+3 cm error bar. Movement is detected, not tracked: the pre/post deltas that flagged `MOVED`
+in today's edge-probe log, generalized. Dense reconstruction (SLAM, NeRFs) deliberately
+refused: the coding-agent lesson is that cheap curated notes with an index beat total recall,
+and with only a wrist camera every look is an arm motion, so memory's job is choosing when a
+7–13 s observation is worth paying for again.
+
+Doug's instruction: this version contains errors we cannot predict; build it and find out.
+v1 is `hebbot.memory.scene` (`scene.sqlite` beside hebbot.db): `observations` are curated
+conclusions, not raw probes; `actions` advance the scene epoch (the cache bug generalized —
+old-epoch percepts are demoted, not deleted); object `properties` hold slow learned facts
+(body size from touch fits, `resting_on`, `in_gripper`, "taped down" via `scene_note`).
+`touch_stack` now writes poses, grasps, places, returns and verifications into it, and reads
+one hint back: a remembered position gets one look before the survey sweep. The hint supplies
+only the viewpoint, never the pose, so a stale memory costs one wasted look (~8 s) and cannot
+shift the answer. `scene_recall` renders it as prose for the orchestrator — one line per
+object with position, ±mm, sensor, age and actions-since. The July image-frame store
+(`scene_sync`, scene.json) stays; porting its moved/appeared/disappeared association onto the
+world-frame store is future work. 185 tests pass (15 new). Not yet shown: any of it on
+hardware, whether the hint actually saves time there, and what the unpredicted errors are.
