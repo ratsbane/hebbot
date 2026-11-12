@@ -24,6 +24,7 @@ from .skill import (
     register,
 )
 from .store import Store
+from .verification import verification_status, verify_skill
 
 
 class Substrate:
@@ -96,6 +97,13 @@ class Substrate:
 
     def list_skills(self) -> list[dict]:
         return self.store.list_skills()
+
+    def verify(self, name: str, **kwargs: Any) -> dict:
+        """Run the verifier gate on a skill (see substrate/verification.py)."""
+        return verify_skill(self.store, name, **kwargs)
+
+    def verification_status(self, name: str, **kwargs: Any) -> dict:
+        return verification_status(self.store, name, **kwargs)
 
     def close(self) -> None:
         self.store.close()

@@ -440,3 +440,47 @@ class Store:
                 d[k] = _unjsonify(d[k])
             out.append(d)
         return out
+
+    # -----------------------------------------------------------------------
+    # Verifications (verifier-gate evidence; see substrate/verification.py)
+    # -----------------------------------------------------------------------
+
+    def record_verification(
+        self,
+        skill: str,
+        *,
+        episode_id: Optional[str] = None,
+        policy_version: Optional[str] = None,
+        hardware_tag: str = "default",
+        params: Optional[dict] = None,
+        success: bool = False,
+        note: Optional[str] = None,
+    ) -> str:
+        row_id = _uuid()
+        self.conn.execute(
+            "INSERT INTO verifications (id, t, skill, episode_id, policy_version,"
+            " hardware_tag, params, success, note) VALUES (?,?,?,?,?,?,?,?,?)",
+            (row_id, _now(), skill, episode_id, policy_version, hardware_tag,
+             _jsonify(params), int(bool(success)), note),
+        )
+        return row_id
+
+    def verifications(
+        self, skill: str, *, hardware_tag: Optional[str] = None
+    ) -> list[dict]:
+        if hardware_tag is None:
+            rows = self.conn.execute(
+                "SELECT * FROM verifications WHERE skill=? ORDER BY t DESC", (skill,)
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM verifications WHERE skill=? AND hardware_tag=?"
+                " ORDER BY t DESC", (skill, hardware_tag)
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["params"] = _unjsonify(d["params"])
+            d["success"] = bool(d["success"])
+            out.append(d)
+        return out

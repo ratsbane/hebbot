@@ -135,3 +135,21 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_episode_seq ON events(episode_id, seq);
 CREATE INDEX IF NOT EXISTS idx_events_phase ON events(episode_id, phase);
 CREATE INDEX IF NOT EXISTS idx_events_label ON events(episode_id, label);
+
+-- Verifier-gate evidence (2026-11-12, after ASPIRE's admission rule): one row per
+-- fresh-context verification run. Evidence binds to the exact behaviour that ran
+-- (policy_version / body hash) and a declared hardware tag, so editing a skill or
+-- changing the hardware silently expires it instead of letting stale proof vouch
+-- for new behaviour.
+CREATE TABLE IF NOT EXISTS verifications (
+    id TEXT PRIMARY KEY,
+    t REAL NOT NULL,
+    skill TEXT NOT NULL,
+    episode_id TEXT,
+    policy_version TEXT,
+    hardware_tag TEXT NOT NULL DEFAULT 'default',
+    params TEXT,
+    success INTEGER NOT NULL,
+    note TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_verifications_skill ON verifications (skill, t DESC);
