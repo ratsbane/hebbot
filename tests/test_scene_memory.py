@@ -13,7 +13,7 @@ import pytest
 
 from hebbot.memory import scene as sm
 from hebbot.skills import touch_stack as ts
-from test_touch_stack import World, bench, camera_bench, two_blocks  # noqa: F401
+from test_touch_stack import TABLE, World, bench, camera_bench, two_blocks  # noqa: F401
 
 # ---------------------------------------------------------------------------
 # The store on its own
@@ -198,3 +198,229 @@ def test_scene_note_records_what_only_the_user_knows(tmp_path):
     noted = sm.scene_note(object="green", properties={"movable": False}, _store=store)
     assert noted["properties"]["movable"] is False
     assert "movable=False" in sm.scene_recall(_store=store)["summary"]
+
+
+# ---------------------------------------------------------------------------
+# touch_unstack: the self-reset routine, acting from memory alone
+# ---------------------------------------------------------------------------
+
+
+class RoundTripWorld(World):
+    """A world whose grasp knows height and whose release works anywhere.
+
+    The base World closes on the first block near the jaws' xy — blind to z, which is
+    fine when blocks never share a footprint — and its release only lands on the other
+    block. Unstacking grasps from a pile, where only the closing height tells the two
+    blocks apart, and releases onto bare table.
+    """
+
+    def grasp_at(self, *, grasp_z, width, open_width, descent_speed, _context):
+        x, y = self.pose[:2]
+        self.grasps.append({"xy": (x, y), "open_width": open_width,
+                            "orientation": self.orientation})
+        for b in self.blocks:
+            bottom = TABLE + b.get("base_z", 0.0)
+            if math.hypot(b["xy"][0] - x, b["xy"][1] - y) < 0.02 \
+                    and bottom <= grasp_z <= bottom + b["height"]:
+                self.held = b
+                self.pose[2] = grasp_z
+                self.gripper.width = b["width"]
+                return {"grasped": True, "actual_z": grasp_z, "actual_width": b["width"],
+                        "grip_high_mm": 0.0}
+        return {"grasped": False, "actual_z": grasp_z, "note": "closed on air"}
+
+    def release(self):
+        self.open_events.append(tuple(self.pose))
+        if self.held is None:
+            return
+        near = next((b for b in self.blocks if b is not self.held
+                     and math.hypot(self.pose[0] - b["xy"][0],
+                                    self.pose[1] - b["xy"][1]) < 0.02), None)
+        base_z = near.get("base_z", 0.0) + near["height"] if near is not None else 0.0
+        self.held.update(xy=tuple(self.pose[:2]), base_z=base_z)
+        self.released_at = tuple(self.pose)
+        self.held = None
+
+
+def stacked_world(bench, store):
+    world = RoundTripWorld(two_blocks())
+    ctx = bench(world)
+    result = ts.touch_stack(base_xy=[0.51, -0.01], pick_xy=[0.44, -0.15],
+                            _context=ctx, _store=store)
+    assert result["stage"] == "stacked"
+    return world, ctx
+
+
+def test_unstack_round_trips_the_block_to_a_chosen_spot(bench, tmp_path):
+    store = Store(tmp_path)
+    world, ctx = stacked_world(bench, store)
+    result = ts.touch_unstack(dest_xy=[0.38, 0.15], _context=ctx, _store=store)
+    assert result["stage"] == "reset" and result["task_verified_success"] is True
+    assert world.blocks[1]["xy"] == pytest.approx((0.38, 0.15), abs=0.001)
+    assert world.blocks[1]["base_z"] == 0.0
+    memory = sm.SceneMemory(tmp_path / "scene.sqlite")
+    blue = memory.belief("blue")
+    assert blue["properties"]["resting_on"] == "table"
+    assert "in_gripper" not in blue["properties"]
+    assert blue["xy"] == pytest.approx([0.38, 0.15], abs=0.001)
+    assert memory.epoch() == 4   # stack's grasp+place, then unstack's
+    memory.close()
+
+
+def test_unstack_then_stack_uses_the_reset_position(bench, tmp_path):
+    store = Store(tmp_path)
+    world, ctx = stacked_world(bench, store)
+    assert ts.touch_unstack(dest_xy=[0.38, 0.15], _context=ctx,
+                            _store=store)["task_verified_success"] is True
+    again = ts.touch_stack(base_xy=[0.51, -0.01], pick_xy=[0.38, 0.15],
+                           _context=ctx, _store=store)
+    assert again["stage"] == "stacked" and again["task_verified_success"] is True
+
+
+def test_unstack_samples_its_own_clear_destination(bench, tmp_path):
+    store = Store(tmp_path)
+    world, ctx = stacked_world(bench, store)
+    result = ts.touch_unstack(_context=ctx, _store=store)
+    assert result["stage"] == "reset" and result["task_verified_success"] is True
+    dx, dy = result["dest_xy"]
+    green = world.blocks[0]["xy"]
+    assert math.hypot(dx - green[0], dy - green[1]) >= ts.RESET_CLEARANCE_M
+    assert ts.RESET_X[0] <= dx <= ts.RESET_X[1] and ts.RESET_Y[0] <= dy <= ts.RESET_Y[1]
+
+
+def test_unstack_refuses_a_destination_near_a_believed_object(bench, tmp_path):
+    store = Store(tmp_path)
+    world, ctx = stacked_world(bench, store)
+    result = ts.touch_unstack(dest_xy=[0.50, -0.02], _context=ctx, _store=store)
+    assert result["stage"] == "dest_blocked" and len(world.grasps) == 1
+
+
+def test_unstack_never_places_on_a_surprise(bench, tmp_path):
+    store = Store(tmp_path)
+    world, ctx = stacked_world(bench, store)
+    # Something nobody told the memory about is sitting at the destination.
+    world.blocks.append({"xy": (0.38, 0.15), "angle": 0, "length": 0.055,
+                         "width": 0.028, "height": 0.027})
+    result = ts.touch_unstack(dest_xy=[0.38, 0.15], _context=ctx, _store=store)
+    assert result["stage"] == "no_destination" and len(world.grasps) == 1
+
+
+def test_unstack_refuses_when_the_pile_is_not_as_remembered(bench, tmp_path):
+    store = Store(tmp_path)
+    world, ctx = stacked_world(bench, store)
+    # The user took blue off the pile; the memory does not know.
+    world.blocks[1].update(xy=(0.40, 0.20), base_z=0.0)
+    result = ts.touch_unstack(_context=ctx, _store=store)
+    assert result["stage"] == "pile_changed" and len(world.grasps) == 1
+
+
+def test_unstack_refuses_without_a_remembered_pile(bench, tmp_path):
+    world = RoundTripWorld(two_blocks())
+    ctx = bench(world)
+    result = ts.touch_unstack(_context=ctx, _store=Store(tmp_path))
+    assert result["stage"] == "no_belief" and world.grasps == []
+
+
+# ---------------------------------------------------------------------------
+# Retraction and investigation: a failed grasp admits ignorance, a look repairs it
+# ---------------------------------------------------------------------------
+
+
+def test_a_failed_unstack_grasp_retracts_the_belief(bench, tmp_path, monkeypatch):
+    store = Store(tmp_path)
+    world, ctx = stacked_world(bench, store)
+    monkeypatch.setattr(ts, "grasp_at",
+                        lambda **kw: {"grasped": False, "note": "stalled on the top edge"})
+    result = ts.touch_unstack(_context=ctx, _store=store)
+    assert result["stage"] == "grasp"
+    memory = sm.SceneMemory(tmp_path / "scene.sqlite")
+    blue = memory.belief("blue")
+    assert blue["precision_m"] >= ts.FAILED_GRASP_RETRACT_M
+    assert "resting_on" not in blue["properties"]
+    memory.close()
+
+
+def test_a_failed_stack_grasp_retracts_the_belief(camera_bench, tmp_path, monkeypatch):
+    world = World(two_blocks())
+    ctx, _ = camera_bench(world)
+    store = Store(tmp_path)
+    monkeypatch.setattr(ts, "grasp_at",
+                        lambda **kw: {"grasped": False, "note": "closed on air"})
+    result = ts.touch_stack(_context=ctx, _store=store)
+    assert result["stage"] == "grasp"
+    memory = sm.SceneMemory(tmp_path / "scene.sqlite")
+    blue = memory.belief("blue")
+    assert blue["precision_m"] >= ts.FAILED_GRASP_RETRACT_M
+    assert "resting_on" not in blue["properties"]
+    memory.close()
+
+
+def test_look_rights_a_memory_the_world_has_left_behind(camera_bench, tmp_path):
+    """f1 (2026-11-11): blue left the pile; memory still said it was on green."""
+    world = RoundTripWorld(two_blocks())
+    ctx, _ = camera_bench(world)
+    store = Store(tmp_path)
+    assert ts.touch_stack(_context=ctx, _store=store)["stage"] == "stacked"
+    world.blocks[1].update(xy=(0.45, -0.20), base_z=0.0, angle=80)
+    result = ts.touch_look(_context=ctx, _store=store)
+    assert result["stage"] == "looked" and result["task_verified_success"] is True
+    assert result["found"]["blue"]["resting_on"] == "table"
+    memory = sm.SceneMemory(tmp_path / "scene.sqlite")
+    blue, green = memory.belief("blue"), memory.belief("green")
+    assert blue["properties"]["resting_on"] == "table"
+    assert blue["xy"] == pytest.approx([0.45, -0.20], abs=0.01)
+    assert blue["top_z"] == pytest.approx(TABLE + 0.027, abs=0.004)
+    assert green["properties"]["resting_on"] == "table"
+    memory.close()
+
+
+def test_look_accounts_for_a_base_hidden_under_the_pile(camera_bench, tmp_path):
+    """Only the top block of an aligned pile is visible; the base is vouched for, not seen."""
+    world = RoundTripWorld(two_blocks())
+    ctx, _ = camera_bench(world)
+    store = Store(tmp_path)
+    assert ts.touch_stack(_context=ctx, _store=store)["stage"] == "stacked"
+    result = ts.touch_look(_context=ctx, _store=store)
+    assert result["task_verified_success"] is True
+    assert result["found"]["blue"]["resting_on"] == "green"
+    assert result["found"]["green"]["found"] is False
+    memory = sm.SceneMemory(tmp_path / "scene.sqlite")
+    assert memory.belief("blue")["properties"]["resting_on"] == "green"
+    memory.close()
+
+
+def test_a_block_the_camera_cannot_find_is_not_invented(camera_bench, tmp_path, monkeypatch):
+    world = RoundTripWorld(two_blocks())
+    ctx, _ = camera_bench(world)
+    store = Store(tmp_path)
+    assert ts.touch_stack(_context=ctx, _store=store)["stage"] == "stacked"
+    monkeypatch.setattr(ts, "_fresh_blobs",
+                        lambda color, camera, c, close: ([], [0.42, -0.05, 0.31]))
+    result = ts.touch_look(_context=ctx, _store=store)
+    assert result["task_verified_success"] is False
+    assert result["stage"] == "look_incomplete"
+    memory = sm.SceneMemory(tmp_path / "scene.sqlite")
+    assert memory.belief("blue")["properties"]["resting_on"] == "green"   # untouched
+    memory.close()
+
+
+def test_a_shove_then_a_look_then_the_campaign_goes_on(camera_bench, tmp_path, monkeypatch):
+    """The whole f1 recovery, end to end: retraction, investigation, and back to work."""
+    world = RoundTripWorld(two_blocks())
+    ctx, _ = camera_bench(world)
+    store = Store(tmp_path)
+    assert ts.touch_stack(_context=ctx, _store=store)["stage"] == "stacked"
+
+    def shove(**kwargs):
+        world.blocks[1].update(xy=(0.44, -0.19), base_z=0.0, angle=80)
+        return {"grasped": False, "note": "air-close after persistent high contact"}
+
+    monkeypatch.setattr(ts, "grasp_at", shove)
+    failed = ts.touch_unstack(_context=ctx, _store=store)
+    assert failed["stage"] == "grasp"
+    monkeypatch.setattr(ts, "grasp_at", world.grasp_at)
+    look = ts.touch_look(_context=ctx, _store=store)
+    assert look["task_verified_success"] is True
+    assert look["found"]["blue"]["resting_on"] == "table"
+    again = ts.touch_stack(_context=ctx, _store=store)
+    assert again["stage"] == "stacked" and again["task_verified_success"] is True

@@ -461,6 +461,49 @@ def test_sustained_force_is_contact(fake_controllers):
     assert arm.controller_on is False
 
 
+class StalledDescent(FakeDescent):
+    """An arm held up by a surface its force estimate cannot feel.
+
+    u1 (2026-11-10): the place at (0.37, -0.20) pressed the block to the command floor
+    while O_F_ext_hat_K[2] never rose 4 N; the same spot's probe tripped on lag at -1.4 N.
+    `droop` is the steady free-air sag below the command that gravity model error buys at
+    300 N/m: u2 and r9b (2026-11-11) measured early releases of 14.5 and 23.4 mm when the
+    lag trigger ignored it.
+    """
+
+    def __init__(self, z, force_at, stall_z, droop=0.0):
+        super().__init__(z, force_at)
+        self.stall_z = stall_z
+        self.droop = droop
+
+    def get_position(self):
+        position = super().get_position()
+        self.z = max(self.z + self.droop, self.stall_z)
+        return [position[0], position[1], self.z]
+
+
+def test_a_surface_the_force_estimate_cannot_feel_is_still_contact(fake_controllers):
+    arm = StalledDescent(0.10, engaged_offset, stall_z=0.062)
+    result = ts._lower_until_contact(arm, start_z=0.10, floor_z=0.01)
+    assert result["contact"] is True
+    assert result["contact_z"] == pytest.approx(0.062, abs=0.002)
+    assert arm.controller_on is False
+
+
+def test_free_air_droop_is_not_contact(fake_controllers):
+    # The hand rides 12 mm above its sinking command the whole way down: gravity model
+    # error, not a surface. The old absolute-lag trigger released the block mid-air here.
+    arm = StalledDescent(0.10, engaged_offset, stall_z=-1.0, droop=0.012)
+    assert ts._lower_until_contact(arm, start_z=0.10, floor_z=0.04)["contact"] is False
+
+
+def test_a_drooping_arm_still_feels_a_silent_surface(fake_controllers):
+    arm = StalledDescent(0.10, engaged_offset, stall_z=0.062, droop=0.012)
+    result = ts._lower_until_contact(arm, start_z=0.10, floor_z=0.01)
+    assert result["contact"] is True
+    assert result["contact_z"] == pytest.approx(0.062, abs=0.002)
+
+
 def test_probing_does_not_use_the_force_trigger(bench):
     world = World(two_blocks())
     seen = []
@@ -488,6 +531,13 @@ def fake_camera(world, bad_frames=()):
             return ([{"u": 640.0, "v": 1.0, "npix": 900, "depth_m": 0.31, "angle_deg": 0.0,
                       "extent_px": [60.0, 30.0]}], list(world.pose))
         target = world.blocks[0] if color == "green" else world.blocks[1]
+        # The wrist camera is no X-ray: a block under another is invisible from above.
+        hidden = any(b is not target and b.get("base_z", 0.0) > target.get("base_z", 0.0)
+                     and math.hypot(b["xy"][0] - target["xy"][0],
+                                    b["xy"][1] - target["xy"][1]) < 0.02
+                     for b in world.blocks)
+        if hidden:
+            return [], list(world.pose)
         ee = np.array(world.pose[:2])
         offset = np.array(target["xy"]) - ee - np.array(MAP["b"])
         d = 0.31

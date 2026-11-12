@@ -62,7 +62,14 @@ LIFT_Z = 0.22
 BASELINE_START_TICKS = 30        # at 100 Hz: skip the engagement transient, then
 BASELINE_END_TICKS = 50          # average the force estimate over the next 0.2 s
 CONTACT_SUSTAIN_TICKS = 5
+CONTACT_LAG_M = 0.010            # the hand this far above its sinking command is contact,
+                                 # whatever the force estimate says (u1, 2026-11-10)
 MIN_SEPARATION_M = 0.035         # two "objects" closer than this are one object
+MIN_BLOCK_HEIGHT_M = 0.015       # a remembered pile implying a block outside these is not
+MAX_BLOCK_HEIGHT_M = 0.045       # a pile; and a probed top under the max is "on the table"
+FAILED_GRASP_RETRACT_M = 0.050   # f1 (2026-11-11): a failed grasp shoved a block 45 mm and
+                                 # turned it 90 deg, so a belief it touched is retracted to
+                                 # this error bar rather than merely aged
 # Largest bodies on this bench are about 67 x 37 mm. A ray can step across a narrow gap, so
 # two nearby blocks can measure as one big one; anything beyond these is refused, not fitted.
 MAX_BODY_LONG_M = 0.080
@@ -504,6 +511,10 @@ def _lower_until_contact(panda, *, start_z: float, floor_z: float, contact_force
     fz0 = float(panda.get_state().O_F_ext_hat_K[2])
     contact_z, settle, unload_ticks, above = None, 0, 0, 0
     baseline: list[float] = []
+    # At 300 N/m a ~3 N steady model error makes the hand ride ~10 mm above its sinking
+    # command in free air (u2 +14.5 mm, r9b +23.4 mm early releases), so the lag that
+    # means contact is growth beyond that free-air droop, not the absolute gap.
+    lag0, lag_samples = 0.0, []
     panda.start_controller(ctrl)
     try:
         runtime = (start_z - floor_z) / speed + 2.0
@@ -526,11 +537,18 @@ def _lower_until_contact(panda, *, start_z: float, floor_z: float, contact_force
                     settle += 1
                     if settle > BASELINE_START_TICKS:
                         baseline.append(fz)
+                        lag_samples.append(actual - tz)
                     continue
                 if baseline:
                     fz0, baseline = float(np.mean(baseline)), []
-                # A release is irreversible, so one noisy sample must not cause it.
-                above = above + 1 if abs(fz - fz0) > contact_force else 0
+                    lag0, lag_samples = float(np.mean(lag_samples)), []
+                # A release is irreversible, so one noisy sample must not cause it. Contact
+                # is force OR geometry: u1 (2026-11-10) pressed a block to the command floor
+                # at (0.37, -0.20) without the force estimate ever reaching 4 N, while the
+                # same spot's probe tripped on lag at -1.4 N. The estimate under-reads in
+                # some configurations, so the hand held above its command is contact too.
+                stalled = (actual - tz) - lag0 > CONTACT_LAG_M
+                above = above + 1 if stalled or abs(fz - fz0) > contact_force else 0
                 if tz < guard_z and above >= CONTACT_SUSTAIN_TICKS:
                     contact_z = actual
                     continue
@@ -780,8 +798,13 @@ def touch_stack(
     emit("grasp", "closure", "touch_grasp", out["grasp"])
     if not grasp.get("grasped"):
         if memory is not None:
-            # The fingers reached the block and may have nudged it: the epoch moves on.
+            # A failed grasp is an uncontrolled shove, not a nudge: f1 (2026-11-11) moved
+            # a block 45 mm. The position is retracted, and "resting_on" goes with it.
             memory.act("grasp_failed", obj=pick_color, xy=pick["xy"])
+            memory.observe(pick_color, sensor="inference", xy=pick["xy"],
+                           precision_m=FAILED_GRASP_RETRACT_M,
+                           data={"retracted": "grasp_failed"})
+            memory.note(pick_color, resting_on=None)
         open_gripper(_context=_context)
         move_to_pose([px, py, lift_z], speed_factor=speed_factor, _context=_context)
         return finish("grasp", note=grasp.get("note") or "grasp failed")
@@ -892,6 +915,442 @@ def touch_stack(
                   note=None if success else "pile is not one block taller")
 
 
+# Reset destinations keep the next run's close look inside EE_LIMITS: the close-look
+# viewpoint sits ~6 cm beyond the target in x, and r7 showed a block at x=0.53 already
+# pushes it to the boundary.
+RESET_X = (0.36, 0.52)
+RESET_Y = (-0.24, 0.24)
+RESET_CLEARANCE_M = 0.10         # from any believed object, plus that belief's error bar
+
+
+def touch_unstack(
+    *,
+    pick_color: str = "blue",
+    base_color: str = "green",
+    dest_xy: Optional[list] = None,
+    hover_z: float = HOVER_Z,
+    lift_z: float = LIFT_Z,
+    contact_force: float = 4.0,
+    max_probes: int = 40,
+    speed_factor: float = 0.06,
+    _context: Optional[Any] = None,
+    _store: Optional[Any] = None,
+    _episode_id: Optional[str] = None,
+    _log_decision: Optional[Any] = None,
+    _record_event: Optional[Any] = None,
+) -> dict:
+    """Take the pick block off the pile and set it on a clear patch of table.
+
+    touch_stack's inverse, and the first routine that acts from memory alone: no camera.
+    The remembered pile supplies the grasp, one probe confirms the pile is as remembered
+    before anything moves, and the destination is sampled away from every believed object
+    and probed as empty table before the block is committed to it. `task_verified_success`
+    is True only when a fresh probe finds the block at the destination at its remembered
+    height.
+    """
+    panda = _extract(_context, "panda")
+    gripper = _extract(_context, "gripper")
+    if panda is None or gripper is None:
+        return {"_source": "mock", "task_verified_success": None, "stage": "mock",
+                "note": "mock — no arm/gripper"}
+
+    started = time.time()
+
+    def emit(phase, kind, label, data):
+        if _record_event is not None:
+            _record_event(phase, kind, label=label, data=data)
+
+    hover = {"z": float(hover_z)}
+    last: dict = {}
+
+    def sense(x, y):
+        result = probe_table(x=x, y=y, open_width=PROBE_OPEN_WIDTH, z_floor=PROBE_Z_FLOOR,
+                             force_thresh=PROBE_FORCE_OFF_N, approach_z=hover["z"],
+                             retreat_z=hover["z"], _context=_context)
+        last.clear()
+        last.update({k: result.get(k) for k in ("trip", "lag_mm", "Fz", "dFz", "contacted")})
+        if result.get("trip") == "timeout":
+            return None
+        return result.get("contact_z")
+
+    touch = _Touch(sense, max_probes=int(max_probes))
+    touch.describe = lambda: dict(last)
+    out: dict = {"_source": "live", "task_verified_success": False, "stage": "start",
+                 "pick_color": pick_color, "base_color": base_color}
+    memory = load_scene_memory(_store)
+
+    def finish(stage, *, success=False, note=None, refusal=False):
+        out.update({"stage": stage, "task_verified_success": success, "note": note,
+                    "n_probes": len(touch.records), "elapsed_s": round(time.time() - started, 1),
+                    "probes": touch.records})
+        if refusal:
+            emit("abstain", "refusal", "touch_unstack_refused", {"stage": stage, "note": note})
+        emit("verify", "verdict", "task_verified",
+             {"task_verified_success": success, "stage": stage, "note": note,
+              "n_probes": len(touch.records), "elapsed_s": out["elapsed_s"]})
+        if _log_decision is not None:
+            _log_decision("orchestrator", reasoning=(
+                f"touch_unstack {pick_color} off {base_color}: {stage}, "
+                f"{len(touch.records)} probes" + (f"; {note}" if note else "")))
+        if memory is not None:
+            memory.close()
+        return out
+
+    if memory is None:
+        return finish("no_memory", refusal=True,
+                      note="touch_unstack acts from memory; none in the data directory")
+
+    pick = memory.belief(pick_color)
+    base = memory.belief(base_color)
+    if pick is None or pick.get("xy") is None or pick.get("top_z") is None:
+        return finish("no_belief", refusal=True,
+                      note=f"no remembered position and height for {pick_color}")
+    if pick["properties"].get("in_gripper"):
+        return finish("in_gripper", refusal=True,
+                      note=f"{pick_color} is remembered as still in the gripper")
+    if pick["properties"].get("resting_on") != base_color:
+        return finish("not_on_pile", refusal=True,
+                      note=f"{pick_color} is not remembered as resting on {base_color}")
+    if base is None or base.get("top_z") is None:
+        return finish("no_base_belief", refusal=True,
+                      note=f"no remembered height for {base_color}")
+
+    px, py = (float(v) for v in pick["xy"])
+    pile_top = float(pick["top_z"])
+    base_top = float(base["top_z"])
+    height = pile_top - base_top
+    if not MIN_BLOCK_HEIGHT_M <= height <= MAX_BLOCK_HEIGHT_M:
+        return finish("height", refusal=True,
+                      note=f"the remembered pile implies a {height * 1000:.0f} mm block")
+    yaw = float(pick.get("yaw_deg") or 0.0)
+    body_short = float(pick["properties"].get("body_short_m") or 0.032)
+    open_width = float(np.clip(body_short + 0.018, 0.040, 0.080))
+    out["believed"] = {"xy": [round(px, 4), round(py, 4)], "pile_top": round(pile_top, 4),
+                       "yaw_deg": round(yaw, 1), "age_s": pick.get("age_s"),
+                       "disturbances": len(pick.get("disturbances") or [])}
+
+    # One probe settles whether the world still matches the memory before anything moves.
+    hover["z"] = max(float(hover_z), pile_top + 0.03)
+    gripper.move(width=PROBE_OPEN_WIDTH, speed=0.1)
+    heard = touch.contact(px, py)
+    if heard is None or abs(heard - pile_top) > 0.008:
+        found = "nothing" if heard is None else f"a surface at {heard:.4f}"
+        return finish("pile_changed", refusal=True,
+                      note=f"memory put the pile top at {pile_top:.4f}; the probe found {found}")
+    out["pile_check_z"] = round(float(heard), 4)
+
+    # The destination: given, or sampled away from everything the memory believes in, then
+    # probed. Only a spot that answers "table" takes the block.
+    beliefs = memory.beliefs()
+    rng = np.random.default_rng()
+
+    def too_close(x, y):
+        for b in beliefs:
+            if b["name"] == pick_color or b.get("xy") is None:
+                continue
+            margin = RESET_CLEARANCE_M + float(b.get("precision_m") or 0.0)
+            if math.hypot(x - b["xy"][0], y - b["xy"][1]) < margin:
+                return b["name"]
+        if math.hypot(x - px, y - py) < RESET_CLEARANCE_M:
+            return "the pile"
+        return None
+
+    candidates = [list(dest_xy)] if dest_xy is not None else [
+        [float(rng.uniform(*RESET_X)), float(rng.uniform(*RESET_Y))] for _ in range(40)]
+    dest, dest_table, tried = None, None, []
+    for x, y in candidates:
+        blocker = too_close(x, y)
+        if blocker is not None:
+            if dest_xy is not None:
+                return finish("dest_blocked", refusal=True,
+                              note=f"the destination is within clearance of {blocker}")
+            continue
+        z = touch.contact(x, y)
+        tried.append({"xy": [round(x, 4), round(y, 4)],
+                      "contact_z": None if z is None else round(float(z), 4)})
+        # Stricter than the 10 mm object margin: u1's probe stalled 6 mm proud of the
+        # table at a spot the arm then could not press into. A destination must answer
+        # "table" to within 5 mm, or the block goes somewhere that does.
+        if z is not None and z <= touch.table_ref + 0.005:
+            dest, dest_table = [x, y], float(z)
+            break
+        if len(tried) >= 4:
+            break
+    out["dest_tried"] = tried
+    if dest is None:
+        return finish("no_destination", refusal=True,
+                      note="no sampled destination probed as clear table")
+    dx, dy = dest
+    out["dest_xy"] = [round(dx, 4), round(dy, 4)]
+
+    quat = wrist_quaternion(yaw)
+    open_gripper(_context=_context)
+    move_to_pose([px, py, max(0.13, pile_top + 0.05)], orientation=quat,
+                 speed_factor=speed_factor, _context=_context)
+    grasp = grasp_at(grasp_z=base_top + GRASP_HEIGHT_M,
+                     width=float(np.clip(body_short, 0.020, 0.045)),
+                     open_width=open_width, descent_speed=0.02, _context=_context)
+    out["grasp"] = {k: grasp.get(k) for k in ("grasped", "actual_z", "actual_width",
+                                              "grip_high_mm", "note")}
+    emit("grasp", "closure", "unstack_grasp", out["grasp"])
+    if not grasp.get("grasped"):
+        # The same retraction as touch_stack's: the fingers were just in contact with a
+        # block they failed to hold, so where it is now is not where it was remembered.
+        memory.act("grasp_failed", obj=pick_color, xy=[px, py])
+        memory.observe(pick_color, sensor="inference", xy=[px, py],
+                       precision_m=FAILED_GRASP_RETRACT_M,
+                       data={"retracted": "grasp_failed"})
+        memory.note(pick_color, resting_on=None)
+        open_gripper(_context=_context)
+        move_to_pose([px, py, lift_z], speed_factor=speed_factor, _context=_context)
+        return finish("grasp", note=grasp.get("note") or "grasp failed")
+    memory.act("grasp", obj=pick_color, xy=[px, py])
+    memory.note(pick_color, in_gripper=True)
+
+    hold_offset = float(grasp.get("actual_z") or base_top + GRASP_HEIGHT_M) - base_top
+    expected_contact = dest_table + hold_offset
+    out["expected_contact_z"] = round(expected_contact, 4)
+
+    move_to_pose([px, py, lift_z], orientation=quat, speed_factor=speed_factor,
+                 _context=_context)
+    move_to_pose([dx, dy, lift_z], orientation=quat, speed_factor=speed_factor,
+                 _context=_context)
+    move_to_pose([dx, dy, expected_contact + 0.035], orientation=quat,
+                 speed_factor=speed_factor, _context=_context)
+    placed = _lower_until_contact(panda, start_z=expected_contact + 0.035,
+                                  floor_z=expected_contact - 0.030,
+                                  contact_force=contact_force)
+    out["place"] = placed
+    if placed["contact"]:
+        out["place"]["z_error_mm"] = round((placed["contact_z"] - expected_contact) * 1000, 1)
+    emit("verify", "contact", "unstack_place", out["place"])
+
+    held_width = float(gripper.read_once().width)
+    if not placed["contact"]:
+        # The same rule as touch_stack: never open in free space; take it back to the pile.
+        back_start = base_top + hold_offset + 0.035
+        move_to_pose([dx, dy, lift_z], orientation=quat, speed_factor=speed_factor,
+                     _context=_context)
+        move_to_pose([px, py, lift_z], orientation=quat, speed_factor=speed_factor,
+                     _context=_context)
+        move_to_pose([px, py, back_start], orientation=quat, speed_factor=speed_factor,
+                     _context=_context)
+        returned = _lower_until_contact(panda, start_z=back_start,
+                                        floor_z=base_top + hold_offset - 0.030,
+                                        contact_force=contact_force)
+        out["returned"] = returned
+        if returned["contact"]:
+            gripper.move(width=min(0.08, held_width + 0.012), speed=0.02)
+        move_to_pose([px, py, lift_z], orientation=quat, speed_factor=speed_factor,
+                     _context=_context)
+        out["holding"] = not returned["contact"]
+        memory.act("return", obj=pick_color, xy=[px, py])
+        if returned["contact"]:
+            memory.note(pick_color, in_gripper=None)
+            memory.observe(pick_color, sensor="placement", xy=[px, py],
+                           precision_m=0.004, data={"returned": True})
+        else:
+            memory.note(pick_color, in_gripper=True)
+        return finish("place_no_contact", note="no contact at the destination; block taken back")
+
+    gripper.move(width=min(0.08, held_width + 0.012), speed=0.02)
+    move_to_pose([dx, dy, lift_z], orientation=quat, speed_factor=speed_factor,
+                 _context=_context)
+    open_gripper(_context=_context)
+    memory.act("place", obj=pick_color, xy=[dx, dy])
+    memory.note(pick_color, in_gripper=None, resting_on="table")
+    memory.observe(pick_color, sensor="placement", xy=[dx, dy], yaw_deg=yaw,
+                   precision_m=0.004)
+
+    expected_top = dest_table + height
+    hover["z"] = max(float(hover_z), expected_top + 0.03, pile_top + 0.03)
+    gripper.move(width=PROBE_OPEN_WIDTH, speed=0.1)
+    touch.cache.clear()       # the scene has changed; the table reading here means nothing now
+    touch.top = None
+    touch.max_probes = len(touch.records) + 6
+    readings, success = [], False
+    a = math.radians(yaw)
+    try:
+        for offset in (0.0, 0.010, -0.010):
+            z = touch.contact(dx + offset * math.cos(a), dy + offset * math.sin(a))
+            readings.append(z)
+            if z is not None and abs(z - expected_top) <= 0.008:
+                success = True
+                break
+    except _OutOfProbes:
+        pass
+    out["verify"] = {"expected_top": round(expected_top, 4),
+                     "readings": [None if z is None else round(float(z), 4) for z in readings]}
+    move_to_pose([dx, dy, max(float(lift_z), expected_top + 0.06)],
+                 speed_factor=speed_factor, _context=_context)
+    open_gripper(_context=_context)
+    if success:
+        heard = next(z for z in reversed(readings) if z is not None)
+        memory.observe(pick_color, sensor="touch", xy=[dx, dy], top_z=float(heard),
+                       precision_m=0.004, data={"verified": True})
+    else:
+        memory.observe(pick_color, sensor="inference", xy=[dx, dy], precision_m=0.030,
+                       data={"verified": False})
+        memory.note(pick_color, resting_on=None)
+    return finish("reset" if success else "not_reset", success=success,
+                  note=None if success else "the block did not verify at the destination")
+
+
+def touch_look(
+    *,
+    colors: Optional[list] = None,
+    camera: Optional[str] = None,
+    speed_factor: float = 0.06,
+    max_probes: int = 24,
+    _context: Optional[Any] = None,
+    _store: Optional[Any] = None,
+    _episode_id: Optional[str] = None,
+    _log_decision: Optional[Any] = None,
+    _record_event: Optional[Any] = None,
+) -> dict:
+    """Re-observe the scene: the camera finds each block, one probe confirms its height.
+
+    The investigation action. When an observation disagrees with memory the next step is
+    to look, not to stop: f1 (2026-11-11) halted a campaign over a shoved block that one
+    overhead capture would have found. Each block seen gets a fresh camera+touch belief,
+    and resting_on is re-derived from the probed height: a top within one block of the
+    table is "table", a taller top rests on the believed object beneath it. Looking only
+    moves the camera, so the scene epoch does not advance.
+
+    `task_verified_success` is True when every requested color is accounted for: either
+    seen and height-confirmed, or serving as the support a confirmed block rests on (a
+    base block fully hidden under a pile cannot be seen, and does not need to be).
+    """
+    panda = _extract(_context, "panda")
+    gripper = _extract(_context, "gripper")
+    if panda is None or gripper is None:
+        return {"_source": "mock", "task_verified_success": None, "stage": "mock",
+                "note": "mock — no arm/gripper"}
+
+    started = time.time()
+    colors = [str(c) for c in colors] if colors else ["blue", "green"]
+
+    def emit(phase, kind, label, data):
+        if _record_event is not None:
+            _record_event(phase, kind, label=label, data=data)
+
+    hover = {"z": float(HOVER_Z)}
+    last: dict = {}
+
+    def sense(x, y):
+        result = probe_table(x=x, y=y, open_width=PROBE_OPEN_WIDTH, z_floor=PROBE_Z_FLOOR,
+                             force_thresh=PROBE_FORCE_OFF_N, approach_z=hover["z"],
+                             retreat_z=hover["z"], _context=_context)
+        last.clear()
+        last.update({k: result.get(k) for k in ("trip", "lag_mm", "Fz", "dFz", "contacted")})
+        if result.get("trip") == "timeout":
+            return None
+        return result.get("contact_z")
+
+    touch = _Touch(sense, max_probes=int(max_probes))
+    touch.describe = lambda: dict(last)
+    out: dict = {"_source": "live", "task_verified_success": False, "stage": "start",
+                 "colors": list(colors)}
+    memory = load_scene_memory(_store)
+
+    def finish(stage, *, success=False, note=None, refusal=False):
+        out.update({"stage": stage, "task_verified_success": success, "note": note,
+                    "n_probes": len(touch.records), "elapsed_s": round(time.time() - started, 1),
+                    "probes": touch.records})
+        if refusal:
+            emit("abstain", "refusal", "touch_look_refused", {"stage": stage, "note": note})
+        emit("verify", "verdict", "task_verified",
+             {"task_verified_success": success, "stage": stage, "note": note,
+              "n_probes": len(touch.records), "elapsed_s": out["elapsed_s"]})
+        if _log_decision is not None:
+            _log_decision("orchestrator", reasoning=(
+                f"touch_look {', '.join(colors)}: {stage}, "
+                f"{len(touch.records)} probes" + (f"; {note}" if note else "")))
+        if memory is not None:
+            memory.close()
+        return out
+
+    if memory is None:
+        return finish("no_memory", refusal=True,
+                      note="touch_look exists to right the memory; none in the data directory")
+    camera_map = load_camera_map(_store)
+    if camera_map is None:
+        return finish("no_camera_map", refusal=True,
+                      note="no camera map in the data directory")
+
+    tops = [b["top_z"] for b in memory.beliefs() if b.get("top_z") is not None]
+    hover["z"] = max([float(HOVER_Z)] + [t + 0.03 for t in tops])
+
+    found: dict = {}
+    try:
+        for color in colors:
+            hint = None
+            believed = memory.belief(color)
+            if believed and believed.get("xy") and not believed["properties"].get("in_gripper"):
+                hint = believed["xy"]
+            pose = look_twice(color, camera, camera_map, _context, speed_factor, hint_xy=hint)
+            if not pose.get("found"):
+                found[color] = {"found": False, "reason": pose.get("reason")}
+                continue
+            gripper.move(width=PROBE_OPEN_WIDTH, speed=0.1)
+            touch.top = None
+            top = touch.contact(*pose["xy"])
+            entry = {"found": True, "xy": [round(float(v), 4) for v in pose["xy"]],
+                     "yaw_deg": round(pose["long_axis_deg"], 1), "hinted": pose.get("hinted")}
+            if top is None or top <= touch.table_ref + touch.min_object:
+                # The camera saw it, the finger found table: keep the sighting, with an
+                # error bar wide enough to admit that the two sensors disagree.
+                entry["confirmed"] = False
+                memory.observe(color, sensor="camera", xy=pose["xy"],
+                               yaw_deg=pose["long_axis_deg"], precision_m=0.010,
+                               data={"look": True, "confirmed": False})
+            else:
+                entry.update(confirmed=True, top_z=round(float(top), 4))
+                memory.observe(color, sensor="camera+touch", xy=pose["xy"],
+                               top_z=float(top), yaw_deg=pose["long_axis_deg"],
+                               precision_m=0.006, data={"look": True})
+                memory.note(color, in_gripper=None)
+            found[color] = entry
+            emit("approach", "contact", "looked_at", {"color": color, **entry})
+    except _OutOfProbes as exc:
+        out["found"] = found
+        return finish("touch_budget", note=str(exc))
+    out["found"] = found
+
+    table_z = touch.table_estimate()
+    out["table_z"] = round(table_z, 4)
+
+    def support_of(color, entry):
+        """What a tall block rests on: the believed object beneath it, if one is clear."""
+        for b in memory.beliefs():
+            if b["name"] == color or b.get("xy") is None:
+                continue
+            if math.hypot(entry["xy"][0] - b["xy"][0],
+                          entry["xy"][1] - b["xy"][1]) > MIN_SEPARATION_M:
+                continue
+            other = found.get(b["name"]) or {}
+            if other.get("confirmed") and other.get("top_z", 0.0) >= entry["top_z"] - 0.010:
+                continue   # just as tall as this one: side by side, not a support
+            return b["name"]
+        return None
+
+    for color, entry in found.items():
+        if not entry.get("confirmed"):
+            continue
+        if entry["top_z"] - table_z <= MAX_BLOCK_HEIGHT_M:
+            rest = "table"
+        else:
+            rest = support_of(color, entry)
+        memory.note(color, resting_on=rest)
+        entry["resting_on"] = rest
+
+    accounted = {c for c, e in found.items() if e.get("confirmed")}
+    accounted |= {e["resting_on"] for e in found.values() if e.get("resting_on")}
+    success = all(c in accounted for c in colors)
+    return finish("looked" if success else "look_incomplete", success=success,
+                  note=None if success else "not every block could be seen or accounted for")
+
+
 PRIMITIVE_SPECS = [
     {
         "name": "touch_stack",
@@ -929,6 +1388,53 @@ PRIMITIVE_SPECS = [
                                   "default": 4.0},
                 "max_fit_rms_mm": {"type": "number", "minimum": 1.0, "maximum": 30.0,
                                    "default": 8.0},
+                "speed_factor": {"type": "number", "minimum": 0.01, "maximum": 0.2,
+                                 "default": 0.06},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "touch_unstack",
+        "function_spec": "hebbot.skills.touch_stack:touch_unstack",
+        "expectations": {"checks": [
+            {"name": "reset", "field": "task_verified_success", "op": "eq", "value": True},
+        ]},
+        "params_schema": {
+            "type": "object",
+            "properties": {
+                "pick_color": {"type": "string", "enum": ["blue", "green", "red"],
+                               "default": "blue"},
+                "base_color": {"type": "string", "enum": ["blue", "green", "red"],
+                               "default": "green"},
+                "dest_xy": {"type": "array", "items": {"type": "number"},
+                            "minItems": 2, "maxItems": 2,
+                            "description": "where to put the block; omit to sample a clear spot"},
+                "hover_z": {"type": "number", "minimum": 0.07, "maximum": 0.16, "default": 0.09},
+                "lift_z": {"type": "number", "minimum": 0.15, "maximum": 0.30, "default": 0.22},
+                "contact_force": {"type": "number", "minimum": 3.0, "maximum": 10.0,
+                                  "default": 4.0},
+                "max_probes": {"type": "integer", "minimum": 6, "maximum": 80, "default": 40},
+                "speed_factor": {"type": "number", "minimum": 0.01, "maximum": 0.2,
+                                 "default": 0.06},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "touch_look",
+        "function_spec": "hebbot.skills.touch_stack:touch_look",
+        "expectations": {"checks": [
+            {"name": "looked", "field": "task_verified_success", "op": "eq", "value": True},
+        ]},
+        "params_schema": {
+            "type": "object",
+            "properties": {
+                "colors": {"type": "array",
+                           "items": {"type": "string", "enum": ["blue", "green", "red"]},
+                           "description": "blocks to re-observe; omit for blue and green"},
+                "camera": {"type": "string"},
+                "max_probes": {"type": "integer", "minimum": 4, "maximum": 60, "default": 24},
                 "speed_factor": {"type": "number", "minimum": 0.01, "maximum": 0.2,
                                  "default": 0.06},
             },
