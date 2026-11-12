@@ -4376,3 +4376,19 @@ Same-day context: NVIDIA announced GR00T 2 at CoRL — a 2B open "System One" wo
 model with LLM agents explicitly layered above it, few-demo LoRA adaptation, and no
 force sensing anywhere in sight; reading note in research_notes. The architecture bet
 is now consensus; the touch-verification niche is still empty.
+
+## 2026-11-12 (evening) — the verifier gate goes live: Hebbot's first verified skills
+
+ASPIRE's admission rule, ported this morning and run on hardware this evening:
+touch_stack, touch_unstack and touch_look are the substrate's first **verified** skills —
+two fresh-context dispatcher runs each, identity params only, judged by their own probed
+expectations, 6/6 legs with zero failures, evidence bound to fingerprint 148938ef06 under
+hardware tag omen-franka-d405-2026-11. Status is derived, never stored: the evidence
+expires the moment the source hash or hardware tag stops matching, which closes the
+limitation ASPIRE's own paper lists (sim-learned skills "verified only once at
+admission"). One property surfaced immediately: all three skills share a fingerprint
+because they share a source file, so editing any one demotes all three. Conservative and
+currently correct — they share contact constants — but per-function hashing is the known
+refinement if it chafes. The first real demotion arrives with the very next bench task:
+the yaw-offset measurement will edit touch_stack.py, expiring today's evidence by design,
+and the re-earn cycle will be the gate's first full revolution.
