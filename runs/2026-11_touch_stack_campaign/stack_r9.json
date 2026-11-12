@@ -1,0 +1,137 @@
+{
+ "success": false,
+ "result": {
+  "_source": "live",
+  "task_verified_success": false,
+  "stage": "corridor",
+  "base_color": "green",
+  "pick_color": "blue",
+  "base": {
+   "found": true,
+   "xy": [
+    0.4734042139992136,
+    -0.10621343737022304
+   ],
+   "long_axis_deg": -65.9559,
+   "long_m": 0.0654,
+   "short_m": 0.0318,
+   "body_long_m": 0.0654,
+   "body_short_m": 0.0318,
+   "fit_rms_mm": 0.0,
+   "far_xy": [
+    0.4716099004940548,
+    -0.10757606520530404
+   ],
+   "accepted_looks": 2,
+   "rejected_looks": 0,
+   "method": "camera",
+   "npix": 2552,
+   "hinted": true,
+   "top": 0.0458
+  },
+  "pick": {
+   "found": true,
+   "xy": [
+    0.4770833666496642,
+    -0.03776354212666537
+   ],
+   "long_axis_deg": 0.6585,
+   "long_m": 0.0674,
+   "short_m": 0.0331,
+   "body_long_m": 0.0674,
+   "body_short_m": 0.0331,
+   "fit_rms_mm": 0.0,
+   "far_xy": [
+    0.47633812852195734,
+    -0.03994405824862701
+   ],
+   "accepted_looks": 2,
+   "rejected_looks": 0,
+   "method": "camera",
+   "npix": 2784,
+   "hinted": true,
+   "top": 0.0453
+  },
+  "table_z": 0.0177,
+  "base_height_mm": 28.1,
+  "pick_height_mm": 27.6,
+  "open_width": 0.0511,
+  "note": "a finger would come down on the neighbouring block",
+  "n_probes": 6,
+  "elapsed_s": 58.1,
+  "probes": [
+   {
+    "x": 0.4734,
+    "y": -0.1062,
+    "contact_z": 0.0458,
+    "trip": "lag",
+    "lag_mm": 10.2,
+    "Fz": -3.63,
+    "dFz": -5.1,
+    "contacted": true
+   },
+   {
+    "x": 0.4734,
+    "y": -0.1062,
+    "contact_z": 0.0458,
+    "trip": "lag",
+    "lag_mm": 10.1,
+    "Fz": -3.21,
+    "dFz": -5.19,
+    "contacted": true
+   },
+   {
+    "x": 0.4734,
+    "y": -0.1062,
+    "contact_z": 0.0458,
+    "trip": "lag",
+    "lag_mm": 10.2,
+    "Fz": -3.42,
+    "dFz": -5.99,
+    "contacted": true
+   },
+   {
+    "x": 0.4771,
+    "y": -0.0378,
+    "contact_z": 0.0452,
+    "trip": "lag",
+    "lag_mm": 10.1,
+    "Fz": -3.26,
+    "dFz": -5.21,
+    "contacted": true
+   },
+   {
+    "x": 0.4771,
+    "y": -0.0378,
+    "contact_z": 0.0453,
+    "trip": "lag",
+    "lag_mm": 10.0,
+    "Fz": -3.29,
+    "dFz": -5.5,
+    "contacted": true
+   },
+   {
+    "x": 0.4771,
+    "y": -0.0378,
+    "contact_z": 0.0453,
+    "trip": "lag",
+    "lag_mm": 10.1,
+    "Fz": -3.1,
+    "dFz": -7.27,
+    "contacted": true
+   }
+  ]
+ },
+ "policy_version": "d406eb45b9",
+ "surprise": true,
+ "surprise_events": [
+  {
+   "check": "stacked",
+   "field": "task_verified_success",
+   "op": "eq",
+   "expected": "eq True",
+   "actual": false,
+   "message": "stacked: expected task_verified_success eq True, got False"
+  }
+ ]
+}

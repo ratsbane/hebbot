@@ -1,0 +1,7 @@
+{"t": 1794430731.1, "cycle": 0, "leg": "unstack", "stage": "reset", "success": true, "elapsed_s": 91.0, "n_probes": 7, "note": null, "z_error_mm": -0.6, "grip_high_mm": 1.4, "hinted": [null, null], "dest_xy": [0.5066, -0.0617]}
+{"t": 1794430843.8, "cycle": 1, "leg": "stack", "stage": "stacked", "success": true, "elapsed_s": 109.0, "n_probes": 9, "note": null, "z_error_mm": 7.2, "grip_high_mm": 1.0, "hinted": [true, true], "dest_xy": null}
+{"t": 1794430939.1, "cycle": 1, "leg": "unstack", "stage": "reset", "success": true, "elapsed_s": 92.1, "n_probes": 7, "note": null, "z_error_mm": -0.6, "grip_high_mm": 1.7, "hinted": [null, null], "dest_xy": [0.5155, -0.1449]}
+{"t": 1794431053.4, "cycle": 2, "leg": "stack", "stage": "stacked", "success": true, "elapsed_s": 110.5, "n_probes": 9, "note": null, "z_error_mm": 5.9, "grip_high_mm": 2.1, "hinted": [true, true], "dest_xy": null}
+{"t": 1794431144.4, "cycle": 2, "leg": "unstack", "stage": "reset", "success": true, "elapsed_s": 87.8, "n_probes": 7, "note": null, "z_error_mm": -0.1, "grip_high_mm": 4.1, "hinted": [null, null], "dest_xy": [0.5112, -0.2068]}
+{"t": 1794431259.7, "cycle": 3, "leg": "stack", "stage": "stacked", "success": true, "elapsed_s": 111.3, "n_probes": 9, "note": null, "z_error_mm": 0.9, "grip_high_mm": 0.0, "hinted": [true, true], "dest_xy": null}
+{"t": 1794431349.7, "cycle": 3, "leg": "unstack", "stage": "reset", "success": true, "elapsed_s": 86.8, "n_probes": 7, "note": null, "z_error_mm": -0.8, "grip_high_mm": 2.7, "hinted": [null, null], "dest_xy": [0.463, -0.0175]}

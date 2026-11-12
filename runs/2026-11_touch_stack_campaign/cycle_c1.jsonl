@@ -1,0 +1,4 @@
+{"t": 1794430096.0, "cycle": 1, "leg": "stack", "stage": "stacked", "success": true, "elapsed_s": 108.4, "n_probes": 9, "note": null, "z_error_mm": 1.4, "grip_high_mm": 3.2, "hinted": [true, true], "dest_xy": null}
+{"t": 1794430186.9, "cycle": 1, "leg": "unstack", "stage": "reset", "success": true, "elapsed_s": 87.7, "n_probes": 7, "note": null, "z_error_mm": -1.0, "grip_high_mm": 3.2, "hinted": [null, null], "dest_xy": [0.4421, -0.0023]}
+{"t": 1794430298.2, "cycle": 2, "leg": "stack", "stage": "stacked", "success": true, "elapsed_s": 108.0, "n_probes": 9, "note": null, "z_error_mm": 2.4, "grip_high_mm": 4.7, "hinted": [true, true], "dest_xy": null}
+{"t": 1794430344.2, "cycle": 2, "leg": "unstack", "stage": "grasp", "success": false, "elapsed_s": 42.9, "n_probes": 4, "note": "stalled at 0.0684 m (fingertip on object top) \u2014 not closing", "z_error_mm": null, "grip_high_mm": null, "hinted": [null, null], "dest_xy": [0.398, -0.0005]}

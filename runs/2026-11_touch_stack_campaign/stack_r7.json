@@ -1,0 +1,80 @@
+{
+ "success": false,
+ "result": {
+  "_source": "live",
+  "task_verified_success": false,
+  "stage": "find_pick",
+  "base_color": "green",
+  "pick_color": "blue",
+  "base": {
+   "found": true,
+   "xy": [
+    0.46925472877316954,
+    -0.17953937997777944
+   ],
+   "long_axis_deg": 0.8645,
+   "long_m": 0.0667,
+   "short_m": 0.032,
+   "body_long_m": 0.0667,
+   "body_short_m": 0.032,
+   "fit_rms_mm": 0.0,
+   "far_xy": [
+    0.47028680140941714,
+    -0.18069801494417573
+   ],
+   "accepted_looks": 2,
+   "rejected_looks": 0,
+   "method": "camera",
+   "npix": 2736,
+   "hinted": true,
+   "top": 0.0452
+  },
+  "note": "pick (blue): blue: refused to move to [0.601, 0.058]",
+  "n_probes": 3,
+  "elapsed_s": 39.9,
+  "probes": [
+   {
+    "x": 0.4693,
+    "y": -0.1795,
+    "contact_z": 0.0453,
+    "trip": "lag",
+    "lag_mm": 10.1,
+    "Fz": -3.27,
+    "dFz": -4.53,
+    "contacted": true
+   },
+   {
+    "x": 0.4693,
+    "y": -0.1795,
+    "contact_z": 0.0452,
+    "trip": "lag",
+    "lag_mm": 10.0,
+    "Fz": -3.49,
+    "dFz": -5.16,
+    "contacted": true
+   },
+   {
+    "x": 0.4693,
+    "y": -0.1795,
+    "contact_z": 0.0452,
+    "trip": "lag",
+    "lag_mm": 10.1,
+    "Fz": -3.56,
+    "dFz": -5.51,
+    "contacted": true
+   }
+  ]
+ },
+ "policy_version": "884a441c92",
+ "surprise": true,
+ "surprise_events": [
+  {
+   "check": "stacked",
+   "field": "task_verified_success",
+   "op": "eq",
+   "expected": "eq True",
+   "actual": false,
+   "message": "stacked: expected task_verified_success eq True, got False"
+  }
+ ]
+}

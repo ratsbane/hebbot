@@ -1,0 +1,129 @@
+{
+ "success": true,
+ "result": {
+  "_source": "live",
+  "task_verified_success": true,
+  "stage": "reset",
+  "pick_color": "blue",
+  "base_color": "green",
+  "believed": {
+   "xy": [
+    0.4728,
+    -0.1785
+   ],
+   "pile_top": 0.0749,
+   "yaw_deg": 2.1,
+   "age_s": 705.9,
+   "disturbances": 0
+  },
+  "pile_check_z": 0.0749,
+  "dest_tried": [
+   {
+    "xy": [
+     0.4671,
+     -0.0387
+    ],
+    "contact_z": 0.0159
+   }
+  ],
+  "dest_xy": [
+   0.4671,
+   -0.0387
+  ],
+  "grasp": {
+   "grasped": true,
+   "actual_z": 0.055932101714733284,
+   "actual_width": 0.02924005314707756,
+   "grip_high_mm": 0.5,
+   "note": null
+  },
+  "expected_contact_z": 0.0264,
+  "place": {
+   "contact": true,
+   "contact_z": 0.0409,
+   "z_error_mm": 14.5
+  },
+  "verify": {
+   "expected_top": 0.0454,
+   "readings": [
+    0.0451
+   ]
+  },
+  "note": null,
+  "n_probes": 7,
+  "elapsed_s": 84.3,
+  "probes": [
+   {
+    "x": 0.4728,
+    "y": -0.1785,
+    "contact_z": 0.0749,
+    "trip": "lag",
+    "lag_mm": 10.0,
+    "Fz": -4.13,
+    "dFz": -5.31,
+    "contacted": true
+   },
+   {
+    "x": 0.4728,
+    "y": -0.1785,
+    "contact_z": 0.0749,
+    "trip": "lag",
+    "lag_mm": 10.1,
+    "Fz": -4.04,
+    "dFz": -6.0,
+    "contacted": true
+   },
+   {
+    "x": 0.4728,
+    "y": -0.1785,
+    "contact_z": 0.0749,
+    "trip": "lag",
+    "lag_mm": 10.0,
+    "Fz": -4.0,
+    "dFz": -7.5,
+    "contacted": true
+   },
+   {
+    "x": 0.4671,
+    "y": -0.0387,
+    "contact_z": 0.0159,
+    "trip": "floor",
+    "lag_mm": 7.9,
+    "Fz": -5.55,
+    "dFz": -10.04,
+    "contacted": true
+   },
+   {
+    "x": 0.4671,
+    "y": -0.0387,
+    "contact_z": 0.0452,
+    "trip": "lag",
+    "lag_mm": 10.0,
+    "Fz": -2.85,
+    "dFz": -4.45,
+    "contacted": true
+   },
+   {
+    "x": 0.4671,
+    "y": -0.0387,
+    "contact_z": 0.0451,
+    "trip": "lag",
+    "lag_mm": 10.2,
+    "Fz": -3.53,
+    "dFz": -7.76,
+    "contacted": true
+   },
+   {
+    "x": 0.4671,
+    "y": -0.0387,
+    "contact_z": 0.0451,
+    "trip": "lag",
+    "lag_mm": 10.1,
+    "Fz": -3.47,
+    "dFz": -7.57,
+    "contacted": true
+   }
+  ]
+ },
+ "policy_version": "d406eb45b9"
+}

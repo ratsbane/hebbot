@@ -1,0 +1,108 @@
+{
+ "success": false,
+ "result": {
+  "_source": "live",
+  "task_verified_success": false,
+  "stage": "place_no_contact",
+  "pick_color": "blue",
+  "base_color": "green",
+  "believed": {
+   "xy": [
+    0.4728,
+    -0.1785
+   ],
+   "pile_top": 0.0749,
+   "yaw_deg": 2.1,
+   "age_s": 871.1,
+   "disturbances": 0
+  },
+  "pile_check_z": 0.0749,
+  "dest_tried": [
+   {
+    "xy": [
+     0.3678,
+     -0.2016
+    ],
+    "contact_z": 0.0237
+   }
+  ],
+  "dest_xy": [
+   0.3678,
+   -0.2016
+  ],
+  "grasp": {
+   "grasped": true,
+   "actual_z": 0.05687554846185581,
+   "actual_width": 0.02905881404876709,
+   "grip_high_mm": 1.5,
+   "note": null
+  },
+  "expected_contact_z": 0.0352,
+  "place": {
+   "contact": false,
+   "contact_z": null
+  },
+  "returned": {
+   "contact": true,
+   "contact_z": 0.057
+  },
+  "holding": false,
+  "note": "no contact at the destination; block taken back",
+  "n_probes": 4,
+  "elapsed_s": 74.9,
+  "probes": [
+   {
+    "x": 0.4728,
+    "y": -0.1785,
+    "contact_z": 0.0749,
+    "trip": "lag",
+    "lag_mm": 10.0,
+    "Fz": -4.01,
+    "dFz": -5.16,
+    "contacted": true
+   },
+   {
+    "x": 0.4728,
+    "y": -0.1785,
+    "contact_z": 0.0749,
+    "trip": "lag",
+    "lag_mm": 10.0,
+    "Fz": -3.63,
+    "dFz": -5.33,
+    "contacted": true
+   },
+   {
+    "x": 0.4728,
+    "y": -0.1785,
+    "contact_z": 0.0749,
+    "trip": "lag",
+    "lag_mm": 10.1,
+    "Fz": -3.67,
+    "dFz": -5.22,
+    "contacted": true
+   },
+   {
+    "x": 0.3678,
+    "y": -0.2016,
+    "contact_z": 0.0237,
+    "trip": "lag",
+    "lag_mm": 10.0,
+    "Fz": -1.42,
+    "dFz": -6.78,
+    "contacted": true
+   }
+  ]
+ },
+ "policy_version": "4ca7f5338f",
+ "surprise": true,
+ "surprise_events": [
+  {
+   "check": "reset",
+   "field": "task_verified_success",
+   "op": "eq",
+   "expected": "eq True",
+   "actual": false,
+   "message": "reset: expected task_verified_success eq True, got False"
+  }
+ ]
+}

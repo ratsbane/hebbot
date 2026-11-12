@@ -4240,3 +4240,114 @@ object with position, ±mm, sensor, age and actions-since. The July image-frame 
 (`scene_sync`, scene.json) stays; porting its moved/appeared/disappeared association onto the
 world-frame store is future work. 185 tests pass (15 new). Not yet shown: any of it on
 hardware, whether the hint actually saves time there, and what the unpredicted errors are.
+
+## 2026-11-10 — nine repeats: the memory on the bench, and what it is actually for
+
+Eight verified stacks in nine attempts (r1–r8, 112–138 s, zero failed stacks), through five
+taped rounds, an 11-hour overnight gap, and three loose-base rounds after the tape came off.
+The one non-success was r7: Doug set blue at x≈0.60 and the close-look viewpoint, which sits
+~6 cm beyond the target, fell 1 mm outside EE_LIMITS — a refusal, home in 40 s, nothing
+touched. Doug's verdict: the envelope is too conservative; the arm can reach that block.
+EE_LIMITS is a trust boundary on camera-derived commands (from the close-look crash), not
+reachability; widening x 0.60→~0.65 is a one-constant decision deferred to the code freeze.
+
+What the bench taught about the memory: position hints are nearly worthless *here* — the
+D405's field of view is so wide that the survey finds a block at pose 1 anyway, so a correct
+hint saves ~2 s and a stale one costs ~18 (r3, where the hint failed properly out-of-frame
+and the survey recovered). The real value was elsewhere. The disturbance ledger correctly
+flagged only the actions near each object (r1: green's `place`, not the 22-cm-distant
+grasp). The belief survived the night and woke correct (r4). And the store became a free
+drift recorder: green, loose, walked +x by 1–2 mm per run — 0.4672→0.4678→0.4693→0.4713→
+0.4728 across the loose rounds — exactly the tap-drift Doug's eye caught, now measured.
+Found wanting: a failed locate writes no negative evidence (r7 disproved blue's remembered
+spot and recorded nothing); `hinted:True` conflates memory-right with camera-wide; and my
+"beyond blue" compile of Doug's words for red was ~1 cm right on the constrained axis and
+~7 cm off on the invented one — told beliefs need anisotropic error bars. All queued, none
+built: the bench must force each.
+
+## 2026-11-11 — touch_unstack: the arm resets its own bench, and contact detection grows up
+
+The self-reset routine, `touch_unstack`, is touch_stack's inverse and the first skill that
+acts from memory alone — no camera. The remembered pile supplies grasp position, yaw, height
+and width; one probe confirms the pile is as remembered (±8 mm) before anything moves; the
+destination is sampled away from every belief by 10 cm plus that belief's own error bar (so
+red's told ±50 mm earns a 15 cm berth), probed as table, and only then trusted. The sim found
+its own bug first: the test world's grasp was height-blind and picked the base out from under
+the block at a shared xy; the real jaws close at base-top+10 mm, which only the pick spans,
+so the fix belonged in the test world.
+
+The hardware then taught contact detection three lessons in three runs. u1: the place at
+(0.37, −0.20) pressed the block to the command floor and the 4 N force rise never came — the
+external-force estimate under-reads near the workspace edge (the same spot's probe tripped on
+geometry at −1.4 N). The block came back to the pile untouched-by-failure: pile check 0.0749
+vs 0.0749 believed, return contact 0.0570 vs 0.0569 predicted, and the no-release-in-free-
+space rule meant a failed unstack was a no-op on the world. (I then misread the oblique wrist
+photo as "blue beside green" against the touch evidence; Doug's eyes corrected me. Touch said
+on-pile to 0.1 mm. Trust the contact.) Fix one: contact is force OR geometry — the hand held
+10 mm above its sinking command. u2 then reset verifiably (84 s) but released 14.5 mm high,
+and r9b 23.4 mm high: at 300 N/m a ~3 N gravity-model error makes the hand ride ~10 mm above
+its command in free air, exactly the lag threshold. Fix two: baseline the free-air droop in
+the settle window and trip on growth beyond it. u3 placed at +3.6 mm. Gentle.
+
+Between u2 and u3, the world intervened twice. Doug's table bump moved green 7.3 cm and spun
+it 66°; the stale hints still found everything (wide FOV), the scene was re-measured and
+rewritten, and the corridor check refused blue's grasp because green's new heading pointed
+its long end at the fingers — honest refusal, 58 s. The recovery was an orchestrator move,
+not a new skill: swap the parameters. r9b stacked *green on blue* — first inverted stack,
+grip_high 0.0 mm — and u3 unstacked it back to the table. A full autonomous double cycle:
+u2→r9b→u3, every leg verified by touch, the only human contribution an accident. Also found:
+a scene-wide action (`bumped`, no xy) shows per-object as "none near it" — the disturbance
+filter has no way to say "everything"; queued. 195 tests pass. Next: the alternating
+stack/unstack campaign loop, then the frozen 30-attempt run with Wilson intervals on the
+tally and refusal-vs-failure scoring decided at freeze time.
+
+## 2026-11-12 — the campaign fails, investigates itself, and finds a calibration bug
+
+The 30-attempt campaign began as a stop-rule exercise and became the best diagnostic
+session this bench has run. f1 opened 5/5 — stack places +1.6 to +9.4 mm, table places
+sub-millimetre — then halted on a cycle-5 unstack: the memory-only grasp air-closed
+(grip_high 8.9 mm) and the retry's pile check found 0.0444 m where memory said 0.0740.
+Doug's bench report: the failed grasp had shoved blue 4.5 cm sideways and spun it 90°.
+Everything after follows from that shove. The failure needed eyes, not hands — the human
+was serving as the camera the robot already owns — so we built what the halt priced out:
+(a) a failed grasp now *retracts* what it touched (inference ±50 mm, resting_on
+withdrawn; the honest "I don't know where it is now" instead of a confident lie), and
+(b) `touch_look`, the investigation skill — camera finds each block, one probe confirms
+its height, resting_on is re-derived mechanically, and a base hidden under a pile is
+vouched for rather than seen. The loop looks before retrying, and a look that finds the
+pick already off the pile *is* the reset. Six new tests, 201 passing. The design
+conversation behind it (state dictates action; memories as descriptions whose
+dependencies say exactly what an action stales) is the map for the next memory rewrite;
+only the forced slice was built.
+
+f2 validated the machinery beat for beat — the stale pile belief triggered the refusal,
+the first live look found blue where Doug had described it, cycle 0 declared the reset
+accomplished by f1's shove — and then cycle 1's camera-guided stack grasp air-closed at
+(0.39, −0.24), grip_high 18.5 mm, and the old stop-on-scored-failure rule halted a
+fully-recovered system. Amended: a scored failure is data; the loop looks, continues
+when both blocks are accounted for on the table, unstacks first if a verify ever missed
+a real stack, and stops only for what it cannot explain. f3 then earned that policy:
+four identical air-closes (grip_high 16–27 mm), each failed grasp walking blue ~1 cm
+further into the corner, each look re-finding it — until the fourth look probed blue's
+top at 64.3 mm, taller than flat, shorter than on-end, resting on nothing memory knew.
+Correct, earned stop. An assessment pass found blue flat again (the 64.3 was a propped
+transient) and a probe line across its short axis bracketed the camera's position to
+~5 mm — the camera is *right*, and the fingers still miss by 15+.
+
+Which leaves the discovery. Every one of the six air-closes — f1's pile grasp aside, all
+camera-guided — happened with blue at yaw 74–86°; every one of ~37 camera-guided
+successes sits at yaw ≲ 11°. The bench never left yaw 0 before f1's shove, so a
+yaw-dependent offset between the commanded EE axis and the fingers' actual closing line
+was invisible: the camera map's `b` absorbed it at the orientation everything was fitted
+at, and rotating the wrist rotates it back out. f4 closed the case from the other side:
+cycle 1 failed once more in the bad configuration, the shove knocked blue out of it, and
+the next twelve stacks ran without a miss (z −0.3 to +3.7 mm; the elevated pile-place
+errors of c2/f1 gone too). f4's own stop was new and small: a one-frame far-look artifact
+predicted blue 30 cm from a touch-verified position; the skill refused correctly and
+find_pick/find_base joined the recoverable stages. Campaign stands at 17/24 verified with
+six to run. Next: finish the protocol, then measure the finger-line offset directly —
+probe a known edge with the wrist at 0° and 90° and difference the answers. If it is a
+constant lateral offset, yaw-90 grasps join the reliable set for one line of frame
+arithmetic, and the boundary-failure ledger (force under-read, envelope refusals, camera
+residuals, now this) gains its fifth entry: every sensor on this arm is best in the
+middle and lies at the edges.

@@ -1,0 +1,175 @@
+{
+ "success": true,
+ "result": {
+  "_source": "live",
+  "task_verified_success": true,
+  "stage": "stacked",
+  "base_color": "green",
+  "pick_color": "blue",
+  "base": {
+   "found": true,
+   "xy": [
+    0.4671301491927198,
+    -0.18087851380409598
+   ],
+   "long_axis_deg": -2.1201,
+   "long_m": 0.0669,
+   "short_m": 0.0316,
+   "body_long_m": 0.0669,
+   "body_short_m": 0.0316,
+   "fit_rms_mm": 0.0,
+   "far_xy": [
+    0.4681744674745497,
+    -0.18244315905683392
+   ],
+   "accepted_looks": 2,
+   "rejected_looks": 0,
+   "method": "camera",
+   "npix": 2682,
+   "hinted": true,
+   "top": 0.0455
+  },
+  "pick": {
+   "found": true,
+   "xy": [
+    0.39829468428314474,
+    -0.04105368740028144
+   ],
+   "long_axis_deg": -1.9144,
+   "long_m": 0.0666,
+   "short_m": 0.0317,
+   "body_long_m": 0.0666,
+   "body_short_m": 0.0317,
+   "fit_rms_mm": 0.0,
+   "far_xy": [
+    0.3940354595728943,
+    -0.04030841588258527
+   ],
+   "accepted_looks": 2,
+   "rejected_looks": 0,
+   "method": "camera",
+   "npix": 2686,
+   "hinted": true,
+   "top": 0.0443
+  },
+  "table_z": 0.0177,
+  "base_height_mm": 27.8,
+  "pick_height_mm": 26.6,
+  "open_width": 0.0497,
+  "grasp": {
+   "grasped": true,
+   "actual_z": 0.03238053687958104,
+   "actual_width": 0.02877316251397133,
+   "grip_high_mm": 4.7,
+   "note": null
+  },
+  "expected_contact_z": 0.0602,
+  "place": {
+   "contact": true,
+   "contact_z": 0.0631,
+   "z_error_mm": 2.9
+  },
+  "verify": {
+   "expected_top": 0.0721,
+   "readings": [
+    0.0751
+   ]
+  },
+  "note": null,
+  "n_probes": 9,
+  "elapsed_s": 112.1,
+  "probes": [
+   {
+    "x": 0.4671,
+    "y": -0.1809,
+    "contact_z": 0.0455,
+    "trip": "lag",
+    "lag_mm": 10.1,
+    "Fz": -3.91,
+    "dFz": -4.79,
+    "contacted": true
+   },
+   {
+    "x": 0.4671,
+    "y": -0.1809,
+    "contact_z": 0.0455,
+    "trip": "lag",
+    "lag_mm": 10.1,
+    "Fz": -4.03,
+    "dFz": -5.42,
+    "contacted": true
+   },
+   {
+    "x": 0.4671,
+    "y": -0.1809,
+    "contact_z": 0.0455,
+    "trip": "lag",
+    "lag_mm": 10.0,
+    "Fz": -4.22,
+    "dFz": -7.55,
+    "contacted": true
+   },
+   {
+    "x": 0.3983,
+    "y": -0.0411,
+    "contact_z": 0.0443,
+    "trip": "lag",
+    "lag_mm": 10.0,
+    "Fz": -2.93,
+    "dFz": -4.04,
+    "contacted": true
+   },
+   {
+    "x": 0.3983,
+    "y": -0.0411,
+    "contact_z": 0.0443,
+    "trip": "lag",
+    "lag_mm": 10.1,
+    "Fz": -3.12,
+    "dFz": -7.58,
+    "contacted": true
+   },
+   {
+    "x": 0.3983,
+    "y": -0.0411,
+    "contact_z": 0.0442,
+    "trip": "lag",
+    "lag_mm": 10.1,
+    "Fz": -3.34,
+    "dFz": -7.39,
+    "contacted": true
+   },
+   {
+    "x": 0.4671,
+    "y": -0.1809,
+    "contact_z": 0.0752,
+    "trip": "lag",
+    "lag_mm": 10.2,
+    "Fz": -3.4,
+    "dFz": -4.66,
+    "contacted": true
+   },
+   {
+    "x": 0.4671,
+    "y": -0.1809,
+    "contact_z": 0.0751,
+    "trip": "lag",
+    "lag_mm": 10.0,
+    "Fz": -3.16,
+    "dFz": -5.43,
+    "contacted": true
+   },
+   {
+    "x": 0.4671,
+    "y": -0.1809,
+    "contact_z": 0.075,
+    "trip": "lag",
+    "lag_mm": 10.2,
+    "Fz": -3.26,
+    "dFz": -5.27,
+    "contacted": true
+   }
+  ]
+ },
+ "policy_version": "884a441c92"
+}
