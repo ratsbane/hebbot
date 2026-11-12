@@ -4351,3 +4351,28 @@ constant lateral offset, yaw-90 grasps join the reliable set for one line of fra
 arithmetic, and the boundary-failure ledger (force under-read, envelope refusals, camera
 residuals, now this) gains its fifth entry: every sensor on this arm is best in the
 middle and lies at the edges.
+
+## 2026-11-12 (later) — the campaign closes: 22/30, and the stop rule stays quiet
+
+f5 ran the final six: 5/6 verified, and the one miss was the campaign's second far-look
+artifact (blue "predicted" at (−1.2, 2.1) — a depth glitch; physically absurd, correctly
+refused). This time the amended loop spent one look on it and continued; across the whole
+campaign the loop handled 11 failures autonomously and stopped for a human exactly three
+times, each for something a camera genuinely could not explain at that moment. Final
+books: **22/30 verified, Wilson 95% [56%, 86%]**; treating the two camera artifacts as
+refusals per the freeze protocol (nothing attempted, nothing touched), the lateral rate
+is **22/28 = 79% [60%, 90%]**. The ≤9/30 stop rule is not triggered and not close: the
+classical touch pipeline passes its own gate, and the learned-policy track stays
+optional rather than forced. The failure ledger is as clean as the success one: six
+lateral failures, all one cause (the yaw-74–86° finger-line offset), two refusals, both
+one cause (far-look blob artifacts). No block was ever lost, dropped from height, or
+released unverified. Watch items carried forward: f5's last reset placed +22.6 mm high
+yet verified at its destination — first elevated place since the droop fix, so
+CONTACT_LAG_M stays on watch — and red is now a ±50 mm told-belief aged by 138
+unobserved actions. Next, in order: measure the finger-line offset directly (probe a
+known edge with the wrist at 0° and 90°, difference the answers — Doug concurs this is
+the right thread), then the deferred EE_LIMITS x widening as its own tested change.
+Same-day context: NVIDIA announced GR00T 2 at CoRL — a 2B open "System One" world-action
+model with LLM agents explicitly layered above it, few-demo LoRA adaptation, and no
+force sensing anywhere in sight; reading note in research_notes. The architecture bet
+is now consensus; the touch-verification niche is still empty.
