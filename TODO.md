@@ -24,7 +24,17 @@ the lab notebook; bench-forced items jump the order.
   refusal and the campaign freeze).
 - **SAM3 provider** (from the ASPIRE repo's bootstrap scripts) for segmentation —
   the "red is invisible to colour-blob logic" gap.
+- **Mixed-yaw campaign**: let the reset sample placement yaw so grasps exercise
+  the full 0–90° arc under the finger-line correction; also populates the
+  |yaw| axis of the place-height record (v1's +13 mm outlier unexplained).
+- **Memory-grasp alignment tail** (~3 air-closes in ~30 pile grasps, each one
+  shoving the block off the pile): widen open_width or add a camera fallback
+  if it holds above ~10%. The look-recovery absorbs it today.
+- **probe_table still uses the absolute 10 mm lag trigger** and phantom-trips at
+  rotated-yaw near-base reach (y3's −x side). Port the descent-rate trigger to
+  it when probing needs that region. (The place-side pathology is fixed:
+  2026-11-13's rate trigger, validated at the (0.37, 0.0) crime scene.)
 - Queued-until-forced (see lab notebook): negative evidence on failed locate,
   anisotropic told error bars, `hinted` conflation, scene-wide disturbance
   attribution, relations/descriptions layer + local VLM as its sensor, scene
-  camera attachment, CONTACT_LAG_M margin review (+22.6 mm place in f5).
+  camera attachment.
