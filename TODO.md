@@ -13,20 +13,17 @@ the lab notebook; bench-forced items jump the order.
   evidence-expiry-on-change (fingerprint-bound verification), which their paper
   lists as a limitation and our substrate now implements. Prove it on our bench
   first, then port to their skill_report/verifier flow.
-- **Finger-line yaw offset measurement**: probe a known edge with the wrist at 0°
-  and 90°, difference the answers. 6/6 grasp failures at yaw 74–86° vs ~37/37
-  successes at yaw ≲ 11° (2026-11-12 campaign); camera exonerated to ~5 mm by
-  probe line. If constant, it is one line of frame arithmetic in the grasp pose.
-- **Run the verifier gate on hardware**: `verify_skill` for touch_stack /
-  touch_unstack / touch_look on omen to mint the first `verified` skill records
-  under a real hardware_tag.
 - **EE_LIMITS x 0.60 → ~0.65** as its own tested change (deferred from the r7
   refusal and the campaign freeze).
 - **SAM3 provider** (from the ASPIRE repo's bootstrap scripts) for segmentation —
   the "red is invisible to colour-blob logic" gap.
-- **Mixed-yaw campaign**: let the reset sample placement yaw so grasps exercise
-  the full 0–90° arc under the finger-line correction; also populates the
-  |yaw| axis of the place-height record (v1's +13 mm outlier unexplained).
+- **Re-earn verification** under the post-mixed-yaw fingerprint (touch_unstack's
+  `dest_yaw_deg` expired all three skills' evidence on 2026-11-13; m1 ran 10/10
+  but campaign calls mint episodes, not verification evidence).
+- **Yaw-dependent place height, pile side** (from m1's new |yaw| axis): contact
+  reads higher with |yaw| in both legs (r ≈ +0.8) but only ~1 mm on the table vs
+  0.1–4.7 mm on the pile, ~0.03 mm/deg. Inside the 8 mm verify window; watch,
+  and suspect the held block's ride in the jaws at rotated yaw.
 - **Memory-grasp alignment tail** (~3 air-closes in ~30 pile grasps, each one
   shoving the block off the pile): widen open_width or add a camera fallback
   if it holds above ~10%. The look-recovery absorbs it today.

@@ -39,7 +39,9 @@ def log(leg, cycle, res):
            "z_error_mm": (res.get("place") or {}).get("z_error_mm"),
            "grip_high_mm": (res.get("grasp") or {}).get("grip_high_mm"),
            "hinted": [(res.get(k) or {}).get("hinted") for k in ("base", "pick")],
-           "dest_xy": res.get("dest_xy"), "holding": res.get("holding"),
+           "pick_yaw_deg": (res.get("pick") or {}).get("long_axis_deg"),
+           "dest_xy": res.get("dest_xy"), "dest_yaw_deg": res.get("dest_yaw_deg"),
+           "holding": res.get("holding"),
            "rest": {c: e.get("resting_on")
                     for c, e in (res.get("found") or {}).items()} or None}
     ledger.write(json.dumps(row, default=str) + "\n"); ledger.flush()

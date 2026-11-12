@@ -968,6 +968,7 @@ def touch_unstack(
     pick_color: str = "blue",
     base_color: str = "green",
     dest_xy: Optional[list] = None,
+    dest_yaw_deg: Optional[float] = None,
     hover_z: float = HOVER_Z,
     lift_z: float = LIFT_Z,
     contact_force: float = 4.0,
@@ -984,9 +985,12 @@ def touch_unstack(
     touch_stack's inverse, and the first routine that acts from memory alone: no camera.
     The remembered pile supplies the grasp, one probe confirms the pile is as remembered
     before anything moves, and the destination is sampled away from every believed object
-    and probed as empty table before the block is committed to it. `task_verified_success`
-    is True only when a fresh probe finds the block at the destination at its remembered
-    height.
+    and probed as empty table before the block is committed to it. The wrist turns the
+    held block to `dest_yaw_deg` on the way — sampled across the whole axis range when
+    not given, because the reset is where yaw diversity enters a campaign: placing at
+    the pile's own yaw would hand every following grasp the same angle forever.
+    `task_verified_success` is True only when a fresh probe finds the block at the
+    destination at its remembered height.
     """
     panda = _extract(_context, "panda")
     gripper = _extract(_context, "gripper")
@@ -1123,13 +1127,17 @@ def touch_unstack(
     dx, dy = dest
     out["dest_xy"] = [round(dx, 4), round(dy, 4)]
 
-    quat = wrist_quaternion(yaw)
-    # Command the hand where the fingers need to be at this yaw (y3, 2026-11-12).
+    dest_yaw = normalise_axis_deg(float(dest_yaw_deg)) if dest_yaw_deg is not None \
+        else float(rng.uniform(-90.0, 90.0))
+    out["dest_yaw_deg"] = round(dest_yaw, 1)
+    pick_quat, place_quat = wrist_quaternion(yaw), wrist_quaternion(dest_yaw)
+    # Command the hand where the fingers need to be at each yaw (y3, 2026-11-12).
     ucx, ucy = grasp_axis_correction(yaw)
+    dcx, dcy = grasp_axis_correction(dest_yaw)
     gpx, gpy = px - ucx, py - ucy
-    gdx, gdy = dx - ucx, dy - ucy
+    gdx, gdy = dx - dcx, dy - dcy
     open_gripper(_context=_context)
-    move_to_pose([gpx, gpy, max(0.13, pile_top + 0.05)], orientation=quat,
+    move_to_pose([gpx, gpy, max(0.13, pile_top + 0.05)], orientation=pick_quat,
                  speed_factor=speed_factor, _context=_context)
     grasp = grasp_at(grasp_z=base_top + GRASP_HEIGHT_M,
                      width=float(np.clip(body_short, 0.020, 0.045)),
@@ -1155,11 +1163,11 @@ def touch_unstack(
     expected_contact = dest_table + hold_offset
     out["expected_contact_z"] = round(expected_contact, 4)
 
-    move_to_pose([gpx, gpy, lift_z], orientation=quat, speed_factor=speed_factor,
+    move_to_pose([gpx, gpy, lift_z], orientation=pick_quat, speed_factor=speed_factor,
                  _context=_context)
-    move_to_pose([gdx, gdy, lift_z], orientation=quat, speed_factor=speed_factor,
+    move_to_pose([gdx, gdy, lift_z], orientation=place_quat, speed_factor=speed_factor,
                  _context=_context)
-    move_to_pose([gdx, gdy, expected_contact + 0.035], orientation=quat,
+    move_to_pose([gdx, gdy, expected_contact + 0.035], orientation=place_quat,
                  speed_factor=speed_factor, _context=_context)
     placed = _lower_until_contact(panda, start_z=expected_contact + 0.035,
                                   floor_z=expected_contact - 0.030,
@@ -1173,11 +1181,11 @@ def touch_unstack(
     if not placed["contact"]:
         # The same rule as touch_stack: never open in free space; take it back to the pile.
         back_start = base_top + hold_offset + 0.035
-        move_to_pose([gdx, gdy, lift_z], orientation=quat, speed_factor=speed_factor,
+        move_to_pose([gdx, gdy, lift_z], orientation=place_quat, speed_factor=speed_factor,
                      _context=_context)
-        move_to_pose([gpx, gpy, lift_z], orientation=quat, speed_factor=speed_factor,
+        move_to_pose([gpx, gpy, lift_z], orientation=pick_quat, speed_factor=speed_factor,
                      _context=_context)
-        move_to_pose([gpx, gpy, back_start], orientation=quat, speed_factor=speed_factor,
+        move_to_pose([gpx, gpy, back_start], orientation=pick_quat, speed_factor=speed_factor,
                      _context=_context)
         returned = _lower_until_contact(panda, start_z=back_start,
                                         floor_z=base_top + hold_offset - 0.030,
@@ -1185,7 +1193,7 @@ def touch_unstack(
         out["returned"] = returned
         if returned["contact"]:
             gripper.move(width=min(0.08, held_width + 0.012), speed=0.02)
-        move_to_pose([gpx, gpy, lift_z], orientation=quat, speed_factor=speed_factor,
+        move_to_pose([gpx, gpy, lift_z], orientation=pick_quat, speed_factor=speed_factor,
                      _context=_context)
         out["holding"] = not returned["contact"]
         memory.act("return", obj=pick_color, xy=[px, py])
@@ -1198,12 +1206,12 @@ def touch_unstack(
         return finish("place_no_contact", note="no contact at the destination; block taken back")
 
     gripper.move(width=min(0.08, held_width + 0.012), speed=0.02)
-    move_to_pose([gdx, gdy, lift_z], orientation=quat, speed_factor=speed_factor,
+    move_to_pose([gdx, gdy, lift_z], orientation=place_quat, speed_factor=speed_factor,
                  _context=_context)
     open_gripper(_context=_context)
     memory.act("place", obj=pick_color, xy=[dx, dy])
     memory.note(pick_color, in_gripper=None, resting_on="table")
-    memory.observe(pick_color, sensor="placement", xy=[dx, dy], yaw_deg=yaw,
+    memory.observe(pick_color, sensor="placement", xy=[dx, dy], yaw_deg=dest_yaw,
                    precision_m=0.004)
 
     expected_top = dest_table + height
@@ -1213,7 +1221,7 @@ def touch_unstack(
     touch.top = None
     touch.max_probes = len(touch.records) + 6
     readings, success = [], False
-    a = math.radians(yaw)
+    a = math.radians(dest_yaw)
     try:
         for offset in (0.0, 0.010, -0.010):
             z = touch.contact(dx + offset * math.cos(a), dy + offset * math.sin(a))
@@ -1454,6 +1462,9 @@ PRIMITIVE_SPECS = [
                 "dest_xy": {"type": "array", "items": {"type": "number"},
                             "minItems": 2, "maxItems": 2,
                             "description": "where to put the block; omit to sample a clear spot"},
+                "dest_yaw_deg": {"type": "number", "minimum": -180, "maximum": 180,
+                                 "description": "long-axis angle to set the block down at; "
+                                                "omit to sample the whole axis range"},
                 "hover_z": {"type": "number", "minimum": 0.07, "maximum": 0.16, "default": 0.09},
                 "lift_z": {"type": "number", "minimum": 0.15, "maximum": 0.30, "default": 0.22},
                 "contact_force": {"type": "number", "minimum": 3.0, "maximum": 10.0,

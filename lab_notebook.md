@@ -4453,3 +4453,28 @@ the new fingerprint; the gate has now cycled three times in two days and feels l
 like process than like breathing. Still open: probe_table itself keeps the absolute
 10 mm lag trigger and still phantoms at rotated-yaw low-x reach (y3); queued until
 probing needs that region.
+
+## 2026-11-13 — mixed-yaw campaign: 10/10 across the whole arc
+
+The reset was the door yaw diversity had to come through: touch_unstack placed every
+block back at the pile's own yaw, so a campaign could never leave the angle it started
+at. Now it turns the held block to a sampled destination yaw on the way down — a
+`dest_yaw_deg` param, uniform across the axis range when omitted — with the
+destination-side wrist and finger-line correction computed at the new yaw while the
+pile-side moves keep the old one (216 tests, three new). Campaign m1, ten scored
+cycles, grasp yaws −89.5 to +87.3 including the exact band that went ~1/7 before the
+correction (74–86°): **10/10 stacks verified, 20/20 legs, zero recoveries, zero
+humans**. Worst grip_high 5.7 mm against the campaign's 8.9–26.9 air-closes; and the
+camera re-found each block within ~1.2° of the yaw the reset reported leaving it at,
+which is the correction validated from both sides of the loop. The yaw-offset arc that
+began as a 0/6 cliff on 2026-11-12 closes at 14/14 post-fix rotated grasps.
+
+What the new |yaw| axis shows, now that it has data: place contact reads higher as
+|yaw| grows, in both legs (r = +0.76 stack, +0.81 unstack) but at very different
+scales — table places span −1.3 to +0.3 mm, pile places 0.1 to 4.7 mm, slope
+~0.03 mm/deg. So v1's +13 mm outlier had a real correlate but a small one; everything
+here sits well inside the 8 mm verify window. On watch, not on fire: likely the held
+block riding differently in the jaws at rotated yaw, which the pile (a 45 mm higher
+contact with a longer lever arm) amplifies. Editing touch_unstack expired all three
+skills' verification evidence again, as the gate is built to do; re-earn queued for
+the next arm session.

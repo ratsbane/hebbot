@@ -256,9 +256,11 @@ def test_unstack_round_trips_the_block_to_a_chosen_spot(bench, tmp_path):
     world, ctx = stacked_world(bench, store)
     result = ts.touch_unstack(dest_xy=[0.38, 0.15], _context=ctx, _store=store)
     assert result["stage"] == "reset" and result["task_verified_success"] is True
-    # The sim hand has no finger-line offset, so the yaw correction leaves the
-    # commanded (= landed) position up to ~1 mm from the target at small yaw.
-    assert world.blocks[1]["xy"] == pytest.approx((0.38, 0.15), abs=0.002)
+    # The sim hand has no finger-line offset, so the landed position is the command:
+    # the target minus the correction at whatever yaw the reset sampled. The reported
+    # yaw is rounded to 0.1 deg, which moves the recomputed correction a few microns.
+    cx, cy = ts.grasp_axis_correction(result["dest_yaw_deg"])
+    assert world.blocks[1]["xy"] == pytest.approx((0.38 - cx, 0.15 - cy), abs=1e-5)
     assert world.blocks[1]["base_z"] == 0.0
     memory = sm.SceneMemory(tmp_path / "scene.sqlite")
     blue = memory.belief("blue")
@@ -288,6 +290,44 @@ def test_unstack_samples_its_own_clear_destination(bench, tmp_path):
     green = world.blocks[0]["xy"]
     assert math.hypot(dx - green[0], dy - green[1]) >= ts.RESET_CLEARANCE_M
     assert ts.RESET_X[0] <= dx <= ts.RESET_X[1] and ts.RESET_Y[0] <= dy <= ts.RESET_Y[1]
+
+
+def test_unstack_turns_the_block_to_a_commanded_yaw(bench, tmp_path):
+    store = Store(tmp_path)
+    world, ctx = stacked_world(bench, store)
+    result = ts.touch_unstack(dest_xy=[0.38, 0.15], dest_yaw_deg=60.0,
+                              _context=ctx, _store=store)
+    assert result["stage"] == "reset" and result["dest_yaw_deg"] == 60.0
+    # The command is offset by the finger-line correction at the DESTINATION yaw, not
+    # the pile's, and the sim hand has no physical offset, so the block lands exactly
+    # at the offset command.
+    cx, cy = ts.grasp_axis_correction(60.0)
+    assert world.blocks[1]["xy"] == pytest.approx((0.38 - cx, 0.15 - cy), abs=1e-6)
+    memory = sm.SceneMemory(tmp_path / "scene.sqlite")
+    assert memory.belief("blue")["yaw_deg"] == pytest.approx(60.0)
+    memory.close()
+
+
+def test_unstack_samples_a_yaw_when_none_is_given(bench, tmp_path):
+    """The reset is where yaw diversity enters a campaign: left to itself it must
+    place at an angle of its own choosing, not hand back the pile's forever."""
+    store = Store(tmp_path)
+    world, ctx = stacked_world(bench, store)
+    result = ts.touch_unstack(_context=ctx, _store=store)
+    assert result["stage"] == "reset"
+    assert -90.0 <= result["dest_yaw_deg"] < 90.0
+    memory = sm.SceneMemory(tmp_path / "scene.sqlite")
+    assert memory.belief("blue")["yaw_deg"] == pytest.approx(result["dest_yaw_deg"],
+                                                            abs=0.05)
+    memory.close()
+
+
+def test_unstack_normalises_the_commanded_yaw_as_an_axis(bench, tmp_path):
+    store = Store(tmp_path)
+    world, ctx = stacked_world(bench, store)
+    result = ts.touch_unstack(dest_xy=[0.38, 0.15], dest_yaw_deg=120.0,
+                              _context=ctx, _store=store)
+    assert result["stage"] == "reset" and result["dest_yaw_deg"] == -60.0
 
 
 def test_unstack_refuses_a_destination_near_a_believed_object(bench, tmp_path):
