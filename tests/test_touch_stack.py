@@ -266,6 +266,36 @@ def test_zero_axis_is_the_grasp_verified_on_hardware():
     assert ts.wrist_quaternion(0.0) == pytest.approx([0.0, 1.0, 0.0, 0.0])
 
 
+def test_axis_correction_is_zero_at_the_fit_orientation():
+    """The camera map absorbed the yaw-0 projection: 37/37 successes stay explained."""
+    assert ts.grasp_axis_correction(0.0) == pytest.approx((0.0, 0.0))
+
+
+def test_axis_correction_matches_the_y3_measurement():
+    # y3 (2026-11-12, taped block): chord midpoints shifted +3.75 mm in y at
+    # wrist_quaternion(-75) and +5.63 mm at (90) — note 90 normalises to -90, the
+    # same rotation direction as -75, which an early fit got wrong. The shift is
+    # the negative of the correction's residual, to within the 1.9 mm bisection
+    # resolution of the measurement.
+    assert -ts.grasp_axis_correction(-75.0)[1] * 1000 == pytest.approx(3.75, abs=0.8)
+    assert -ts.grasp_axis_correction(90.0)[1] * 1000 == pytest.approx(5.63, abs=0.8)
+
+
+def test_axis_correction_respects_axis_periodicity():
+    """An axis has no direction; the wrist never rotates past ±90, nor must the fix."""
+    assert ts.grasp_axis_correction(135.0) == pytest.approx(ts.grasp_axis_correction(-45.0))
+
+
+def test_rotated_grasp_is_commanded_off_target_by_the_correction(bench):
+    world = World(two_blocks())
+    result, _ = run(bench(world))
+    assert result["stage"] == "stacked"
+    ex, ey = ts.grasp_axis_correction(result["pick"]["long_axis_deg"])
+    gx, gy = world.grasps[0]["xy"]
+    assert (gx, gy) == pytest.approx((result["pick"]["xy"][0] - ex,
+                                      result["pick"]["xy"][1] - ey), abs=1e-9)
+
+
 def test_corridor_check_flags_a_finger_above_the_neighbour():
     pick = {"xy": [0.45, 0.0], "long_axis_deg": 0.0}
     near = {"xy": [0.45, 0.060], "long_axis_deg": 0.0, "body_long_m": 0.055, "body_short_m": 0.028}

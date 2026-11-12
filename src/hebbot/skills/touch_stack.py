@@ -455,6 +455,27 @@ def look_twice(color: str, camera: Optional[str], camera_map: dict, ctx,
             "npix": blob["npix"], "hinted": hinted}
 
 
+# The fingers' closing line is not the commanded wrist axis: probing a taped block's
+# chord midpoints and +x edges with the wrist at 0, 75 and 90 deg (y3, 2026-11-12)
+# measured a constant hand-frame offset. The camera map's b absorbed its yaw-0
+# projection — the whole world frame is "commanded at yaw 0" — so a rotated wrist
+# needs only the rotation residual [R(a) - R(0)] d: zero at axis 0 (the 37/37
+# regime), ~5.2 mm at 90 deg, over half the grasp's 9 mm per-side clearance and the
+# systematic share of the campaign's 0/6 cliff. The hand-frame decomposition is a
+# weighted fit (both measured yaws rotate the same way, 15 deg apart, so d's
+# direction is soft), but the residual against every direct measurement is
+# under 0.7 mm across the 0-90 arc, which is what a grasp consumes.
+FINGER_OFFSET_TOOL_M = (0.00253, -0.00261)   # (along pads, along finger separation)
+
+
+def grasp_axis_correction(axis_deg: float) -> tuple:
+    """World xy to subtract from a rotated-wrist command so the fingers land on target."""
+    a = math.radians(normalise_axis_deg(axis_deg))
+    dx, dy = FINGER_OFFSET_TOOL_M
+    return (dx * (math.cos(a) - 1.0) + dy * math.sin(a),
+            dx * math.sin(a) - dy * (math.cos(a) - 1.0))
+
+
 def wrist_quaternion(long_axis_deg: float) -> list[float]:
     """Gripper-down orientation whose fingers close across an object's short axis.
 
@@ -787,8 +808,13 @@ def touch_stack(
         wrist_quaternion(base["long_axis_deg"])
     px, py = pick["xy"]
     bx, by = base["xy"]
+    # Where to command the hand so the *fingers* land on the target at each yaw.
+    pcx, pcy = grasp_axis_correction(pick["long_axis_deg"])
+    bcx, bcy = grasp_axis_correction(base["long_axis_deg"])
+    gpx, gpy = px - pcx, py - pcy
+    gbx, gby = bx - bcx, by - bcy
     open_gripper(_context=_context)
-    move_to_pose([px, py, 0.12], orientation=pick_quat, speed_factor=speed_factor,
+    move_to_pose([gpx, gpy, 0.12], orientation=pick_quat, speed_factor=speed_factor,
                  _context=_context)
     grasp = grasp_at(grasp_z=table_z + GRASP_HEIGHT_M,
                      width=float(np.clip(pick["body_short_m"], 0.020, 0.045)),
@@ -806,7 +832,7 @@ def touch_stack(
                            data={"retracted": "grasp_failed"})
             memory.note(pick_color, resting_on=None)
         open_gripper(_context=_context)
-        move_to_pose([px, py, lift_z], speed_factor=speed_factor, _context=_context)
+        move_to_pose([gpx, gpy, lift_z], speed_factor=speed_factor, _context=_context)
         return finish("grasp", note=grasp.get("note") or "grasp failed")
     if memory is not None:
         memory.act("grasp", obj=pick_color, xy=pick["xy"])
@@ -819,12 +845,12 @@ def touch_stack(
     start_z = expected_contact + 0.035
     out["expected_contact_z"] = round(expected_contact, 4)
 
-    move_to_pose([px, py, lift_z], orientation=pick_quat, speed_factor=speed_factor,
+    move_to_pose([gpx, gpy, lift_z], orientation=pick_quat, speed_factor=speed_factor,
                  _context=_context)
     emit("lift", "motion", "touch_lift", {"lift_z": lift_z})
-    move_to_pose([bx, by, lift_z], orientation=place_quat, speed_factor=speed_factor,
+    move_to_pose([gbx, gby, lift_z], orientation=place_quat, speed_factor=speed_factor,
                  _context=_context)
-    move_to_pose([bx, by, start_z], orientation=place_quat, speed_factor=speed_factor,
+    move_to_pose([gbx, gby, start_z], orientation=place_quat, speed_factor=speed_factor,
                  _context=_context)
     placed = _lower_until_contact(panda, start_z=start_z, floor_z=expected_contact - 0.030,
                                   contact_force=contact_force)
@@ -838,11 +864,11 @@ def touch_stack(
         # Never open the jaws in free space. Take the block back to where it came from and
         # set it down there, so one miss does not leave the scene unknown (#140).
         back_start = table_z + hold_offset + 0.035
-        move_to_pose([bx, by, lift_z], orientation=place_quat, speed_factor=speed_factor,
+        move_to_pose([gbx, gby, lift_z], orientation=place_quat, speed_factor=speed_factor,
                      _context=_context)
-        move_to_pose([px, py, lift_z], orientation=pick_quat, speed_factor=speed_factor,
+        move_to_pose([gpx, gpy, lift_z], orientation=pick_quat, speed_factor=speed_factor,
                      _context=_context)
-        move_to_pose([px, py, back_start], orientation=pick_quat, speed_factor=speed_factor,
+        move_to_pose([gpx, gpy, back_start], orientation=pick_quat, speed_factor=speed_factor,
                      _context=_context)
         returned = _lower_until_contact(panda, start_z=back_start,
                                         floor_z=table_z + hold_offset - 0.030,
@@ -850,7 +876,7 @@ def touch_stack(
         out["returned"] = returned
         if returned["contact"]:
             gripper.move(width=min(0.08, held_width + 0.012), speed=0.02)
-        move_to_pose([px, py, lift_z], orientation=pick_quat, speed_factor=speed_factor,
+        move_to_pose([gpx, gpy, lift_z], orientation=pick_quat, speed_factor=speed_factor,
                      _context=_context)
         out["holding"] = not returned["contact"]
         if memory is not None:
@@ -865,7 +891,7 @@ def touch_stack(
 
     # A narrow, slow opening: the fingers still straddle only the block just placed.
     gripper.move(width=min(0.08, held_width + 0.012), speed=0.02)
-    move_to_pose([bx, by, lift_z], orientation=place_quat, speed_factor=speed_factor,
+    move_to_pose([gbx, gby, lift_z], orientation=place_quat, speed_factor=speed_factor,
                  _context=_context)
     open_gripper(_context=_context)
     if memory is not None:
@@ -1084,8 +1110,12 @@ def touch_unstack(
     out["dest_xy"] = [round(dx, 4), round(dy, 4)]
 
     quat = wrist_quaternion(yaw)
+    # Command the hand where the fingers need to be at this yaw (y3, 2026-11-12).
+    ucx, ucy = grasp_axis_correction(yaw)
+    gpx, gpy = px - ucx, py - ucy
+    gdx, gdy = dx - ucx, dy - ucy
     open_gripper(_context=_context)
-    move_to_pose([px, py, max(0.13, pile_top + 0.05)], orientation=quat,
+    move_to_pose([gpx, gpy, max(0.13, pile_top + 0.05)], orientation=quat,
                  speed_factor=speed_factor, _context=_context)
     grasp = grasp_at(grasp_z=base_top + GRASP_HEIGHT_M,
                      width=float(np.clip(body_short, 0.020, 0.045)),
@@ -1102,7 +1132,7 @@ def touch_unstack(
                        data={"retracted": "grasp_failed"})
         memory.note(pick_color, resting_on=None)
         open_gripper(_context=_context)
-        move_to_pose([px, py, lift_z], speed_factor=speed_factor, _context=_context)
+        move_to_pose([gpx, gpy, lift_z], speed_factor=speed_factor, _context=_context)
         return finish("grasp", note=grasp.get("note") or "grasp failed")
     memory.act("grasp", obj=pick_color, xy=[px, py])
     memory.note(pick_color, in_gripper=True)
@@ -1111,11 +1141,11 @@ def touch_unstack(
     expected_contact = dest_table + hold_offset
     out["expected_contact_z"] = round(expected_contact, 4)
 
-    move_to_pose([px, py, lift_z], orientation=quat, speed_factor=speed_factor,
+    move_to_pose([gpx, gpy, lift_z], orientation=quat, speed_factor=speed_factor,
                  _context=_context)
-    move_to_pose([dx, dy, lift_z], orientation=quat, speed_factor=speed_factor,
+    move_to_pose([gdx, gdy, lift_z], orientation=quat, speed_factor=speed_factor,
                  _context=_context)
-    move_to_pose([dx, dy, expected_contact + 0.035], orientation=quat,
+    move_to_pose([gdx, gdy, expected_contact + 0.035], orientation=quat,
                  speed_factor=speed_factor, _context=_context)
     placed = _lower_until_contact(panda, start_z=expected_contact + 0.035,
                                   floor_z=expected_contact - 0.030,
@@ -1129,11 +1159,11 @@ def touch_unstack(
     if not placed["contact"]:
         # The same rule as touch_stack: never open in free space; take it back to the pile.
         back_start = base_top + hold_offset + 0.035
-        move_to_pose([dx, dy, lift_z], orientation=quat, speed_factor=speed_factor,
+        move_to_pose([gdx, gdy, lift_z], orientation=quat, speed_factor=speed_factor,
                      _context=_context)
-        move_to_pose([px, py, lift_z], orientation=quat, speed_factor=speed_factor,
+        move_to_pose([gpx, gpy, lift_z], orientation=quat, speed_factor=speed_factor,
                      _context=_context)
-        move_to_pose([px, py, back_start], orientation=quat, speed_factor=speed_factor,
+        move_to_pose([gpx, gpy, back_start], orientation=quat, speed_factor=speed_factor,
                      _context=_context)
         returned = _lower_until_contact(panda, start_z=back_start,
                                         floor_z=base_top + hold_offset - 0.030,
@@ -1141,7 +1171,7 @@ def touch_unstack(
         out["returned"] = returned
         if returned["contact"]:
             gripper.move(width=min(0.08, held_width + 0.012), speed=0.02)
-        move_to_pose([px, py, lift_z], orientation=quat, speed_factor=speed_factor,
+        move_to_pose([gpx, gpy, lift_z], orientation=quat, speed_factor=speed_factor,
                      _context=_context)
         out["holding"] = not returned["contact"]
         memory.act("return", obj=pick_color, xy=[px, py])
@@ -1154,7 +1184,7 @@ def touch_unstack(
         return finish("place_no_contact", note="no contact at the destination; block taken back")
 
     gripper.move(width=min(0.08, held_width + 0.012), speed=0.02)
-    move_to_pose([dx, dy, lift_z], orientation=quat, speed_factor=speed_factor,
+    move_to_pose([gdx, gdy, lift_z], orientation=quat, speed_factor=speed_factor,
                  _context=_context)
     open_gripper(_context=_context)
     memory.act("place", obj=pick_color, xy=[dx, dy])

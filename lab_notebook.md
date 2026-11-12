@@ -4392,3 +4392,35 @@ currently correct — they share contact constants — but per-function hashing 
 refinement if it chafes. The first real demotion arrives with the very next bench task:
 the yaw-offset measurement will edit touch_stack.py, expiring today's evidence by design,
 and the re-earn cycle will be the gate's first full revolution.
+
+## 2026-11-12 (night) — the yaw offset: measured, explained, fixed, validated 1/1
+
+The campaign's one systematic failure now has a number. Measuring it took three runs
+and taught two lessons on the way. y1 false-tripped in free air because I rebuilt
+probing from the placement detector's 4 N force trigger instead of checking that
+probe_table already takes an orientation — Doug's eyes caught the arm "probing air"
+at two-block height from across the room. y2, with the proven probe rotated, produced
+clean baseline geometry and then a new bench lesson: **a probe is also an actuator** —
+walking edge-probes herded the loose block ~4 cm at a centimetre a touch, the drift
+control screamed, and the ledger got a probe_sweep disturbance. y3, on a taped block,
+was clean: the repeat-0 control reproduced to one bisection step, the chord and edge
+changes across yaws matched the rotated footprint's dilation arithmetic exactly, and
+the midpoints shifted +3.75 mm (wrist 75°) and +5.63 mm (90°) — the finger-line
+offset, isolated. One subtlety nearly spoiled the fit and a unit test caught it:
+axis 90 normalises to −90, so both measured yaws rotate the *same* way 15° apart,
+and the first solve (treating them as opposite) invented a 7.6 mm offset along the
+jaw axis. The honest weighted fit — chord midpoints plus the +x-edge dilation
+residuals — gives d ≈ (2.5, −2.6) mm in the hand frame, direction soft, but every
+direct measurement reproduced to <0.7 mm, and the effect at the failure yaws is
+~4.4–5.2 mm: over half the grasp's 9 mm per-side clearance, the systematic share of
+the 0/6 cliff. The camera map's b absorbed the yaw-0 projection all along, which is
+why 37/37 succeeded there and why the fix is only the rotation residual
+[R(a)−R(0)]d, applied at every rotated-wrist command site in both skills.
+Validation: Doug set blue perpendicular, untaped, mid-table — the exact 0/6
+configuration — and the corrected grasp closed at grip_high 3.2 mm, first try,
+stack probe-verified (v1, 129 s). Editing touch_stack.py demoted all three verified
+skills by fingerprint expiry, as designed; re-earning them under the new hash is the
+gate's first full revolution. Still open and climbing: pile places release high
+(+7, +9, now +13 mm) while table places stay sub-millimetre; and rotated-wrist free
+air exceeds the probe's 10 mm lag trigger when reaching toward the base (y3's −x
+phantoms) — both on watch. 211 tests.
