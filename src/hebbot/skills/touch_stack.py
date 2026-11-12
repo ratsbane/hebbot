@@ -62,8 +62,15 @@ LIFT_Z = 0.22
 BASELINE_START_TICKS = 30        # at 100 Hz: skip the engagement transient, then
 BASELINE_END_TICKS = 50          # average the force estimate over the next 0.2 s
 CONTACT_SUSTAIN_TICKS = 5
-CONTACT_LAG_M = 0.010            # the hand this far above its sinking command is contact,
-                                 # whatever the force estimate says (u1, 2026-11-10)
+# Geometric contact is a rate, not a level. The lag between hand and command drifts
+# with arm configuration as the descent changes the pose — in the near-base reach it
+# grew past any fixed threshold mid-descent (places released 12-23 mm early at
+# x <= 0.39, 2026-11-12) — but drift never *stops* the hand: the worst measured ate
+# about half the command rate. Real contact stops it. So the trigger is the hand's
+# own descent rate collapsing below this fraction of the commanded speed, which a
+# drifting gravity model cannot fake and a surface cannot avoid.
+CONTACT_VELOCITY_FRACTION = 0.25
+CONTACT_VELOCITY_WINDOW_S = 0.10
 MIN_SEPARATION_M = 0.035         # two "objects" closer than this are one object
 MIN_BLOCK_HEIGHT_M = 0.015       # a remembered pile implying a block outside these is not
 MAX_BLOCK_HEIGHT_M = 0.045       # a pile; and a probed top under the max is "on the table"
@@ -532,10 +539,12 @@ def _lower_until_contact(panda, *, start_z: float, floor_z: float, contact_force
     fz0 = float(panda.get_state().O_F_ext_hat_K[2])
     contact_z, settle, unload_ticks, above = None, 0, 0, 0
     baseline: list[float] = []
-    # At 300 N/m a ~3 N steady model error makes the hand ride ~10 mm above its sinking
-    # command in free air (u2 +14.5 mm, r9b +23.4 mm early releases), so the lag that
-    # means contact is growth beyond that free-air droop, not the absolute gap.
-    lag0, lag_samples = 0.0, []
+    # The hand's recent heights: contact is their descent rate collapsing while the
+    # command keeps sinking. (This replaced lag-above-baseline, which replaced the
+    # absolute lag, each version's predecessor broken by droop the next one wasn't:
+    # u2/r9b's constant droop, then f5/vgate's configuration drift at low x.)
+    window = max(2, int(CONTACT_VELOCITY_WINDOW_S / dt))
+    recent: list[float] = []
     panda.start_controller(ctrl)
     try:
         runtime = (start_z - floor_z) / speed + 2.0
@@ -558,17 +567,22 @@ def _lower_until_contact(panda, *, start_z: float, floor_z: float, contact_force
                     settle += 1
                     if settle > BASELINE_START_TICKS:
                         baseline.append(fz)
-                        lag_samples.append(actual - tz)
                     continue
                 if baseline:
                     fz0, baseline = float(np.mean(baseline)), []
-                    lag0, lag_samples = float(np.mean(lag_samples)), []
                 # A release is irreversible, so one noisy sample must not cause it. Contact
                 # is force OR geometry: u1 (2026-11-10) pressed a block to the command floor
-                # at (0.37, -0.20) without the force estimate ever reaching 4 N, while the
-                # same spot's probe tripped on lag at -1.4 N. The estimate under-reads in
-                # some configurations, so the hand held above its command is contact too.
-                stalled = (actual - tz) - lag0 > CONTACT_LAG_M
+                # at (0.37, -0.20) without the force estimate ever reaching 4 N — the
+                # estimate under-reads in exactly the configurations where the gravity
+                # model drifts, so geometry must not lean on a drifting level either. The
+                # hand still descending (however far above its command it rides) is not
+                # contact; the hand no longer descending while its command sinks is.
+                recent.append(actual)
+                if len(recent) > window:
+                    recent.pop(0)
+                descending = (recent[0] - actual) / (dt * (len(recent) - 1)) \
+                    if len(recent) == window else speed
+                stalled = descending < CONTACT_VELOCITY_FRACTION * speed
                 above = above + 1 if stalled or abs(fz - fz0) > contact_force else 0
                 if tz < guard_z and above >= CONTACT_SUSTAIN_TICKS:
                     contact_z = actual

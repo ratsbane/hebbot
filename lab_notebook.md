@@ -4424,3 +4424,32 @@ gate's first full revolution. Still open and climbing: pile places release high
 (+7, +9, now +13 mm) while table places stay sub-millimetre; and rotated-wrist free
 air exceeds the probe's 10 mm lag trigger when reaching toward the base (y3's −x
 phantoms) — both on watch. 211 tests.
+
+## 2026-11-13 — contact detection, third generation: a rate, not a level
+
+The "climbing" pile-place release error was never climbing — the ledgers say it was
+standing still in a bad neighbourhood. Analysis of all 75 recorded places (episode
+outcomes carry everything: grasp heights, expected contacts, verify readings) ruled out
+slip (no correlation with grip geometry, and the same carry places sub-millimetre
+elsewhere) and ruled out time (r=0.18). The pattern is spatial: the three worst releases
+(+22.6, +21.2, +12.3 mm) are the three destinations at x ≤ 0.386; everything at
+x ≥ 0.41 places under a millimetre; and c2/f1's elevated stack places all happened while
+the pile lived at x ≈ 0.39. One cause, three costumes now on record: u1's force
+under-read, y3's phantom probe trips, and these early releases are all the gravity
+model erring in the near-base reach — and there, the error *grows during the descent*,
+so any lag threshold, fixed or baselined at the start, eventually lies. Doug called the
+fix: a droop model that adapts during the descent. The implementation is cleaner still —
+differentiate instead of adapt. Drift never stops the hand (the worst measured ate about
+half the command rate); a surface stops it entirely. The trigger is now the hand's own
+descent rate collapsing below a quarter of the commanded speed: generation three, after
+absolute lag (killed by constant droop, u2/r9b) and baselined lag (killed by drifting
+droop, f5/vgate). Sim tests attack it with drift worse than anything measured, plus
+every prior generation's nemesis; 213 pass. Hardware: a place forced to (0.37, 0.0) —
+the exact crime scene — released at −0.8 mm where the old trigger gave +12 to +23, and
+the full re-earn ran clean around one more memory-grasp air-close (grip_high 6.8, blue
+shoved off the pile, look caught it, pile rebuilt — the f1 recovery machinery's third
+quiet save; that tail is now ~3 in 30 and on watch). All three skills re-verified under
+the new fingerprint; the gate has now cycled three times in two days and feels less
+like process than like breathing. Still open: probe_table itself keeps the absolute
+10 mm lag trigger and still phantoms at rotated-yaw low-x reach (y3); queued until
+probing needs that region.

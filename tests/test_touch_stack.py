@@ -534,6 +534,42 @@ def test_a_drooping_arm_still_feels_a_silent_surface(fake_controllers):
     assert result["contact_z"] == pytest.approx(0.062, abs=0.002)
 
 
+class DriftingDescent(FakeDescent):
+    """An arm whose gravity-model error grows as the descent changes its pose.
+
+    The f5 / verify-gate places at x <= 0.39 (2026-11-12): the hand rides ever
+    higher above its sinking command — 12-23 mm by the expected contact — without
+    touching anything, defeating any fixed or start-baselined lag threshold. The
+    hand never stops descending, though; only a surface does that.
+    """
+
+    def __init__(self, z, force_at, drift_per_tick, stall_z=-1.0):
+        super().__init__(z, force_at)
+        self.drift = 0.0
+        self.drift_per_tick = drift_per_tick
+        self.stall_z = stall_z
+
+    def get_position(self):
+        position = super().get_position()
+        self.drift += self.drift_per_tick
+        self.z = max(position[2] + self.drift, self.stall_z)
+        return [position[0], position[1], self.z]
+
+
+def test_configuration_drift_is_not_contact(fake_controllers):
+    # Drift eats half the command rate — worse than anything measured — all the
+    # way to the floor. The old lag-growth trigger released ~halfway down here.
+    arm = DriftingDescent(0.10, engaged_offset, drift_per_tick=0.000075)
+    assert ts._lower_until_contact(arm, start_z=0.10, floor_z=0.04)["contact"] is False
+
+
+def test_a_drifting_arm_still_stops_at_a_silent_surface(fake_controllers):
+    arm = DriftingDescent(0.10, engaged_offset, drift_per_tick=0.000075, stall_z=0.062)
+    result = ts._lower_until_contact(arm, start_z=0.10, floor_z=0.01)
+    assert result["contact"] is True
+    assert result["contact_z"] == pytest.approx(0.062, abs=0.002)
+
+
 def test_probing_does_not_use_the_force_trigger(bench):
     world = World(two_blocks())
     seen = []
