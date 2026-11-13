@@ -15,11 +15,11 @@ the lab notebook; bench-forced items jump the order.
   first, then port to their skill_report/verifier flow.
 - **EE_LIMITS x 0.60 → ~0.65** as its own tested change (deferred from the r7
   refusal and the campaign freeze).
-- **SAM3 provider** (from the ASPIRE repo's bootstrap scripts) for segmentation —
-  the "red is invisible to colour-blob logic" gap.
-- **Re-earn verification** under the post-mixed-yaw fingerprint (touch_unstack's
-  `dest_yaw_deg` expired all three skills' evidence on 2026-11-13; m1 ran 10/10
-  but campaign calls mint episodes, not verification evidence).
+- **SAM3 into hebbot's own perception** — the service now runs on omen
+  (2026-11-13, port 8114, 4.5 GiB VRAM) feeding ASPIRE's localize_object, and
+  found red 10 cm from its told position (first camera fix ever; recorded
+  ±12 mm). Remaining: a hebbot-side provider so touch_look and the camera map
+  can use it, and a confirm probe for red next arm session.
 - **Yaw-dependent place height, pile side** (from m1's new |yaw| axis): contact
   reads higher with |yaw| in both legs (r ≈ +0.8) but only ~1 mm on the table vs
   0.1–4.7 mm on the pile, ~0.03 mm/deg. Inside the 8 mm verify window; watch,

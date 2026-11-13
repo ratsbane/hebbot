@@ -4476,5 +4476,33 @@ scales — table places span −1.3 to +0.3 mm, pile places 0.1 to 4.7 mm, slope
 here sits well inside the 8 mm verify window. On watch, not on fire: likely the held
 block riding differently in the jaws at rotated yaw, which the pile (a 45 mm higher
 contact with a longer lever arm) amplifies. Editing touch_unstack expired all three
-skills' verification evidence again, as the gate is built to do; re-earn queued for
-the next arm session.
+skills' verification evidence again, as the gate is built to do; the re-earn ran
+clean the same evening, 6/6, all three skills verified under ee0ef14ea7 — the
+gate's fourth cycle, and both of its unstack legs sampled yaws of their own.
+
+## 2026-11-13 — ASPIRE runs the bench: first verified stack through a foreign harness
+
+The day's question was whether NVIDIA's ASPIRE could run this hardware, and the answer
+is a probe-verified yes. A `franka_real` embodiment now lives on a branch of the ASPIRE
+clone — station config, a plant with one guarded actuation chokepoint, their adapter
+protocol with the same motion-interlock semantics as our all-clear rule, an in-process
+panda_py analytical IK provider, and our colour rules behind their SegmentationProvider
+protocol until Meta approves SAM3 access. Their full test suite: 708 passed, 12 of them
+ours, zero regressions. Three live defects found by running the real thing: their
+CameraObservation frame semantics silently skip the world transform if you name both
+frames "base"; the hand-eye translation was our camera map's nadir offset all along
+(camera 59 mm *behind* the TCP — localization validated against touch truth to 2.5 mm);
+and Franka's redundant q_7 pinned at the seed makes every rotated grasp "unreachable."
+First stack attempt failed honestly — closed on air after three unchecked move refusals,
+exactly the artifact-reading lesson their fix loop is built on. Second attempt stacked:
+the program's own camera verify said risen-and-near, and touch_look probed blue's top at
+0.075 m resting on green. Their real-robot harness scores hardware success from video by
+hand; ours was confirmed by a finger. That asymmetry — probe-verified check_success —
+is upstream improvement #2, behind evidence-expiry. The bench ends stacked, memory
+honest at epoch 220+, arm home. Queued: unstack reset to close the ASPIRE loop, scene
+camera (a spare D435 exists) when fix-loop campaigns start. SAM3 cleared Meta's review
+the same evening: the service holds 4.5 GiB of the 5060 Ti, localizes blue and green
+within 10 mm of touch truth from the home pose — including blue correctly *on* the pile
+— and found red, invisible to every colour rule this bench has ever run, 10 cm from its
+three-day-stale told position: the first camera fix on red in the bench's history,
+recorded at ±12 mm pending a confirming finger.
