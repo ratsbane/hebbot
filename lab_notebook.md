@@ -4506,3 +4506,191 @@ within 10 mm of touch truth from the home pose — including blue correctly *on*
 — and found red, invisible to every colour rule this bench has ever run, 10 cm from its
 three-day-stale told position: the first camera fix on red in the bench's history,
 recorded at ±12 mm pending a confirming finger.
+
+## 2026-11-13 (evening) — red moves on a camera's word; the bench gains a third eye
+
+ASPIRE's move_red task: SAM3 found red (10 cm from its stale told position), the
+program grasped it at its measured yaw and set it on a clearance-checked patch, and
+verified by re-localization to 13.6 mm — the first robot action on red ever driven by
+perception rather than a human's words. The scene camera then revealed what nobody
+knew: red is *standing on end*, and the grasp-at-10-mm convention picked a standing
+block up by its lower third and set it down still standing without ever knowing.
+Hardware archaeology for the D435: three cables and two topologies all trained at
+USB2 (its SuperSpeed lanes or every cable in the house — undetermined), but measured
+throughput at USB2 is 13.5 fps of 640x480 RGB-D, ample for a static scene view.
+Calibration without a checkerboard: the depth cloud's dominant plane plus two
+touch-verified block tops solve the fixed pose to 3.5 mm per landmark and 1.0 mm on
+the table plane (exact on a synthetic pose test). Both cameras now ride every ASPIRE
+observation. Found along the way, a real-camera bug class their sims can never show:
+silhouette depth-bleed smears a 55 mm standing block into a 225 mm point cloud from
+an oblique view — calibration dodged it by construction (top-band statistics), programs
+must dodge it by extents rejection, and robust banding in mask_to_point_cloud becomes
+upstream improvement candidate #3, after evidence-expiry and probe-verified success.
+
+## 2026-11-13 (late) — the foreign harness learns to check its own work
+
+Upstream improvement #2 is no longer a critique, it's a diff. ASPIRE's real-robot
+embodiments return check_success()=False and leave success to be judged from the
+video; our franka_real adapter now re-observes after the program ends and measures
+the task's physical postcondition, filing the evidence (which camera testified, what
+it measured, which criteria passed) as logs/success-report.json in the run. The
+localizer is a top-face band centroid — the same depth-bleed defence the calibration
+uses — and the very first live verdict earned its regression test: it elected 8572 px
+of something blue at the robot's base over the 55 mm block, until candidates outside
+the workspace box were made to lose the election. Thresholds are budgeted from live
+bias measured against touch truth (pile top 0.075 reads 0.0875 from home's oblique
+view). Validated with zero motion on the stacked bench: stack_blocks earns
+task_success=True — blue measured at (0.4615, −0.157) against the finger's
+(0.461, −0.156) — and unstack_blocks correctly returns False on the same scene,
+with "could not tell" distinguishable from "failed" in the report. The unstack
+program is also written and sandbox-proven (its dry run aborted honestly at the
+first interlock refusal), closing the station's own stack/unstack reset loop on
+paper; it awaits an all-clear to run for real. ASPIRE branch at 4ee885d, 20/20 tests.
+
+## 2026-11-13 (night) — the cycle closes, and a ghost gets a name
+
+The stack/unstack reset loop ran live through ASPIRE's surface, each half earning its
+own verdict: unstack set blue down 4 mm from its chosen clear spot (green, newly
+exposed, measured 1.3 mm from touch truth by the new success predicate), and the
+re-stack put it back — termination_reason=task_succeeded on both, the first
+motion-earned verdicts on this embodiment. Along the way the recurring mid-carry
+execution_failed anomaly finally printed its error text and died: planned
+trajectories re-assert the program's last *commanded* gripper value (0.02 m) while
+the fingers physically hold the block at 0.029 m, so every carry ended by re-issuing
+a grasp on an already-gripping gripper, which libfranka rejects — "Command failed!" —
+poisoning otherwise successful moves. Re-closing while holding is now a self-reporting
+no-op. Also built: upstream improvement #3 — mask_to_point_cloud trims depths more
+than 3 robust sigmas (MAD) from the mask's median, killing silhouette bleed while
+keeping genuinely deep structure; the 225 mm phantom block is now a unit test.
+ASPIRE branch at 0d4035c, 22/22 adapter tests, 179 across the cloud consumers. The
+"slow arm" during the cycle is the motion generator grinding 19-waypoint descents at
+speed_factor 0.12 (~2 min per tall move) — a tuning item, not a fault. Bench ends:
+blue back on green at the pile, red still standing, arm home.
+
+## 2026-11-13 (later) — the survey, the knocked camera, and glow that voted
+
+"The box is on the bench — run the survey" turned placeholder geometry into measured
+goals with zero motion: SAM3 found five wooden-block instances (0.88–0.93) inside
+what turned out to be a mesh basket, rim measured from the wrist depth cloud at
+z≈0.10, footprint centred (0.44, 0.23) half-extent 0.11; the wall line moved to
+y=−0.12 after noticing the placeholder ran within a centimetre of the standing red
+block. The survey's snapshots also caught the evidence-expiry lesson live: the D435
+scene camera had been physically knocked and was staring at the robot's column while
+its profile still carried the old calibrated pose — the slab verdict's preferred
+witness, confidently wrong. After re-aiming, the checkerboard-free recalibration
+(plane + the stack and red as touch-verified landmarks, no motion) failed honestly
+on its first solve: 146 mm residuals, because the base column's blue LED strips
+out-pixelled the real blue block and the landmark picker took the biggest blob —
+the third time pixel count has voted against physics on this bench. The cure is now
+uniform policy: rank candidates, gate on plausibility; here the fitted plane itself
+is the gate (a block raises its whole blob above the table, glow hugs it). Second
+solve: 4.3 mm residuals, camera within centimetres of its pre-knock pose, and the
+recalibrated witness validated against bench truth — thousands of band points at
+the stack and red, zero at the empty pick target. ASPIRE branch at dc05898, 28/28
+adapter tests. The live pick-from-clutter now waits only on an all-clear.
+
+## 2026-11-13 (night, second) — first clutter pick, verdict by the rehabilitated witness
+
+The live pick_from_clutter ran once and succeeded: attempt 1, the tallest candidate
+in the basket (a block standing on end, top 0.0875) grasped at (0.4785, 0.1707),
+carried over the rim, placed at the target — the program's own re-scan found it
+17 mm off centre, and check_success earned the verdict through the just-recalibrated
+scene camera: 1659 slab-band points at (0.34, −0.20) against a threshold of 60.
+The run's one blemish is its best data: the place "lower" was aborted by the
+cartesian reflex, because PLACE_EE_Z assumes a flat block (27 mm) and this one stood
+tall (55 mm) — its bottom hit the table 25 mm early, contact fired the reflex,
+recovery ran, release left the block standing upright on target. An accidental
+contact-based place: the same descent-contact trigger hebbot uses deliberately,
+delivered here by a safety system. Lesson filed for build_wall: preserve the
+EE-to-block-bottom distance measured at grasp instead of assuming orientation,
+or every standing pick becomes a reflex abort at its slot. Bench ends: stack and
+red untouched, one green block standing at (0.34, −0.20), arm home.
+
+## 2026-11-13 (night, third) — the wall's two blockers, removed at the desk
+
+Both prerequisites for build_wall built and committed (ASPIRE 479b3b2), no motion.
+Speed: the crawl was never the planner's fault — panda_py's generator (Ruckig
+point-to-point under the hood) comes to rest at every waypoint it is handed, so a
+dense retimed path executes as a stop-start grind. execute_waypoints now decimates
+after guarding: greedy joint-space chord fitting at 0.05 rad tolerance, then the
+workspace guard re-run over the chords at the dropped parameters, because the chords
+are what the arm will actually follow; if the sparser path can't be shown safe the
+dense one is sent — slow and dense beats clever. A straight 19-waypoint descent now
+sends 2 waypoints; speed_factor stays at 0.12, untouched. Place height: both clutter
+programs now read the held block's orientation from its scanned footprint (long side
+visible = lying flat, 28 mm in hand; narrow = standing, 55 mm) and place preserving
+bottom clearance, which turns last run's reflex abort into a 3 mm release. build_wall
+prefers lying candidates — the wall wants flat courses — and reports each slot's
+orientation instead of papering over a standing one. 31/31 tests; no-motion smoke of
+both programs walks the full perception chain and aborts honestly at the interlock.
+The smoke's own verdict was a nice epistemic moment: pick_from_clutter came back
+task_success=True with zero motion, because the block from the live pick still sits
+at the target and the predicate measures the world, not the program's effort.
+
+## 2026-11-13 (night, fourth) — the basket bites, and the hand learns its own width
+
+First live build_wall lasted one descend: the chooser took the highest flat block —
+at x=0.501, nine millimetres from the basket's measured east wall — and drove the
+hand into the rim on the way down (Doug watched it bump the edge). Cartesian reflex,
+honest abort through go_home, slots_built 0. The diagnosis is a category error:
+in_box asked whether a block belongs to the basket; nothing asked whether the hand
+can get at it. The decimated descend reached the rim faster, but speed was never the
+bug — the collision was geometrically certain at any speed. Fix: the survey's
+measured wall lines (x 0.36–0.51, y 0.10–0.36) now live in both task goals, and both
+programs gate candidates on a yaw-aware hand envelope — 60 mm half-span along the
+finger-closing axis, 40 mm along the block — per wall. Wall-huggers are excluded as
+physically unpickable by vertical descend, and when only wall-huggers remain the
+program reports wall_blocked rather than bumping the basket. No-motion smoke against
+the live scene: the chooser moved from (0.501, 0.225) to (0.437, 0.199), seven
+centimetres clear of the wall that claimed the run. ASPIRE at f3d0b21, 31/31 tests.
+The wall itself still waits: the earned-verdict slab report meanwhile showed slot_3
+already reading 1286 points from the stack's edge 3.6 cm off the wall line — the
+bench is getting crowded, worth watching when the real courses go down.
+
+## 2026-11-14 (small hours) — shoving practiced, and a witness election
+
+Doug's suggestion ("a good chance for you to practice shoving") became the bench's
+first push primitive: fingers closed into a bundle, contact low on the bottom block,
+quasistatic slide along −y. One push carried the intact stack from (0.4541, −0.1574)
+to (0.4485, −0.2184) — 6.1 cm, slight overshoot past the −0.205 target — with blue
+riding green the whole way; run under stack_blocks so the verdict was the
+postcondition a shove must keep, and it was earned: blue-to-green 0.0156, on_green
+true, zero reflexes. The no-motion smoke beforehand caught a lovely bug: the bench
+now has TWO green blocks (the basket pick was lime), and the stack verdict matched
+blue to the big fully-visible newcomer at the pick target instead of the pile's
+edge-ring green — 'blue is 0.105 from green' on an intact stack. Relation predicates
+now elect their witness by nearness to blue, not pixel count (locate_colour_top grew
+near_xy); for unstack the same choice is conservative. The shove's own check gates on
+height alone for the same reason. Slab re-check after the shove: all five wall slots
+read 0 band points; the stack's 2389 sit at its new home 6 cm clear of the line.
+ASPIRE at 4dcf9b0, 32/32 tests. Noted for later: the home-view oblique bias grows
+with distance — the stack's true 0.073 top read 0.1017 from home at y −0.218 (+29 mm
+vs +15 mm at the old pile), so the single-block threshold needs a second look if
+blocks drift much farther out. Bench: stack at (0.45, −0.22), wall line empty,
+basket mid-clutter, lime block at the pick target, arm home.
+
+## 2026-11-13 (Friday evening) → 2026-11-15 (Sunday) — a sorting demo for Scarlett
+
+Doug brought a ten-year-old visitor and asked for a quick block sort. The program
+(`sort_colours.py`, written in minutes from the clutter pick's grasp mechanics) lines
+red, green, blue up along y = 0 at x 0.32/0.41/0.50 — blue off the stack first, red
+before green so no descent lands beside the standing red. First live run, Friday:
+blue came off the stack cleanly, carried to its slot, and the lower-to-place fired the
+cartesian reflex a few millimetres early. The clutter pick treats that as a completed
+contact-place and releases; my sort program had made "lower" fatal, so it gave up with
+blue already sitting 3.7 cm from its slot. One-line lesson, re-learned: lower is
+contact-tolerant, by design. Scarlett enjoyed it anyway. The resume ran Sunday on an
+empty bench: blue re-placed 2 mm from its slot, green 2 mm from its slot (verified by
+nadir re-localization), and the row's pair looks tidy from the scene camera. Red did
+not make it: its standing place also fired the reflex, and after the release and the
+reflex recovery it ended up lying flat at (0.198, 0.118) — 16 cm from its slot and
+outside the workspace box (x < 0.25), so the arm cannot fetch it back without a hand.
+Two findings. (1) The 3 mm release gap is thinner than the stack of errors (top-read
+bias, grasp seat, table plane): both placements this run met the table before it
+closed; sort_colours now releases from 8 mm. (2) A refused survey is silent: the
+program's `survey()` had no max_steps, the blue-slot→red-block survey exceeded the
+default budget, and the red localization looked from the wrong pose — it happened to
+work, which is worse. Surveys now carry the long-move budget and a refused one aborts
+the find. Final: 2 of 3 sorted. Bench: green (0.41, 0.00) and blue (0.50, 0.00) lying
+flat on the row, red flat near the base at (0.20, 0.12), lime standing at the pick
+target, basket mid-clutter, arm home.

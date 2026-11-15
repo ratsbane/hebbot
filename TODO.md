@@ -9,7 +9,9 @@ the lab notebook; bench-forced items jump the order.
   candidate search once a bench sim exists. Clone at `~/git/ASPIRE` (Apache 2.0);
   reading note in `research_notes/paper notes/aspire_repo_2026-11.md`. The
   verifier gate itself landed 2026-11-12 (`substrate/verification.py`).
-- **Upstream PR to ASPIRE** when we have something proven: first candidate is
+- **Upstream PR to ASPIRE** when we have something proven: #2 (probe-verified
+  check_success) is now built and live-validated on franka_real (4ee885d,
+  2026-11-13) — the PR can show a real earned verdict. First candidate is
   evidence-expiry-on-change (fingerprint-bound verification), which their paper
   lists as a limitation and our substrate now implements. Prove it on our bench
   first, then port to their skill_report/verifier flow.
@@ -31,7 +33,13 @@ the lab notebook; bench-forced items jump the order.
   rotated-yaw near-base reach (y3's −x side). Port the descent-rate trigger to
   it when probing needs that region. (The place-side pathology is fixed:
   2026-11-13's rate trigger, validated at the (0.37, 0.0) crime scene.)
+- **Scene camera, hebbot side**: the D435 is mounted, calibrated (3.5 mm
+  landmark residuals; pose in ASPIRE's configs/franka/franka-bench.json) and
+  serving ASPIRE observations at 13.5 fps over USB2 (2026-11-13). Remaining:
+  attach it to hebbot's own look/memory for scene-wide disturbance
+  attribution, and a proper SS cable doubles the rate. Known limit: oblique
+  localization smears by silhouette depth-bleed; trust it for video and
+  attribution, not grasp targets.
 - Queued-until-forced (see lab notebook): negative evidence on failed locate,
   anisotropic told error bars, `hinted` conflation, scene-wide disturbance
-  attribution, relations/descriptions layer + local VLM as its sensor, scene
-  camera attachment.
+  attribution, relations/descriptions layer + local VLM as its sensor.
