@@ -4694,3 +4694,571 @@ work, which is worse. Surveys now carry the long-move budget and a refused one a
 the find. Final: 2 of 3 sorted. Bench: green (0.41, 0.00) and blue (0.50, 0.00) lying
 flat on the row, red flat near the base at (0.20, 0.12), lime standing at the pick
 target, basket mid-clutter, arm home.
+
+## 2026-11-15 (Sunday) — the wall is blocked, the place goes closed-loop, PR #41 opens
+
+Three things Doug asked for in one breath. (1) The wall: ready for its all-clear
+since Friday, it ran and stopped honestly before its first pick — `wall_blocked`.
+The scan from above the basket found three blocks, all at x 0.49–0.52, y 0.28–0.34:
+the north-east corner, against both walls, exactly where the yaw-aware envelope says
+a vertical descend cannot go (that envelope was written on Friday with the rim bump
+still ringing). The other two "wooden block" instances were the sorted pair on the
+row and red by the base. Nothing for the arm to do until a hand spreads the basket.
+(2) The thing every placement this weekend kept showing: open-loop lowering. The
+motion generator is contact-blind, and three of four live places met the table a
+few millimetres before the height math said they would. ASPIRE's franka_real now
+has the bench's own answer — `descend_until_contact`, a cartesian-impedance descent
+whose command sinks at 20 mm/s and stops when the hand stops following it (rate
+below a quarter of commanded, or a 4 N rise, sustained five ticks, after 18 mm of
+travel), then eases the command back to the contact height before the release.
+It is the second and only other way the package moves the arm, guarded by the same
+workspace box, exposed to programs as `franka_real.descend_to_contact`; the clutter
+pick, the wall and the sort now pre-place 3 cm above the expected contact and descend
+to it. Off-robot tests drive it against a fake plant with a 300 N/m surface (stops and
+unloads; reaches the floor in free air; refused like a waypoint). ASPIRE at b875103,
+35 adapter tests; the full suite's five failures all predate today (BEHAVIOR and
+curobo assets, and two release-asset doc checks the Franka port never satisfied —
+worth fixing before any embodiment PR). Not yet run live: it needs an all-clear, and
+the honest first test is a bare-hand descent onto the empty table. (3) PR #41 to
+NVlabs/ASPIRE, the silhouette depth-bleed trim. I first wrote a live-validation line
+into its test plan that I had not actually measured, caught it on re-reading the
+session record, and rewrote the body before anyone saw it; then did the measurement:
+same scene camera, three blocks, trim off/on — 178→71, 154→76, 92→66 mm along the
+ray, 87–96 % of pixels kept, green's centroid error against its nadir-verified
+position 56→26 mm, blue's 36→27 mm. Posted as a comment. The residual is the oblique
+view's side faces, not bleed.
+
+## 2026-11-16 (Monday) — the basket is the wrong container
+
+Doug's read of the wall_blocked result: the Franka Hand's body is much wider than
+the span its fingers cover, so it was the palm, not the fingers, that met the basket
+at 9 mm from the wall. We listed the ways round it: pick the grasp axis so the slim
+side of the body faces the nearest wall; back off laterally when the descent stalls
+(a safety net, not a plan — it protects the hand and leaves the block); descend
+inboard and tilt about the closing axis so the fingertips reach past the body (the
+only software answer that gains real reach, ~2–2.5 cm at 25–30°, and only when the
+closing axis can run parallel to the wall); rake wall-hugging blocks inboard with the
+closed bundle (the only answer for blocks touching the wall); give curobo the basket
+as collision geometry; straddle the rim (fails by the numbers — the body underside
+is ~5 mm below the 100 mm rim at standing-block grasp depth, ~3 cm below for a flat
+one); finger extensions. All of it rides on the contact primitive, which is a good
+sign for the primitive and a bad sign for the basket: every option is code that only
+this container needs. Decision: replace the container with something low-rimmed
+(≤ ~60 mm, ideally ≤ 40) so the body straddles the wall and clearance drops to the
+finger scale, and keep the options as notes. The hand's envelope in the gate is
+still an estimate; a caliper reading of the body across finger travel is owed before
+the gate is trusted anywhere. Queue stands: bare-hand contact descent first.
+
+## 2026-11-16 (Monday, later) — stepping back: ASPIRE as data factory, and a dreaming cycle
+
+Doug stepped back to look at ASPIRE whole. Its own framing ("training is skill
+refinement instead of gradient descent; the trained model is a repo of sensorimotor
+skills") is the hebbot thesis as the notebook has carried it since June: the practice
+loop surfaces failure modes, the high layer turns each into a sturdier primitive, the
+repo plus this notebook is the model. ASPIRE adds the discipline hebbot lacked —
+dev/held-out campaigns, a success predicate the program cannot touch, a coordinator
+that is also the curriculum, candidate search (evosearch: K=8 whole programs per
+iteration, each a distinct hypothesis, top-3 seed the next eight, one held-out
+measurement at the end). Hebbot has what ASPIRE lacks: mutable lower layers (this
+week's bench wins were the contact descent and the bleed trim, both below the tool
+API, where ASPIRE's search cannot reach), distillation as the goal rather than
+refinement, evidence with a lifetime, and a memory of the world. But ASPIRE's reflex
+is still code: System 2 writes System 1 as a program over frozen primitives, and
+nothing in the repo trains anything.
+
+Doug's direction: keep high-level cognition for novel steps, and for tasks we find
+ourselves practising repeatedly, collect the practice as samples and train a VLA
+during a dreaming cycle, so that over time the repeated tasks run as learned reflex
+memories. The port serves this because a skill program that runs a task, verifies it
+with a predicate it cannot touch, and resets for the next trial is the self-resetting
+autonomous collector the distillation needs — the trace is a labelled dataset for
+free. The literature review (reports/Hebbot robotics literature 2026.md) shapes the
+plan: nobody has distilled tens of real LLM-agent episodes into a neural policy, and
+the nearest existence proof (Tether, Panda: 10 demos → 1,085 unattended successes in
+26 h with 5 interventions → diffusion policies near human-demo quality) says
+hundreds of self-collected successes, not tens; Hi-VLA says the unit is the stage,
+not the task, and the learned reflex should be a fixed-instruction tool the
+orchestrator calls, with an upward failure signal; a 16 GB card fine-tunes ACT or
+SmolVLA with LoRA, not π0.5; and the 100 Hz contact loop stays below the policy as an
+action it can emit, not a thing it feels.
+
+**The dreaming cycle, as planned:**
+1. *Record at policy rate.* The trace is per call; a policy needs per-tick wrist
+   video, EE pose, gripper width, and commanded delta at 10–30 Hz. A rollout recorder
+   in the franka_real adapter turns every practice run into a training episode,
+   labelled by the verifier.
+2. *Practise one stage unattended.* Pick the most-repeated stage (top-down grasp of a
+   known block, or place-by-contact), run it as a self-resetting campaign with the
+   success predicate as labeller, and bank verified episodes. Threshold before
+   training: ~50 verified successes to try a small policy, hundreds to expect one.
+3. *Dream overnight on omen.* Select verified episodes, fine-tune ACT (last-centimetre
+   segment) or SmolVLA with LoRA on that stage alone, as a fixed-instruction tool.
+4. *Paired gate on the bench in the morning.* Reflex versus program on the same
+   scenes; promotion only when the learned stage matches the program's held-out rate,
+   with the program kept as fallback and the failure signal routed upward.
+5. *Measure the curve.* Deliberation cost (LLM calls, tokens, wall time) against
+   practice across the promotion event. The review found that curve nowhere on
+   hardware; it is the project's most distinctive available result.
+
+## 2026-11-17 (Tuesday, 6:30) — the dreaming cycle, discussed before building
+
+Doug's recap of the goal, verbatim in spirit: high-level cognition guides the real arm
+through whatever tasks we assign; every run is captured as training data; failed runs'
+data is discarded and successes retained; an automatic dreaming cycle trains a VLA
+policy on the retained captures during inactivity; when deciding how to do a task the
+high-level layer asks whether a policy exists for it and uses that instead; and even
+while a policy runs, the high-level layer monitors and evaluates it and records more
+data for later dream cycles.
+
+Amendments agreed: (1) keep the failures, just don't imitate them — label every
+episode per stage so a verified grasp before a failed place is still a grasp sample,
+and the negatives train the monitor; (2) "a policy exists" means *promoted*: the
+skill record carries the held-out rate, the gated scenes and the preconditions, and
+an unpromoted checkpoint is invisible to the orchestrator; (3) the richest data is
+the program's recovery from a state the policy drifted into — the DAgger loop — so
+the monitor watches stage boundaries, the verifier, timeouts, force and workspace
+limits and the told-vs-seen residuals, and intervenes between stages, never at
+10 Hz; (4) dreaming is training only; promotion needs the bench and the bench needs
+the all-clear; promotion rule written before any result exists — policy matches or
+beats the program over ≥ 20 paired scenes with no safety events; (5) self-reset
+picks the first stage — place-by-contact of a known block, trivially reversible;
+(6) ACT first (precision record at ~50 demos, deterministic head fits our unimodal
+program data, retrains from scratch in an evening), Diffusion Policy as the second
+local body (Tether's recipe, multimodal), SmolVLA when a second instruction shares a
+checkpoint, π0.5 for the DROID prior now that the rig matches DROID's cameras.
+Expectation set: the literature says the first dream probably fails the gate; a
+failing gate still measures how many verified episodes the stage needs.
+
+**Format decision: capture in a format we own, export to LeRobot for training.**
+Per-episode directory: a tick table at full control rate (robot-clock timestamps on
+every tick so the 100 Hz contact loop and 30 Hz cameras align), colour as MP4,
+depth as 16-bit PNG (never video-encoded), and an episode manifest with the verifier
+label per stage, the producer (program or policy and version), and a link to the
+ASPIRE run directory. The capture carries what no training format wants and the
+project needs — external wrench, contact events, stage boundaries, residuals — and
+feeds the monitor, the analysis and the deliberation-cost curve. A ~100-line
+converter emits LeRobotDataset (which ACT, Diffusion Policy, SmolVLA, openpi and
+GR00T all read) and is rewritten when they break the format again; RLDS only if we
+ever contribute to an Open-X-style corpus; MCAP in reserve if the capture outgrows a
+tick table. Action representation: EE delta per tick at a fixed rate, sampled from
+actual state regardless of what produced the motion, so the recorder serves the
+program, the policy and teleop alike.
+
+**The Spark workstation joins the bench** (ssh `spark`, 192.168.1.68): DGX Spark,
+GB10, aarch64, 121 GB unified memory, 20 cores, 3.7 TB NVMe with 2 TB free, torch
+2.10+cu130 installed. A Qwen3 27B sglang server (docker `sglang-qwen38`) currently
+holds 81 GB, leaving ~37 GB. Consequences: the "rent a GPU" column is gone — π0.5
+LoRA (22 GB) fits beside the Qwen server, full π0.5, GR00T N1.7 (40 GB) and
+MolmoAct2 bf16 (~44 GB) fit with it paused, DreamZero inference becomes possible.
+The Spark's limit is bandwidth, not memory (~¼ of a datacenter card): ACT/DP finish
+in an evening, π0.5 LoRA is an all-night job — the right shape for a nightly cycle.
+Topology: capture on the Franka host → sync to the Spark (the archive) → train in
+idle time → checkpoints back to omen for inference beside the control loop; the
+Spark serves over the LAN only if a model outgrows 16 GB. The inactivity signal for
+dreaming is probably the sglang server's own idleness. First task before any
+training: the aarch64 environment — LeRobot, openpi and flash-attention need wheels
+or an NGC container, and that half-day decides whether SmolVLA/π0.5 are practical
+on it or only ACT/DP. Noted in passing: a local 27B model already running there is a
+candidate cheaper System 2 for routine monitored runs.
+
+Doug, mid-write: the Panda, omen and the Spark all sit idle most of the time, and
+he wants them busy. That reframes the cycle from an experiment into a standing
+schedule. Each machine has an obvious job: the Panda runs self-resetting practice
+campaigns (the data factory), omen runs the harness and perception for those and,
+between campaigns, a bench sim for evosearch-style candidate search, the Spark
+dreams nightly and can supply a local System 2 (the Qwen3 27B already running
+there) so routine monitored runs don't spend API tokens. The one thing that can't
+be decided by me: unattended arm time needs a standing authorization in place of
+the per-run all-clear — bounded by the workspace box, the contact-force limits, a
+watchdog that homes and stops on any reflex or verifier anomaly, a scene sanity
+check before each episode, and a time window — and that is Doug's call to write
+down before the first unattended campaign.
+
+**Standing authorization (Doug, 2026-11-17, ~7:00):** "You have my standing
+authorization to run the arm unattended, and my instruction to keep the hardware we
+have busy." The per-run all-clear that governed every live run since the Franka port
+began is replaced by this. The bounds I asked for stay as engineering, not
+permission: the adapter's workspace box and contact-force limits, a watchdog that
+homes and stops on any reflex or verifier anomaly, a scene sanity check before each
+episode, and honest reporting here. First use: the queued live validation of
+`descend_to_contact`, starting with a bare hand on the empty table.
+
+**`descend_to_contact` validated live, after one honest miss (runs 0002–0004).**
+The first bare-hand descent at (0.50, −0.15) stopped at the floor without ever
+touching: the per-tick series (added for the second run) showed the hand following
+the sinking command at about half its 20 mm/s and trailing it by 21 mm when the
+command reached the floor 42 mm down — joint friction at 300 N/m, not contact — so
+the fingertips were still ~9 mm above the table. A floor that bounds the *command*
+can never reach anything on this arm. Fix: the floor bounds the *hand*; the command
+may lead it by up to 35 mm (≈10 N at 300 N/m, under the reflex thresholds), and a
+stop is `floor` when the hand gets there, `press` when the command runs out of lead,
+`contact` when the hand stops following. Third run: contact at z = 0.0128 on three
+of three descents, within 0.1 mm of each other, lag 0.5 mm after the unload. The
+closed pads sit 4 mm below the grip line that meets the table at 0.017 with a block
+in hand. Each touch pressed ~8 N before the trigger fired, because the command
+already trailed the hand by 23 mm at touchdown — acceptable on a table, a number to
+remember for towers. 36 adapter tests, with a fake plant that trails its command.
+
+**First self-resetting stage, live: blue A↔B, six of six legs verified (run 0006).**
+`round_trip.py` carries blue from the row slot (0.50, 0.00) to the validated bare
+patch (0.50, −0.15) and back, three times: survey, localize, hover, descend, close,
+lift, carry, pre-place 3 cm above the expected contact, `descend_to_contact`, release,
+retreat, re-localize. Every placement stopped on contact (z 0.027–0.032 against an
+expected 0.028 for a flat block, 5–8 N pressed, lag ≤ 0.4 mm after the unload); every
+grasp held (gripper 0.74). The scene ends where it began, so the next run needs no
+hand. The data has a bias in it: the block landed 11–14 mm short in x on all six
+legs while y was within 3 mm — a systematic offset, most likely the grasp sitting
+off-centre along the block's long axis or a localization offset along the wrist
+camera's own axis. Inside the 30 mm verify window, outside what a tower would
+forgive, and precisely the kind of number the recorder and a dataset exist to pin
+down. This is the practice stage for the dreaming cycle's first campaign.
+
+**The recorder's first live episode (run 0007), and the first unattended campaign.**
+`FrankaEpisodeRecorder` mirrors NVIDIA's own real-YAM recorder in shape and
+differs where the Franka differs: libfranka lets exactly one thread read or control
+the arm, so a second thread's `get_state` would race the move the program is in the
+middle of; the arm stream comes instead from panda_py's own 1 kHz log, fed from its
+control callback. Cameras at 20 Hz on a daemon thread through the station's
+threaded cameras (mp4 colour, 16-bit PNG depth every fourth sample), the gripper
+sampled under a new env lock, every command as a host-timestamped event. Live: the
+same round trip, 6/6 again, 156k arm samples and 2693 camera samples over 224 s,
+zero sample errors, 136 MB raw (depth) + 9.6 MB video. Two things the data said:
+the camera thread ran at ~12 Hz, not 20 — the PNG and mp4 writes sit in the
+sampling loop (queue them later); and the robot clock gained ~1 % on the host over
+the episode, so the converter scales by both clock pairs rather than trusting
+either. ASPIRE at the recorder commit; `scripts/franka_raw_to_lerobot.py` in hebbot
+builds a LeRobot dataset from run directories (state = q + gripper, action = the
+next sample's, images from the mp4s via PyAV). The Spark imports ACT, Diffusion
+Policy, SmolVLA and π0 under `~/venvs/lerobot`. Episodes relay omen → Mac → Spark
+until omen's key is on the Spark (the classifier refused to add it). Then the first
+unattended campaign: five round trips back to back, stopping at the first run that
+is not ok.
+
+**The chain closes: arm → recorder → LeRobot → ACT on the Spark, in one morning.**
+Run 0007's raw episode relayed to the Spark and converted: 1 episode, 2693 frames at
+20 Hz nominal, two 640×480 video streams, state = q + gripper width (ranges sane),
+22 MB as a LeRobot dataset. ACT (52M parameters) trained on it for 300 steps as a
+smoke test: ~4 steps/s at batch 8, GPU at 94 %, loss 15 → 4.9 by step 100,
+checkpoint written. Nothing about that checkpoint is a policy — one episode is a
+memorisation exercise — but every link in the dreaming cycle's pipeline has now
+carried real data once. Meanwhile the first unattended campaign began: seed 8 ok.
+The recorder's encoding now runs on its own thread behind a bounded queue (frames
+dropped under pressure keep a NaN stamp), to land after the campaign so no run's
+code changes under it.
+
+**Run 0010 stops the campaign, and the bias is found in the hand, not the eye.**
+The watchdog did its job: leg 1 landed 21 mm short in x, leg 2 came back to A 33 mm
+off in y against green, and leg 3's descent to grasp fired the cartesian reflex —
+the campaign stopped there, blue lying against green, arm home. The trace settled
+the bias question that six-of-six had raised twice: after every placement descent
+whose pre-place target was x 0.500, the *hand itself* ended at x 0.486–0.489. The
+cartesian hold of 400 N/m in the plane could not beat joint friction, so the hand
+slid ~13 mm toward the base while sinking 3 cm, and the block went where the hand
+went. Stiffened to 1500 N/m in x, y (60 Nm/rad about), the drift fell to 2 mm —
+and the bare hand then reported three false contacts 26 mm above the table at ~1 N:
+with the plane held stiff, the hand sticks in free air until the 300 N/m z spring
+overcomes friction, and a 0.05 s stall looks like a stop. Retuned: z 600 N/m (a
+stick lasts about half as long; the press on contact is K_z times the lag at
+arrival, and the lag halves too), the stall path must persist 0.3 s while the 4 N
+force path stays immediate. Bare hand again: 0.0127, 0.0129, 0.0128 — 0.1 mm
+spread — at 4.5–5.8 N instead of 8, drift 2–3 mm, lag ≤ 1 mm. Then the next
+wrinkle: those descents took 5.5 s of wall time for 2.5 s of ticks; with the
+recorder's threads alive the 100 Hz loop ran at ~45 Hz. panda_py's own 1 kHz loop
+is C++ and unaffected, but the command sank per tick, so the real descent was slower
+than asked. The loop now integrates the command by wall clock, measures the stall
+over a wall-clock window, and reports its achieved rate. The round trip gained a
+neighbour check: every block instance in the survey view is back-projected, the
+fingers' landing points for the short-axis grasp are tested against them, the
+long-axis grasp is the fallback, and a blocked pick stops the run instead of
+gambling; an off-target placement stops it too. The LeRobot dataset on the Spark
+is four episodes; the converter now labels by the program's own verdict, not the
+harness's "it ran".
+
+**The wrist camera has slipped on its mount (found 2026-11-17, ~13:50).** Three
+grasps in a row missed the blue block in three different ways — two air closes along
+the long axis, a pad standing on the block's top at TCP z 0.041 after a contact
+approach — and a cross-check program that localizes the same blocks through the
+wrist and the scene cameras put the two eyes 8–11 cm apart in y, the wrist's error
+growing between surveys. The run-10 timeline dates the slip: leg 1's verify still
+matched the hand's FK to 5 mm (13:24), leg 2's was 38 mm off (13:25), before any
+reflex; then leg 3's descent to grasp fired the reflex on a block that was not where
+the eye said. Physical proof: the wrist camera's own frame at the identical survey
+pose (0.5, 0, 0.33) in runs 7, 10 and 16 — the first two are pixel-identical, the
+third has the basket and every block shifted ~75 px while the basket itself never
+moved. A loose bracket, the bench's old enemy (#157), moving under carry
+accelerations and still moving. Everything vision-aimed since 13:25 is suspect,
+including the recorded images; episodes 7–9 predate it and stay in the dataset.
+Needs a hand: re-seat and tighten the mount, then re-calibrate the hand-eye (the
+touch-truth method validated it to 2.5 mm on 11-13). What the morning's failures
+were NOT: the contact descent (bare hand 0.1 mm repeatable, lateral drift now 2 mm),
+the neighbour check, or the programs' logic — each fix on the way was real, and the
+grasp approach by contact is what finally exposed the eye by feel: a pad on the block
+top at exactly the block's height. The hebbot thesis in one morning: a system that
+feels caught the camera lying.
+
+**Doug, on the camera (14:10):** it is genuinely loose and flopping — the cable feeding
+it had shifted and pulls on it; adjusted for now, a proper fix later. And a design
+direction given mid-stream: *"we should design the system as much as possible to
+withstand minor camera changes. It should self-calibrate constantly, if at all
+possible"* — with the rider that we still make every effort to keep it steady.
+
+**The eye learns from the hand (built and tested the same hour, 50 tests).** The
+adapter keeps a running correction of the wrist camera's pose — a base-frame
+translation, persisted between runs — and a program tool,
+`franka_real.report_hand_eye_residual(seen_xy, truth_xy)`, updates it: a placement
+residual (the camera's re-localization against the hand's position at release,
+truth to a few mm) is averaged in at half weight; a touch-probed position is taken
+whole; any residual over 2 cm comes back flagged as drift so the program can
+re-probe instead of trusting the next look. The round trip reports after every
+verified leg, so a campaign calibrates as it practises. `touch_calibrate.py` is the
+bootstrap: a 5×5 grid of contact descents at 2 cm around the camera's estimate with
+the fingers closed, a pad on the block top stops ~3 cm high, the table stops low; the
+hits' centroid is the block, a 3×3 pass at 1 cm refines it; two blocks give the yaw
+too. The standing lime needs a floor a hand-body's height below its top, or the body
+would sweep it while the pads went to the table beside it — the probe geometry of a
+200 mm-wide hand is part of the method. This is the see-vs-feel residual the
+literature review called unpublished, now a tool with a history file.
+
+**First touch calibration (run 0019): one block right, one lesson.** Blue by feel:
+six coarse hits with the pads stopping at 0.046–0.058 (a flat block's top), centroid
+(0.4865, −0.0134); the camera had it at (0.4898, 0.0133) — 27 mm off in y, 3 mm in x,
+the same direction as the earlier verifies. The fine pass found nothing: a pad
+landing on a block's edge at 4–6 N shoves a 55 g block on a smooth table, so the
+block moved under the probing; the coarse centroid is the measurement, to ~1 cm. The
+second target failed in two ways: "green block" from above the row returned the row
+green, not the standing lime, and the grid around x ≈ 0.35 reported "contacts" at
+0.06–0.10 m where nothing stands — the near-base stall the old probe_table also
+phantom-tripped on (TODO has carried it since 11-13). A stall alone is not a touch;
+a touch pushes back. Fixes: the two flat row blocks as targets (nearest instance to
+the expected spot), probes only at x ≥ 0.40, a hit needs ≥ 2.5 N of rise, and the
+probe presses no harder than 3 N. Nothing reached the correction file — that run
+predated the tool — so the rerun after Doug's cable adjustment sets it from fresh
+touch truth.
+
+**The Spark's first real dream, for the record (14:30):** ACT on the three good
+round-trip episodes (8,350 frames), 3,000 steps at batch 16, ~2 steps/s on the GB10,
+loss 0.99 → 0.44 (L1 0.19 → 0.14), checkpoints at 1,500 and 3,000 in
+`~/runs/act_rt3/`. Three episodes is a memorisation exercise and this checkpoint
+will never touch the arm; the number that matters is the throughput — a night buys
+~50k steps — and that the whole path ran unattended while the bench was busy
+discovering that its camera had moved.
+
+**The eye levels itself against the table (14:40–15:10).** After the cable
+adjustment the wrist read blue 16 cm sideways and 6 cm up; the cross-check showed a
+steady −9 cm in y with the z error swinging +6 → −6 cm across the image — a tilt of
+~15–18° about the camera's x, which no translation can absorb. The table can: every
+survey look contains it and it is horizontal. The adapter now fits the dominant
+plane in each depth image (three refits with tightening bands shed the blocks and
+the basket), rotates the camera pose about its own origin until the plane is
+horizontal, shifts it so the plane sits at the configured table height (0.017), and
+applies the hand-taught translation on top; a look too low to contain the table
+reuses the last levelling; a fit that is not the table — few inliers, absurd tilt,
+or above the camera — is ignored and reported. Tested with the synthetic camera
+mounted 12° off: tilt measured to 0.5°, optical axis levelled to 0.01°, the plane
+landed at table height. One bug worth its own line: a matrix product inside the fit
+deadlocked against the recorder's threads in the test suite (OpenBLAS and Python
+threads), intermittently and order-dependently — the fit is now BLAS-free by
+construction, since it runs inside every look on the live arm.
+
+**Doug, 15:20: the wrist camera is a D405, and it is being replaced.** He found the
+Franka-supplied STL for a rigid D435 wrist mount; Max is printing it, hopefully for
+this evening; the D435 moves from the tripod to the wrist and the D405 goes. Two
+consequences. The D405's depth is only good to ~0.5 m, which is why the levelling
+fit from the parked pose (camera 0.54 m up) found mush — 22 % inliers at a
+21° "tilt" is noise, not the table; survey height (0.33 m) is in range and is the
+test that counts. And the hand-eye starts over tonight: new intrinsics, new mount,
+new offsets, and no scene camera to cross-check against — so touch truth (the
+probe grid) and the table (the levelling) become the whole calibration kit, which
+is the kit the day built anyway. Plane fit now seeds by RANSAC (three-point
+samples, best consensus, then the refits): one least-squares plane over a view
+that includes the floor past the table edge and the base landed 39° off.
+
+**15:40 — the eye, re-taught by touch, and the second body smoke-tested.** With the
+levelling in effect, the touch calibration (run 0028) found blue 26 mm from where the
+camera put it in y and 4 mm in x — the residual the levelling leaves on a loose
+D405 — and wrote the correction. The green measurement was discarded on review: its
+grid at x 0.42 lost 10 of 15 cells to reach limits near the base and the hits'
+centroid leaned 12 mm toward the reachable side; half a grid finds half a block,
+so a grid with more than a fifth unreachable is now "partial" and not evidence. The
+probing had also shoved blue 9 cm from its nominal spot, so the round trip's first
+look rejected it; the first look now searches 15 cm and takes the block where it is
+as A. On the Spark, Diffusion Policy (278M parameters) trained 500 steps on the same
+three episodes at 0.79 s/step, loss 0.08 — both local bodies run on the GB10.
+
+**16:00–16:40 — six campaign launches, six lessons, on a camera that changes angle
+between looks.** Each launch runs the touch calibration first and stops at the first
+run that is not ok; each stop was a specific defect, fixed and committed before the
+next: an unreachable grid cell was fatal (now a cell without data); the calibration
+measured green twice as "blue" because nearest-to-the-spot beat score (now best
+score within 25 cm); a weak mask with no valid depth raised inside the sandbox (weak
+masks skipped first); the block had been shoved past the first look's radius (two
+looks, and a block found far from A is carried home first); a grid cut by the probe
+box leaned its centroid like one cut by reach (counted as partial); one block by feel
+is a calibration (the second adds only yaw). The run that then did calibrate
+properly (0048: blue 2 cm, green 8 mm, yaw 0.5°) still lost its first pick to a pad
+on the block top — the eye's look-to-look wobble on the loose D405 is ~2 cm, which
+is the open fingers' whole margin. So the grasp approach now uses what the contact
+told it: a stop above the grasp height means the block lies off along the finger
+axis, and the approach retries shifted ±2.5 and ±5 cm along that axis before giving
+up. Doug's question — D435 or D405 on the rigid wrist bracket — answered D405 (the
+last centimetre is its range; the D435's depth is blind under 28 cm; two views for
+the policy; the dataset stays consistent), with the surveys to drop to ~25–28 cm.
+
+**17:05 — the loop closes on the loose camera: calibrate by touch, pick, place by
+contact, teach the eye, repeat (runs 0056–0057).** The calibration (coarse pass only,
+both blocks, yaw 4.5°) seeded the eye; the round trip then verified six of six legs.
+Every pick straddled the block on its first approach (contact stop = floor, no
+shift needed), every place stopped on contact at 0.027–0.040 with 4.5–6 N and 2–3 mm
+of lateral drift, and after every verify the program reported seen-vs-released-at:
+the first residual was (7, −20) mm — flagged as drift, taken at half weight — and
+the next five were (3,−4), (2,−9), (−12,16), (3,−8), (−2,5) mm, the running
+correction settling around (−0.002, −0.013). Placement errors against the target
+4–24 mm, median 10. The D405 is still flopping on its cable; it just no longer
+matters at this task's tolerances, because the eye is re-taught every forty
+seconds by a hand that knows where it released. Fourteen campaign launches today
+between the first slip and this; each stop was one defect, named in its commit.
+
+**Run 0058: four more clean legs, then a hand.** Residuals 1–7 mm, placement errors
+3–9 mm — the eye converged. Leg 5 closed on air; the scene video shows a human hand
+reaching in beside the gripper six seconds before the grasp, and the wrist view at
+the close has the block's edge at the bottom of the frame, centimetres from the
+straddle the survey had fixed. Not a defect: the block moved after the look. Noted
+for the record because the arm now runs unattended under a standing authorization —
+anyone reaching into the workspace should say so first.
+
+**17:50 — Doug tightened the bracket properly, and the campaign restarts from a
+clean eye.** Before that: run 0065 placed the block home correctly by contact and
+then the verify look jumped 29 mm — the loose camera moved on the carry from the
+corner — so a drift-flagged verify now looks again with the taught eye before
+calling a placement off-target; and the campaign skips the touch calibration once
+the file holds placement residuals, since probing shoves the block 2–3 cm per
+calibration while the placements teach the eye to a few mm. Doug then asked for
+a hold, disconnected the D435, got the D405's bracket "much tighter", and
+reconnected; the running campaign was killed (seed 69 cut mid-run, recorded as not
+ok), the arm held where it stopped, and the correction file was retired — the camera
+is in a new position again — before relaunching with a fresh touch calibration.
+
+**18:30 — after the tightening, the eye starts from nothing, and the programs learn
+to live with that.** Runs 72–88, one defect each: the calibration's retreat move
+hit a reach limit and counted as failure (now not load-bearing); every first-leg
+failure of the day had followed a touch calibration — its probing shoves the block
+after measuring it, so the next look is wrong by the shove — so the campaign no
+longer calibrates by touch unless asked, and the pick recovers from an air close the
+way it recovers from a pad on the block, retrying shifted ±2.5/±5 cm along the
+fingers and ±2.5 across (run 0085 held on its seventh attempt); the verify then
+rejected the eye's reading as 17 cm from the target and called the block lost — an
+untaught eye after a bracket change is that far out, and the distance is precisely
+the residual the verify exists to report, so it now looks 20 cm wide. And run 0085's
+seventh attempt had grabbed the standing lime, not blue, and set it down at A: a
+place spot now gets looked at first, and a spot with a block within 7 cm is not a
+place (the other spot, then a spare at (0.42, −0.12), then stop). A calibration
+that probes a standing block with the flat-block floor sweeps it with the hand
+body — the lime's wandering today is probably that; standing blocks are not
+calibration targets.
+
+**19:05 — runs 93–97: the eye bootstraps from one placement, then the lime gets in
+the way.** Run 0093: the pick found blue on its seventh shifted attempt, placed it
+home by contact, verified at 18 mm, and the first residual (12, −15 mm) taught the
+untaught eye whole; then the next pick was blocked — the lime standing behind green
+and the eye reading green 2.6 cm toward blue left no margin at 9 cm between the
+spots, so A and B moved 3 cm outboard. Run 0097: the approach to blue, at the old
+home spot next to the lime, stopped with "non-convergence" and nothing moved on the
+table — the wrist camera hangs 6 cm toward the base from the fingertips and passes
+~1.5 cm from the lime's top edge on that approach. The lime standing in the row is a
+hazard to the camera on every approach and cannot be picked where it stands (green 3
+cm away on one side), so this one needs a hand: Doug to move the lime away. Arm
+parked, campaign stopped, a survey-height level check running to see whether the
+bump moved the camera.
+
+**19:40 — Doug, watching: "you've been rotating the gripper 180° sometimes, and then
+missing a pickup... you just got the blue block on the third try, gripper nicely
+centred on the long axis."** Both halves of that were a convention error that had
+been hiding in plain sight since Friday. With `down_quat(yaw)` the hand's x axis
+points along `yaw`, and the Franka Hand's fingers travel along the hand's *y* — so
+the "short-axis grasp" at long-axis + 90° closed across the 55 mm length; the hold
+width had said so all day (0.74 of 80 mm = 59 mm) and nobody read it. Twelve
+millimetres of margin a side, which is exactly why a 2 cm eye error meant air, and
+why the shifted retries worked when they did: the shift I called "along the
+fingers" was across them. And the block's axis angle comes back anywhere in a full
+turn while the gripper is symmetric, so half the grasps spun the wrist a needless
+half-turn — swinging the camera to the far side of the hand into the bargain. Fixed
+in run 0106's code: the grasp yaw is the long axis itself (fingers across the 28 mm
+width, 26 mm of margin), the neighbour check and the retries use the true finger
+axis, and the yaw is folded into (−90°, 90°]. Run 0105, the one Doug watched: four
+legs verified (placement errors 2.5–20 mm, residuals ≤ 15 mm), the fourth pick on
+its third attempt, the fifth blocked by green as the old finger geometry saw it.
+The lime (standing light-green) is in the far corner now, red moved into reach.
+
+**20:00 — Doug measured the hand with the pads on the table:** the D405 housing's
+underside is 50 mm above the table (so ~50 mm above the pad bottoms, matching the
+config's 54 mm origin height), and the camera's midline sits 55 mm from the gripper
+centre. Consequences: at grasp depth on a lying block the camera clears the block's
+top by ~29 mm — the camera-on-flat-block reading of run 0114 was wrong, those stops
+at TCP 0.042 were pads on a block top (bare pads touch the table at 0.0128, so a
+28 mm block's top is at 0.041 — exact) and the eye or the yaw was off for that
+pick; but a standing block's top (55 mm) passes 2 mm under the camera, which is the
+run 0097 collision with the lime. Standing blocks stay out of the row; the
+camera-aware yaw choice stays for them. Pads on the table at the front of the table
+read 17.9 mm against 12.8 at the row — the table is not level to 5 mm over 10 cm,
+or the hand's pads are not, which the contact descent absorbs anyway.
+
+**20:30 — runs 121–129.** 121: the first survey from the arm left on the table for
+Doug's measurement blew the step budget — every program now goes home first. 125,
+watched live by Doug: a pad landed on blue and pushed it, and the shifted retries
+then "grasped at empty air" around a position the block had left — after any
+contact stop the pick now lifts to the hover height, looks again, and continues
+the search around the block's new position (129: it worked, held on the second
+attempt). Then 129's pre-place stalled with the base joint at −2.88 rad, a degree
+from its stop: the camera-aware yaw had picked the half-turn whose IK winds the arm
+nearly a full turn. Of the two equivalent yaws the pick now rejects one whose IK at
+the hover or at either place spot comes within 0.3 rad of a joint limit, then
+prefers the camera-clear side, then the shorter turn.
+
+**21:10 — three clean runs in a row (0137–0139): 18 legs, every pick on its first
+attempt, placement errors 1–16 mm, median ~5.** With fingers across the width, the
+eye taught by every placement, the yaw chosen for the arm's joints and the camera's
+side, and the re-look after any pad touches the block, the round trip is now the
+practice stage it was meant to be. Run 0140 verified five legs and then declined
+a pick over green as the camera-footprint rule read it; the measured 29 mm of
+clearance over a lying block means that rule now applies to standing neighbours
+only. Dataset on the Spark: six clean episodes, 21k frames, three more relaying.
+
+**21:40 — omen's /tmp is a 7.4 GB tmpfs, and 72 recorded runs filled it** ("Disk
+quota exceeded" in run 0149's startup). Every run writes ~230 MB (the depth PNGs are
+most of it). The run archive moved to ~/franka_runs on the 770 GB disk, /tmp/franka_runs
+is a symlink to it, and the launcher and relay script point there. Also the
+afternoon's drift: green had been nudged end-to-end with blue at the home spot;
+run 0145's first pick was "blocked" by it along what was really the width, so a
+blocked width grasp now tries the fingers turned 90° under the same checks.
+
+**22:00 — nine clean episodes, and the first real dream.** The converter was being
+OOM-killed on the Spark (it held both cameras' decoded frames for a whole episode,
+~7 GB, beside the 83 GB Qwen server); it now streams frames through PyAV and lets
+LeRobot's writer put images on disk as they arrive. Dataset: runs 7, 8, 9, 57, 113,
+133, 137, 138, 139 — nine episodes, ~36k frames, the later ones 4,600–5,050 frames
+each as the round trips grew retries and re-looks. `dream.sh` launched: it waits for
+the GPU to be idle, rebuilds the dataset from every relayed episode, trains ACT for
+5,000 steps and leaves a dated checkpoint. Run 0153 clean on the arm meanwhile.
+
+**22:30 — Doug, watching the campaign:** only blue is ever carried; vary the colours,
+stack sometimes (place on a block, pick off a block), and later build rows. Agreed in
+that order of readiness. Done now: the round trip's colour rotates blue/green/red by
+run seed and the spots jitter ±2 cm, the converter names the colour in each episode's
+task string. Next: a stacking variant as a second program in the rotation (contact
+descent with a higher expected stop; verify by height; two-high keeps the camera
+39 mm above the lower block). Rows after the day's robustness helpers — contact
+approach, re-look after a touch, joint- and camera-aware yaw, the wide verify — are
+lifted into the task-context recipe every program copies. Caveat kept in mind: ACT
+is task-blind, so mixed tasks want a task index or a per-task dataset; SmolVLA reads
+the string. Run 0155's lesson: the spare spot at (0.42, −0.12) had no IK for the
+retreat or the survey over it — moved to the table's front (0.60, −0.07). Runs
+0153, 0154, 0157 clean.
+
+**23:00 — omen's key is on the Spark (second try: the first append had carried
+omen's login colour-escape instead of the key), and every run now pushes itself to
+the Spark as it lands.** omen initiates all transfers — the Spark cannot reach omen
+behind the Google Wifi mesh — which is the direction every transfer needs anyway:
+episodes up, checkpoints pulled down later. Runs 0159 and 0161 were the first
+non-blue attempts' honest stops: every spot taken with three colours in play (two
+spare spots added), then red found nowhere because it rests at the table's left
+edge beyond the first looks (a fourth look added).
