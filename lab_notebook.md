@@ -5262,3 +5262,135 @@ episodes up, checkpoints pulled down later. Runs 0159 and 0161 were the first
 non-blue attempts' honest stops: every spot taken with three colours in play (two
 spare spots added), then red found nowhere because it rests at the table's left
 edge beyond the first looks (a fourth look added).
+
+**23:50 — the first full dream cycle completed on the Spark:** nine episodes rebuilt
+from the synced archive, ACT trained 5,000 steps at batch 16 (loss 0.21 by step
+500, the 1 kHz log lines sparse after), a dated checkpoint in
+`~/runs/dream-20261117-1159/`. Not a policy anyone would run yet, but the night
+job now exists end to end: omen pushes every run as it lands, the dream rebuilds
+and trains on whatever is there. Evening campaigns with three colours: 0165 the
+first red round trip (fetched from the table's left edge), 0177 blue clean, 0178
+green's first three legs verified before a survey straight above a far spot left
+the generator unconverged — the place spots are now judged from one look above the
+row's centre. Each run teaches the eye a little; the residuals on verified legs sit
+around 1–15 mm.
+
+**00:30 — three colours, honest stops, and a block that stood up.** 0181 the first
+green round trip, clean. 0182: red invisible at y −0.32, outside the hand's working
+area — a colour the looks cannot reach now yields to the next, so the arm keeps
+practising. 0185: one wild look read a block 24 cm from where the hand had just
+released it — a fitted tilt more than 8° from the last accepted one is now rejected
+as a wrong plane, and the verify looks twice before calling a placement lost. 0189:
+blue slipped from the jaws on a carry and landed on end mid-table; the lying-only
+look then called it lost, and the next run would have left it standing as a camera
+hazard. A standing block of the colour is now carried too, ranked after a lying one
+(the fingers close across its 28 mm at mid-height, the camera clears its top by
+3 cm), the place expects the standing contact height, and the camera-hazard flag
+uses the top height. Every one of these stops was the program refusing to guess;
+every fix was one sentence in a commit.
+
+**01:00 — green round trip 0201 clean (6/6, errors 7–16 mm); 0202 four legs then a
+drop.** The block left the jaws on the carry and the verify's 16 cm "residual" went
+into the eye at half weight, bending the correction by 8 cm — undone by hand in the
+file. A block seen more than 5 cm from the release point is now reported as dropped
+and teaches nothing. Both slips tonight followed a hold width a few millimetres over
+the block's, a grip across a corner; the grasp force rises from 25 to 40 N. Earlier
+in the evening: run 0193 blocked by green's own second detection (within 2.5 cm is
+the block), 0197 carried the standing blue twice and then misjudged its posture
+(standing is now top or footprint; only the table's y edge is out of bounds for a
+standing block). Still every stop an honest refusal, still each fix a sentence.
+
+**14:45 — the wrist camera's cable.** Run 0213 refused to start: the D405 was off the
+bus; the cable had slipped through a tie at the elbow and pulled the connector. Doug
+re-seated it, tightened the tie and added a second. Level check 0214 passed (tilt 2–3°,
+the running correction a few centimetres; no recalibration needed). Run 0217: three
+legs verified, then at 14:41:26 the camera disconnected mid-verify and the last look
+read the block 10 cm off, so the new dropped-block guard fired on a dead camera
+instead of a dropped block. The connection lasted ten minutes of motion. The bracket
+Max printed is ready for pickup this evening; a USB cable that survives the elbow is
+the other half of that job.
+
+**15:15 — the front edge.** Doug's cable management continued (hub now taped to the
+arm's first segment, the cable taped to the hub); each hub reconnect left the D405
+enumerated but unable to stream until a `hardware_reset()`. Run 0223 clean, the first
+full round trip since the cable work. Then the red block fell on the floor twice (0221
+leg 6, and 0224 mid-pick): both times at the spare spot C, x 0.60, where the grasp
+search's shifted attempts went out to x 0.627 with the fingers open and swept the
+block off the front edge. C and D come in to x 0.57 and no attempt is centred beyond
+0.60. Also learned: the blue block standing in the basket was a candidate (0219
+reached for it, a reflex and Doug's bump stopped it); the basket side, y > 0.12, is
+now out of bounds for looks.
+
+**15:30 — duty cycle.** Doug's reading of the afternoon: the cable trouble is a
+consequence of our own success. The arm now makes a few hundred reaches a day across
+the whole table, the elbow swinging through its full travel, a different duty cycle
+from the handful of careful runs the cable routing was taped for. The routing has to
+come up to the same standard as the motion; the rigid bracket and a short, properly
+routed cable this evening are that. Duty-cycle problems are good problems to have.
+The campaign script now hardware-resets the camera and retries once when a run gets
+no frame, so a re-enumeration between runs no longer stops a batch. Next things the
+duty cycle will find: the finger pads, and the tape on the bracket.
+
+**15:50 — the grasp at the end of the block, and why the eye could not see it.** Doug:
+"very frequently you're grabbing a long block from very close to one end, and
+sometimes you miss completely; grab near the middle." Scene-camera frames at the
+six grasp closes of run 0231 confirm it: the fingers sit 15–20 mm from the end
+nearest the robot (the camera's side of the hand), every time. Yet the pick estimate
+against the previous release point agrees to 2 mm, and the placement residuals are
+under a centimetre. The reason is structural: the fingers centre a held block along
+their travel, so a placement residual exposes the eye's error on that axis; along
+the block's length nothing centres it, the biased grasp is carried from pick to
+place and back, and the residual reads zero for any bias. The correction file had
+no touch sample at all (retired and recreated at a camera change; every lesson since
+a placement). Touch is the only truth on that axis. Changes: touch lessons carry
+weight 1; the calibration runs first in every batch and probes whichever lying
+blocks it finds; and the correction now lives in the hand frame, where a shifted or
+tilted mount puts the error, so a lesson at one wrist yaw holds at another. Also
+today: the IK reseeds from home when the arm has wound into another branch (0229).
+
+**16:20 — the touch found it.** Calibration 0240 (green lying, red on end gave a partial
+grid): the eye read green 30 mm short along x, toward the robot, the very end the
+fingers kept landing on; the lesson was taken whole, in the hand frame. Run 0241
+(green): 6/6, every pick on the first attempt, placement errors 2–14 mm, and the
+scene-camera frames at the closes show the fingers at the block's middle. Also:
+the calibration now probes a standing block (floor 25 mm below its top, the body
+clear), and takes whichever lying blocks it finds rather than blue and green at the
+row's start positions.
+
+**17:15 — the first clean batch.** Touch calibration 0254, then runs 0255–0260 all
+6/6: green ×4, red ×2 (red carried standing). Four stops before it, all the camera:
+the stream stalled mid-run three times after the hub was retaped (a stale frame now
+fails the run by name — "the wrist camera's last frame is 3.2 s old: the stream has
+stalled" — and the campaign resets and retries), then the cable at the far end of the
+hub pulled out; Doug: "all of our cable-management fixes held, but this time the USB
+cable at the other end of the hub pulled loose. More tape." Thirty clean round trips
+on the bench now, nineteen of them since the colour rotation; the next batch (0261)
+is on the arm and the Spark is dreaming on all thirty (10 000 steps of ACT).
+
+**18:30 — second clean batch.** 0268 calibrated, 0269–0274 all 6/6. Before it, 0261's
+batch went five clean and stopped on a pick (0266: the red's position wandered 2 cm
+between looks, twelve approaches, no grasp) as the room went dim with the sunset; the
+placement lesson weight came down from 0.5 to 0.15, since at 0.5 the noise walked the
+hand-frame correction 3 cm over the afternoon and touch now anchors every batch. The
+Spark is a third of the way through a 10 000-step ACT dream on thirty clean episodes.
+
+**19:45 — the second dream, and a third clean batch.** Spark: ACT, 10 000 steps on
+thirty clean episodes (green, red, blue; standing and lying), checkpoint at
+~/runs/dream-20261117-1703, pulled to omen:~/policies/. Nothing is promoted: that is
+the bench's paired gate, still to build (the learned_policy body and a program that
+runs a checkpoint beside the written skill). Bench: 0276–0281 all 6/6, and 0283–0284
+after another calibration; nineteen round trips in a row since the touch calibration
+became the start of every batch. Every stop today has been the camera or a hazard of
+my own; the skill itself has not missed since the eye learned where the block is.
+
+**20:15 — the probe that shoves.** Three stops since the clean streak: 0286 a grip
+across the block's length (59 mm hold) that let go on the carry — the gripper reading
+is now the tell, open and turn 90°; 0291 a lying block taken as standing from a
+shrunken mask (the top height now decides unless it is ambiguous); and 0293 eleven
+closes in front of the block right after a calibration. The last one indicted the
+calibration itself: the probe grid swept across the block from one side and the
+pads shoved it ahead of them (hits 6 cm wide across a 28 mm block, centroid a cell
+toward +x), the eye took that whole, and every pick then overshot. The grid now
+probes centre-outward, the pads landing first on the block's top where they cannot
+push it, and stops after an empty ring. Also tonight: a reverse SSH tunnel from omen
+to the Spark (Doug installed it), so the bench is reachable from Nashville tomorrow.

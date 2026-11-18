@@ -88,7 +88,12 @@ the lab notebook; bench-forced items jump the order.
   as off-track. Spec: rim ≤ ~60 mm (ideally ≤ 40) so the body straddles the
   wall at grasp depth; interior size then stops mattering. Then re-survey the
   goal's wall lines/rim (no motion), collapse the `wall_clear` gate to finger
-  clearance, and reword pick-from-clutter's TASK_CONTEXT item 2.
+  clearance, and reword pick-from-clutter's TASK_CONTEXT item 2. Doug
+  (2026-11-17): the basket (or its replacement) may be shoved, from inside or
+  outside, to wherever suits the task; a shove nearer the row shortens the
+  carry and is a practice move in itself. Meanwhile `round_trip.py` treats
+  y > 0.12 as the basket side and looks for nothing there (run 0219 reached
+  for the blue block standing inside it).
 - **EE_LIMITS x 0.60 → ~0.65** as its own tested change (deferred from the r7
   refusal and the campaign freeze).
 - **SAM3 into hebbot's own perception** — the service now runs on omen
