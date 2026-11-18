@@ -81,6 +81,21 @@ the lab notebook; bench-forced items jump the order.
   same morning: `round_trip.py`, blue A↔B ×3, 6/6 verified, every place by
   contact, with an 11–14 mm x-bias to chase. Next: the clutter pick and the
   wall once the basket is replaced.
+- **The eye's two authorities disagree by 2-3 cm in base y** (found 2026-11-18
+  morning, runs 0295-0315). Touch calibrations settle the wrist correction near
+  base (0.01, -0.005); the placement lessons at weight 0.15 then walk it ~1 mm a
+  leg toward (0, -0.03) and sit there, with per-leg residuals that never shrink
+  (+8 to +15 mm base y, 25 legs after calibration 0308). Both states run clean
+  (the straddle forgives 2.6 cm). What breaks is the walked correction being a
+  31 mm hand-frame offset: rotated with a turned hand, or read from 14 cm
+  instead of 33, the looks disagree by 3 cm (run 0315). Candidates: a TCP or
+  pad offset along the finger axis that touch and grasp see differently; the
+  table-plane levelling applied on about half the looks (leveled False /
+  reused True alternate leg by leg, tilt 2-3 deg, 14 mm at survey height); the
+  touch centroid quantised to 1 cm by the 2 cm grid. Decide which is right with
+  a controlled test: one block, the same look from 33 and 14 cm and at two
+  yaws, then a probe; and log the wrist RGB at every look (only depth is kept
+  now). Until then the batch's calibration re-anchors the eye.
 - **Replace the basket with a low-rimmed container** (decided 2026-11-16): the
   Franka Hand body is far wider than the finger span and bumped the 100 mm wall
   from 9 mm away. Options (grasp-axis choice, lateral back-off, tilted approach,

@@ -5394,3 +5394,47 @@ toward +x), the eye took that whole, and every pick then overshot. The grid now
 probes centre-outward, the pads landing first on the block's top where they cannot
 push it, and stops after an empty ring. Also tonight: a reverse SSH tunnel from omen
 to the Spark (Doug installed it), so the bench is reachable from Nashville tomorrow.
+
+**21:45 — an empty table.** After the centre-out calibration: 0295–0296 clean, then
+a run of single-fix stops — a corner grip (17 mm hold) re-looked and retried; the
+front of the table 5 mm higher than the row, so a contact within 8 mm of the grasp
+floor is the floor; a standing block read as lying from 33 cm up, so an empty first
+close brings a look from the hover; a dropped depth frame killing a run (the API now
+takes a fresh frame, three times). Then calibration 0306 chose the green standing at
+x 0.605, its outer probe ring reached 0.625, and the block went over the front edge;
+red had gone too, and run 0307 found an empty table and stopped. Probes now stop at
+x 0.60 and targets at 0.56. The arm is parked; the blocks are on the floor until
+Doug is back. Eight batch-starts of touch calibration today; the eye and the touch
+agree to a few millimetres when the probe does not shove.
+
+## 2026-11-18 (Wednesday) — two greens, and the bench on its own
+
+**06:30 — blocks back, basket gone, two greens.** Doug put the blocks back and moved
+the basket off the bench entirely ("the table space it occupied is making you feel
+crowded"); it now sits by the base, out of the work region. Calibration 0308: touch
+residual under 5 mm on both axes, the smallest yet. 0309–0312 clean, then 0313 stopped
+on a "drop" that was not one: there are two green blocks on the table now, and the
+verify look after the placement, which ranked masks by score, picked the other green
+15 cm away. The block sat exactly where the hand had put it. see_lying now ranks
+lying first and then nearest the point it was asked about, which is the right rule
+for every look the program makes. Batch 0314 launched on it.
+
+**07:00 — the hover disagrees with the survey.** 0314 calibrated (6 mm, then 10 mm);
+0315 placed the blue beside the green, then the next pick: a pad met the block at the
+survey's position, the fingers turned, and the re-look from the hover put the blue
+3 cm from where the survey had it, twelve descents on that spot, every one a pad on a
+block (the blue and the green were touching, so the search had nowhere to straddle).
+A hover re-look that moves the block more than 1.5 cm and is then contradicted by the
+next pad is now distrusted; the search goes back to the survey's reading. Behind it, a
+pattern in the records since 0295: touch calibrations settle the eye near base y
+−0.005, the placement lessons walk it to −0.03 and hold it there with residuals that
+never shrink, and both states run clean. The walked correction is a 31 mm hand-frame
+offset, which is what the hover and the turned hand disagree about. Written up in the
+TODO as a question to settle with a controlled test; the batch's calibration
+re-anchors the eye meanwhile. 0316 launched.
+
+**08:20 — a full table.** 0316 calibrated (its two targets disagreed by 3 cm between
+them: 20 mm one way, 11 back), then 0317–0320 clean. 0321 placed the blue at E and
+stopped with no spot for the next leg: four blocks on the table now, the two greens
+at C and D rule out A and B by the 7 cm clearance, and E held the blue itself. Two
+spots in the table's middle, F (0.47, −0.10) and G (0.47, 0.08). 0322 launched.
