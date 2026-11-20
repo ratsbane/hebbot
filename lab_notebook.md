@@ -5438,3 +5438,633 @@ them: 20 mm one way, 11 back), then 0317–0320 clean. 0321 placed the blue at E
 stopped with no spot for the next leg: four blocks on the table now, the two greens
 at C and D rule out A and B by the 7 cm clearance, and E held the blue itself. Two
 spots in the table's middle, F (0.47, −0.10) and G (0.47, 0.08). 0322 launched.
+
+**Midday — two batches six for six, from the road.** 0322 calibrated, 0323–0328
+all clean with the middle spots F and G in play; 0329 calibrated, 0330–0335 all
+clean. Twelve round trips without a stop, the first full batches since the touch
+calibration became the start of each one. The Mac left for Nashville between them,
+and the omen-away route failed off the home network: its first hop was `galahad`,
+a LAN name. `candleshoe`, the house's public address, lands on Galahad and the jump
+through it to the Spark works; the route now goes candleshoe, spark, tunnel. 0329
+was launched and watched that way; 0336 launched back on the LAN.
+
+**Afternoon — the learned-policy runner and the paired gate, built.** Doug asked
+whether we were ready; the answer was yes, and the pieces went in this afternoon
+while 0336 ran. (1) `scripts/policy_server.py`: a LeRobot checkpoint behind a small
+HTTP server in the lerobot venv (loads the ACT model and its pre/post processors,
+takes state, hand position, wrench and both camera images as the converter wrote
+them, returns the 100-step chunk). Smoke-tested on the Spark against
+dream-20261117-1703: 30 ms an inference after warm-up, joint targets near home.
+(2) ASPIRE `franka_real.policy_chunk` (5b5dc59): the adapter sends the observation,
+takes the first N steps of the chunk through the same guarded waypoint path as every
+program motion (joint limits, the workspace box, the robot's reflexes; speed factor
+0.10), applies the chunk's final gripper width after the motion, and names the
+policy in the record on every chunk. Three tests. (3) `learned_round_trip.py`: the
+policy drives from home, the program watches the gripper and the hand for grasps,
+carries of 8 cm or more, and releases; stops on a refused chunk, a fault, a chunk
+budget or a still hand; then surveys the table and reports what moved. (4)
+`scripts/franka_gate.sh` alternates program and policy seeds after a touch
+calibration, and `scripts/paired_gate.py` tallies verified legs against carried legs
+and applies the rule written on Tuesday: at least 20 pairs, the policy matching or
+beating the program, no safety events. Torch is not on omen yet (its harness runs
+Python 3.14 on the realtime kernel; a separate 3.12 venv is the plan and the
+installer is Doug's to run), so the first gate runs with the Spark as the policy
+host over the LAN. Expectation unchanged: the first gate probably fails, and the
+failure measures how many episodes the stage needs. The checkpoint was trained on
+whole six-leg episodes, so that is what it is judged on; legs give partial credit.
+
+**Evening — the first gate stops on a clump, and the arm learns to sweep.** The
+gate at 343 calibrated and then its first program run, 0344, came back
+approach_blocked: blue wedged between the two greens, touching both, twelve pads
+on a neighbour. I asked Doug to spread the blocks; he said no, it was time the arm
+learned to deal with it, and described the move: start in the clear beside the
+clump, lower the closed fingers to just above the table, drive straight through
+the clump to roughly ten centimetres beyond it. That is `declutter.py` (ASPIRE
+8b5c918): a survey from above the table, blocks whose centres chain within
+6.5 cm form a clump, a second look from above the clump, then the sweep, which
+crosses the clump's long axis (so the bundle splits a row instead of pushing it
+along as a train) and always runs toward the table's middle; up to three sweeps,
+then a last survey, and ok means no clump remains. The pusher is the closed
+bundle of shove_stack.py at 30 mm. The first attempt (0345) made no sweep: its
+hand box ended at y 0.15 and the clump sat at 0.09, so both directions were refused
+for room; the box now reaches 0.18 (the basket is gone), and the start is set off
+the clump's width along the sweep line rather than its full radius. The second
+attempt split blue from green with one sweep, 5.3 cm to 8.3 cm centre to centre
+(blue moved 1 cm, the green 2.6 cm; the bundle went between them). A leaning-block
+test from the top height was dropped: a lone red read 0.052 and 0.060 on two looks.
+The gate now sweeps before every program run (`franka_gate.sh`), under the
+program's seed, and relaunched at 346.
+
+**Late evening — two more stops, two more rules.** The gate at 346 stopped at its
+own declutter (0347): the calibration's probing had left blue and a green 6 cm
+apart at x 0.55, the front of the end box, and the planner found no room either
+way (one start lay 1.7 mm past the start box; the other push ran into the front
+edge). A sweep's start may now sit anywhere in the clear out to the table's edge,
+nothing to drop there, and when the across sweep has no room a push along the
+clump's axis brings it in for the next sweep to split (ASPIRE 3c090bd). The gate at
+348: calibration, a declutter that found the table already clear (probing had
+moved blue 4 cm), then 0349 verified four legs and met air twelve times on the
+fifth. The leveling had found no table plane on any leg of that run ("not the
+table", a third of the points as inliers), so heights were raw, and a lying green
+read 0.062 high: the top alone made it standing, and the pads closed at a
+standing block's mid-height, 2 cm above the block. Its footprint was 62 mm, a
+block's length, which no block on end shows; standing now needs a top above 6 cm
+and a footprint under 52 mm (047084c). Relaunched at 350. Still no policy run:
+three gates, three program-side stops, each a rule the skill lacked.
+
+**Night — the first policy run, and the eye walks off.** Gate 350: calibration,
+declutter (clear), 0351 six for six, then the first policy run, 0352. Six chunks
+of ten steps from home with the gripper open; every chunk crept the same way, the
+base joint turning 15 degrees and the shoulder leaning back, the hand 6 cm toward
+the base and a little up, never toward a block. The sixth chunk's first waypoint
+put the hand at x 0.249, past the box's near face, and the guard refused it before
+anything moved. Carried 0, no block disturbed; the refusal is the run's one safety
+event. Three seconds a chunk round trip through the Spark, including two camera
+frames. The expected first result: 52 episodes and chunked open-loop execution at
+a tenth speed have not learned the reach.
+
+Then 0353 (program) verified one leg and met air twelve times on the second: the
+survey and the hover re-look disagreed by 6 cm. The correction file says why. The
+placement lessons had walked the hand-frame offset from 0.025 after the touch at
+350 to 0.053 by the end of 0351 (every residual +2–3 cm in base y, ten in a row,
+none shrinking as the offset grew) and 0.059 by 0353's first leg. A lesson that
+does not reduce the next residual is not measuring what it corrects. The
+placements now report their residual at weight zero (ASPIRE 29b4528);
+touch alone sets the eye, first in every batch; the gate's calibration
+at 354 brings the offset back to touch's fit in one step (alpha 1). The TODO's
+two-authorities question now has a cost attached and a clean experiment waiting:
+a run of placements with the offset held, to see whether the residual is the
+grasp (constant per block orientation) or the eye (a height-dependent tilt).
+
+**Later — the arm winds itself up.** Gate 354: the touch brought the eye's offset
+back from 0.059 to 0.035 hand y in one step, the declutter found the table clear,
+and 0355 verified two legs with residuals of 1–2 cm under the held eye. Its third
+leg picked after a lengthwise close and a turn, then the carry to E was refused by
+the guard: the planned descent from carry height to the pre-place pose passed
+through y −0.33, z 0.59. The joint targets explain it: the base joint was at −137
+degrees before the pick, the wrist at −2.85 rad against its limit. Turned grasps
+add up, the analytical solver keeps the solution nearest the seed, and once the arm
+has wound round every joint-space path swings the hand wide; the harness's
+fallback to the home branch (run 0229) only fires when the seed's branch has no
+solution at all. The program now goes home before a carry when the base joint is
+past 86 degrees, block held, and once more if the guard refuses a carry path
+(ASPIRE f6d914a). Relaunched at 356. Four gates tonight, four
+program-side stops, each a rule: the clump, the sweep's room, the standing
+footprint, the walked eye, the wound arm. The program is being hardened by the
+gate before the policy gets its ten runs, which is the gate doing its job in the
+other direction.
+
+**00:10 (19 Nov) — the unwind was wrong, and it cost the blue block.** Gate 356:
+calibration and declutter fine, then 0357's first leg picked blue at the front
+edge (x 0.598), the base joint at −131 degrees, and my new rule sent the arm home
+with the block "held". go_home opens the jaws before it moves; my check for that
+had grepped the function's text up to its first return, which is the error branch
+above the gripper line. Blue dropped from carry height at the table's front edge
+and is not in the scene camera's view: on the floor, most likely, by the front
+edge near y −0.09. The run then placed air and called the block lost. The gate
+goes on without it (a colour the looks cannot find yields to the next), but the
+tally will need it back.
+
+The IK, run offline on omen for the wound poses of 0355 and 0357: a down-pointing
+hand at yaw ~80 degrees (fingers across a block lying across the table) has no
+solution near the home branch at all; every valid solution has the base joint
+past ±100 degrees, from the home seed as from the pose itself. So the wound
+configuration is the arm's ordinary reach for such a block, not a fault, and it
+has carried hundreds of legs. What failed in 0355 was narrower: the carry to E
+with the wrist 0.05 rad from its stop, and the yaw check at pick time covered
+spots A, B and C only. Reverted the unwind (ASPIRE 5f4ad1d); the yaw check
+now covers the hover and the carry and place heights at every spot. Relaunched at
+358.
+
+**00:40 — the base side is out of reach, and the sweep brings strays in.** Gate
+358 stopped at its calibration: the only target in the probe band was the red at
+x 0.34, and 20 of 25 probes were refused, every cell at x 0.36 and nearer. Nearer
+the base than about x 0.38 the hand cannot get down to the table; the red has sat
+there untouched for hours, and the two greens had been left at the front edge
+beyond the probe band. So the table had drifted into a state the skill could not
+use, with no clump to blame. Three rules (ASPIRE d77954e, then b78fd7c): the
+sweep now also brings a stray block outside the working band (x 0.40–0.56, y
+−0.26–0.15) toward the table's middle, one a pass, starting out past the front
+edge if need be (nothing to drop there; the box ends at 0.66), and reports a block
+it cannot get behind as marooned; the pick no longer reaches for a block nearer
+the base than x 0.38; the calibration's targets start at x 0.42 so the grid's
+inner ring stays reachable. Run 0359: one green brought in from 0.576 to 0.502 in
+one sweep; the other green, at 0.593, needed a start at 0.655 and got it on the
+next commit; the red is marooned at 0.34 until a hand moves it. Relaunched at 360
+with three blocks on the table, one of them out of play.
+
+**01:30 — the eye, measured against the hand.** Gate 360 calibrated on the one
+green in the band, the declutter found nothing to do (the other green had been
+probed out to x 0.603, the red marooned), and 0361 verified one leg and called the
+second off-target: the hand released the block within 5 mm of B and the eye saw
+it 3.7 cm away, three looks running. The residuals of every leg tonight, laid
+beside the levelling report of its verify look, split cleanly: about 1 cm when the
+look fitted the table afresh, 2–4 cm when it reused an earlier fit, and the fit
+failed on most looks at 0.33 m (inliers 0.30–0.32 against the 0.35 floor; "not
+the table"). So I wrote `eye_check.py`: the green at B, whose position the hand
+knows, looked at from 0.33, 0.25 and 0.20 m at wrist yaws 0 and 90, every reading
+against the truth with that look's levelling report. Run 9001, levelling on:
+
+| height | yaw | fit | residual (x, y) |
+|---|---|---|---|
+| 0.33 | 0 | reused (inliers 0.30) | +1.9, +2.6 cm |
+| 0.33 | 90 | reused (0.20) | −1.1, +1.1 |
+| 0.25 | 0 | fresh (0.65) | +1.2, +0.4 |
+| 0.25 | 90 | fresh (0.48) | −0.8, +1.2 |
+| 0.20 | 0 | fresh (0.92) | +1.3, +0.4 |
+| 0.20 | 90 | fresh (0.62) | −0.8, +1.2 |
+
+Two things in one table. At 0.33 m the D405's table is too noisy for the plane
+fit, so the look reuses whichever fit came last, and the reading is off by up to
+3 cm, which is what every survey, every verify and every touch calibration has
+been living with. Below 0.25 m the fit holds and the residual is a steady 1.3 cm
+that rotates with the wrist: (+1.2, +0.4) at yaw 0 becomes (−0.8, +1.2) at yaw
+90, which is a hand-frame translation, the thing the touch offset is supposed to
+hold, learned through looks at 0.33 m that were themselves off. Next: the same
+check with the levelling held off (a switch, CAP_HARNESS_WRIST_LEVEL=0, ASPIRE),
+to see whether the calibrated camera pose alone is as good at 0.33 m as the fresh
+fit is at 0.25; then the surveys move to 0.25, or the levelling goes, whichever
+the numbers say. The first attempt at the switch skipped the fit entirely and the
+run died in the sandbox: a C-level import under the program's frame, whose
+builtins are a mapping proxy; the fit now runs and is merely not applied.
+
+**01:55 — levelling off: the calibrated pose alone.** Run 9004, the same six looks
+with the fit run but not applied:
+
+| height | yaw | residual (x, y) |
+|---|---|---|
+| 0.33 | 0 | +0.6, +1.3 cm |
+| 0.33 | 90 | −2.5, −0.3 |
+| 0.25 | 0 | +0.7, +1.1 |
+| 0.25 | 90 | −2.1, +0.1 |
+| 0.20 | 0 | +1.0, +1.0 |
+| 0.20 | 90 | −1.9, +0.3 |
+
+No height dependence to speak of (6 mm at most across 13 cm, a tilt under 2.5
+degrees if it is one), 1.4 cm at yaw 0 and 2.1 at yaw 90, steady look to look. Not
+a pure hand-frame translation either (the yaw-0 error rotated would give (−1.2,
++0.8) at yaw 90, not (−2.1, +0.1)), so part of it is in the base frame: the
+block's hand-truth could be off by a few millimetres, or the camera's yaw. The
+decision: the reuse of a stale fit at 0.33 m was the 3 cm, and no fit at all is
+the steadier eye. The gate and campaign scripts now run with
+CAP_HARNESS_WRIST_LEVEL=0 (ASPIRE 069cb3a and its rework); the touch calibration
+at the head of each batch learns the offset under the same regime it will be used
+in, which it never did before. Doug is back at the bench and has picked up the
+blue block. The red is still marooned near the base and a green sits at the front
+edge; those want a hand too.
+
+## 2026-11-19 (Thursday) — a new bracket, and the base side
+
+**Morning — the bracket.** Doug fitted the D405's new bracket, the one that will
+not wobble. The level check afterwards: camera 36.5 cm above the table by the
+hand's pose, the fitted plane 36.5 and 36.7 below the camera. The camera's height
+survived the swap; x and y are the touch calibration's to learn, and it does, from
+scratch, at the head of every batch.
+
+**Morning — "not seen", then a standing green.** The first gate after the swap,
+362, calibrated on nothing: no lying block in the probe band. Doug had set the
+blocks out again, two of them on the base side (a green at 38 cm out, the red at
+36) and the blue off the far left edge; the band starts at 40. The next gate's
+calibration took the green at 38 and found a top at 6.7 cm over a 4 by 8 cm patch
+where the eye had read 5.5: a block on end, or leaning, that the eye called lying.
+Then the reach check: a straight-down hand at 26 to 42 cm out, two heights. The low
+moves at 30 and 32 cm aborted by reflex, and at 34 the harness hung on a
+self-collision reflex and never came back; the process had to be killed, the D405
+reset, and the arm parked by a one-line program. Doug, watching the arm try for
+the red: the IK is missing some obvious solutions, and fixing an IK problem is
+more complicated than moving some blocks. He moved them. The band stays at 40 cm;
+the IK and the reflex recovery are in the TODO. Gate 366 launched.
+
+**11:10 — the eye is right, and my own rule bit.** Gate 366's calibration, the
+first under the new bracket and the first with the levelling off, learned a
+hand-frame offset of (−0.3, −0.3) cm where the old bracket had settled at 3.5 cm:
+the camera is now within 3 mm of the pose the harness was configured with. Then
+0367 verified three legs with residuals of (0.2, 0.9), (0.1, 0.9) and (0.2, 1.1)
+cm, the same number three times, which is what a correct eye with a small
+constant left in it looks like; the walked offsets and the 3 cm verify misses are
+gone with the stale levelling. The fourth leg was refused by my widened yaw check
+from last night: a margin of 0.22 rad at some spot the leg was never going to. The
+check now covers the hover, A, B and C, and the carry and place heights at the
+slot this leg will use (ASPIRE c9ee470). Gate 368 launched.
+
+**11:40 — six for six, then the policy again.** Gate 368 stopped at its
+calibration (a blue at the far edge as second target, a probe at y −0.33 refused,
+and a communication reflex on the descent with the control loop's command success
+down to 60%); the work box now ends at y −0.26 (ASPIRE b92064b). Gate 370:
+calibration, declutter, then 0371 six for six with placement errors of 5–9 mm and
+residuals under 1.2 cm on every leg, the cleanest run on record. Policy 0372: five
+chunks, the same slow lean toward the base as 0352, refused by the guard at x
+0.239 with nothing touched. The gate goes on; the tally so far is 12 legs to 0.
+
+**11:45 — five pairs, then the control loop.** Gate 370 ran five pairs: programs
+0371, 0373, 0375 and 0377 six for six each, policies 0372, 0374, 0376 and 0378
+zero each (four or five chunks, the lean toward the base, the guard). 24 legs to 0
+on the tally. Then 0379 aborted its first survey on a communication_constraints
+reflex, the control loop's command success rate down to 77%, one packet lost in a
+row. The same reflex hit calibration 0368 and twice inside 0377, where the
+harness's automatic recovery carried on unseen. That is omen's 1 kHz loop losing
+packets, not the skill; load average 2.3–3.5 on a box that should be idle but for
+the harness, the SAM3 service and the episode sync. Relaunched at 380 while
+looking at what is loading it.
+
+**12:00 — the control thread at ordinary priority.** What loaded omen was Chrome on
+its desktop, half a core, niced. That should not have touched a 1 kHz loop on a
+realtime kernel, and the reason it did: the harness builds the Panda with
+panda_py's default, RealtimeConfig.kIgnore, so libfranka never asks for
+SCHED_FIFO and the control thread shares the run queue with the browser. Every
+cap-harness thread showed policy TS. Now kEnforce whenever the kernel is a
+realtime one (ASPIRE 12d7dbf): the next run's control thread sampled at FIFO 99
+while moving. Gate 380's calibration passed under the old scheduling; its
+program run at 381 is the first with the new.
+
+**12:30 — the sync.** 0381 verified three legs at 3–5 mm and then lost the link
+twice more (success rate 63%, then 56%) with the control thread at FIFO 99. So
+not scheduling. The robot's NIC is a wired r8169 on its own interrupt line,
+serviced on CPU 12 while the GPU's interrupts live on 2 and 4, and its
+missed-packet counter did not move across the failed run: not the card. What
+has changed is the episode sync: after every run the gate started an rsync of
+the whole archive to the Spark in the background, over omen's LAN, which is a USB
+WiFi adapter; the archive has grown to where the sync overlaps the next run's
+motions, and USB WiFi drivers are a known source of tens-of-milliseconds
+stalls. 44% of a window lost is a stall of that size, and the reflexes fell
+where a sync would be running: 0368's calibration after 0367's sync, 0379's first
+survey, 0381's fourth leg. The sync is now blocking, between runs, niced and
+rate-limited (hebbot scripts/sync_episodes.sh, gate and campaign). If the
+reflexes stop, that was it; if not, the IRQ on CPU 12 and the WiFi driver get a
+closer look.
+
+**12:45 — not the link.** Calibration 0382 lost the link twice more before the
+sync change could matter. Measured instead of guessed: 15,000 pings to the robot
+at 1 kHz with the arm idle, no loss, 2.7 ms worst; 60,000 during gate 384's
+calibration motions, no loss, 3.0 ms worst. The wire, the card and the kernel's
+network path are fine while moving. What stalls is inside the harness process
+itself: libfranka's callback not answering within a millisecond for a 40 ms
+stretch, repeatedly. Candidates in order: the GIL held by a camera or recorder
+thread when the control thread needs it, Chrome on omen's desktop at 27–36% of a
+core since Doug sat down there this morning (the first reflex came twenty minutes
+after), and the two RealSense streams on the same USB host controller. The clean
+runs this morning (0371–0377) ran under the same code as the failing ones, so it
+is load, not a change of ours.
+
+**13:10 — survive the reflex.** Gate 384: calibration clean, the declutter swept
+twice (blue in from the front edge, then the blue and a green apart; Doug saw the
+sweep live), then 0385 lost the link on its first survey. A motion-only program
+(`survey_loop.py`, 16 survey poses with the recorder on and Chrome busy) ran
+clean, so the stalls are rare and I am not going to find them by inspection this
+afternoon. What I can do is stop them costing runs: the reflex is transient and
+the robot recovers in under a second, but the harness reported the move as failed
+and every skill stops on a failed move. The env now recovers, pauses half a
+second, sends the same batch again, and only then reports non-convergence; the
+retry is an event in the episode, so the count stays visible (ASPIRE 43ae409).
+Adapter tests 43 passed, the one pre-existing levelling tolerance failure as
+before. Gate 386 launched. Open in the TODO: where the 40 ms stall lives.
+
+**13:40 — and the descent.** Gate 386's calibration lost a probe mid-descent to
+the same reflex, which the waypoint retry does not cover: the contact descent
+rides the impedance controller. The adapter now recovers and descends once more
+from wherever the hand stopped (ASPIRE b2a5441); a second abort is reported as
+before. Gate 388 launched. Chrome on omen still at a third of a core; no word yet
+on what it is doing.
+
+**14:05 — the best run yet, called a failure.** Gate 388: the calibration took one
+reflex on a waypoint move, recovered, resent, and passed; the declutter had none;
+then 0389 verified all six legs with placement errors of 0.6, 3.2, 0.6, 2.9, 3.4
+and 1.9 mm and residuals under 7 mm, the best run on record, and came back not ok:
+a reflex cut a placement descent short 1.9 cm above the block, the retry started
+from there, and the descent's own minimum travel refused it. The retry may now
+start near the floor (ASPIRE b834a19; adapter tests 44 passed). Gate 390
+launched. Reflex count today: nine, two of them now survived.
+
+**14:20 — hard interrupts.** Gate 390's calibration took three reflexes in a few
+minutes, the loss a steady 22–25% of the window: not a 40 ms stall any more but a
+loop that is late a quarter of the time. omen's state: every core on the
+powersave governor, idle states down to C3 enabled, nothing isolated, the GPU's
+two busy interrupt lines on CPUs 2 and 4 (107 and 205 million interrupts since
+boot), the NIC's on 12, gnome-shell at 18% and Chrome at 27% of a core, so the
+desktop is live and the GPU is compositing. A hard interrupt preempts even a
+FIFO-99 thread, so a control thread that lands on CPU 2 or 4 pays for every
+frame the desktop draws. Changes, all reversible: the harness runs under
+taskset on CPUs 8–11 (gate and campaign scripts), the governor is performance,
+and C2/C3 are off on those four cores. Gate 392 launched; the retry events say
+how many reflexes a run takes now.
+
+**14:40 — EEE.** Doug's thought: the cabling changes, omen moved back in its
+enclosure, the WiFi antenna moved. Checked: the robot's wired link is 1 Gb/s full
+with no errors and no link change since the 9th; the WiFi sits at −44 dBm,
+780/866 Mb/s, no drops growing. Neither moved. But the robot NIC has
+Energy-Efficient Ethernet enabled and active, Tx LPI 12 µs: the link drops into
+low-power idle between packets and pays a wake-up on every one, and Franka's own
+FCI guidance is to turn that off. With the control loop's 1 ms budget already
+spent on cameras, recorder and a live desktop, that wake-up is the kind of margin
+that goes missing a quarter of the time. ASPM is already off, the TX queue drops
+nothing. Pinning the harness to CPUs 8–11 did not stop the reflexes (two more in
+392's calibration), so the CPU side was not it. EEE goes off as soon as the
+current run ends (turning it off restarts autonegotiation, which would drop a live
+FCI connection); the xhci interrupts have been moved to CPUs 13–14 meanwhile.
+
+**15:00 — EEE off, and the controller itself.** The calibration at 392 passed,
+surviving two reflexes on the retries; the declutter at 393 ran, and with the
+gate script stopped first, EEE went off on the robot's port the moment the run
+ended (the gate and campaign scripts now turn it off themselves whenever they find
+it on). The first ping after the change lost one packet in two, which read for a
+minute like a degraded controller (Doug could not log back into Franka Desk at
+the same moment); fifty more at 10 Hz lost none, 0.27 ms worst, and Desk answered
+omen in 0.36 s. The lost packet was the link coming back from autonegotiation.
+The controller is fine; Desk's login trouble is a session matter, and a reboot is
+Doug's call, not a need.
+On WiFi: Doug would like omen wired to the LAN but the cabling is hard, and WiFi
+should work fine; the numbers agree (−44 dBm, no drops), and nothing today
+touched the WiFi path.
+
+**15:20 — not EEE either.** Gate 394's calibration, the first with EEE off: two
+reflexes in 95 motions, both survived by the retries, the calibration ok. So the
+list of things that were not it now reads: the wire, the card, the WiFi, the
+episode sync, the control thread's priority, the CPUs it runs on, the USB
+interrupts' CPUs, the governor and idle states, EEE. The rate is about two
+reflexes per hundred motions since late morning and was zero through the night
+and until 11:00. What is left: inside the process (the interpreter's threads
+against the control loop), the controller's side, and whatever changed at 11:00,
+which was the bracket swap, a camera replug, Doug at omen's desktop, and omen
+moved in its enclosure. Next measurement: cyclictest at FIFO 98 on the harness's
+CPUs during a run, which splits host latency from in-process stalls.
+
+**15:50 — the hang.** Program 0395 took a reflex early, the harness logged
+"Attempting automatic error recovery" and never came back; the gate's 1500 s
+timeout killed it twenty-five minutes later with no result written. The same
+shape as the reach check's hang this morning (9006). So of today's reflexes, most
+recover in a second and two have hung the process in panda_py's own recovery.
+The gate now treats a run with no result as hung: it resets the wrist camera,
+parks the arm through park.py, and goes on to the next pair, stopping only on two
+hung runs in a row; the per-run timeout is 900 s (hebbot scripts/franka_gate.sh).
+Where the hang sits (panda_py's recovery inside the control thread, or the
+harness's retry on top of it) goes in the TODO beside the stall itself.
+
+**16:00 — the sweep's start and the box.** Gate 396 calibrated, then its
+declutter went for the blue at the front edge (x 0.593) from a start at 0.656 and
+the guard refused the hover: the joint-space path to that start bulged to 0.661,
+past the box's face at 0.66. Starts now stop at 0.645 (ASPIRE, declutter.py); a
+stray beyond x 0.58 is left marooned, and the pick reaches to 0.60 anyway. And a
+declutter that is not ok no longer stops the gate; the program run after it is
+the judge. One more reflex inside that declutter, recovered. Gate 398 launched.
+
+**16:40 — touch, for the next version.** Doug, watching the arm: the VLAs we are
+contemplating take vision, text and position, not touch, and the touches look
+important from the bench. Talked it through; agreed not to add senses now and to
+write the plan down (TODO: derived contact channels and phase labels first, the
+language channel second, a force encoder later; torques, gripper force and a
+microphone as the sensors; the contact descent stays a reflex the policy calls).
+Meanwhile gate 398 is the best of the day: calibration, then 0399, 0401, 0403 six
+for six with no reflexes, policies 0400, 0402, 0404 zero each. Eight pairs on the
+tally, 48 legs to 0.
+
+**18:30 — gate 398 complete: ten pairs, 60 legs to 0.** The first gate to run its
+full length. Programs 0399 through 0417, ten runs, six for six each: 60 legs. The
+reflexes did not stop (0 to 3 a run, 16 across the ten) and did not cost a run,
+the retries carried every one. Policies 0400 through 0418, ten runs, zero legs
+each, every one the same: five to eight chunks of a slow lean toward the base,
+refused by the guard at x 0.24, nothing on the table touched. Ten safety events,
+all the guard doing its job. With gate 370's four pairs the day's tally is 14
+pairs, 84 legs to 0; the rule wants 20, so one more gate (420, launched) makes the
+verdict formal, and it will be FAIL, which is the measurement: 52 episodes and a
+10% speed open-loop chunk do not learn the reach. Something else in the numbers:
+the placement error is a per-run constant, 1–5 mm in three runs (0403, 0409,
+0415) and 12–20 mm in the other seven, the same number six times within a run. A
+biased grasp along the block is carried from pick to place and back, as the
+adapter's docstring says, so the eye is better than the 12 mm suggests and the
+grasp's centring is the next millimetre to find. The day's clean episodes (ten
+six-leg runs, plus 0371–0377, 0389, 0391 earlier) more than double the dataset
+the checkpoint was trained on; the next dream should run on all of them.
+
+**19:00 — what the policy was trained on.** Starting the next dream on the day's
+episodes, I read the converter before trusting it: it keeps every run under the
+suite whose program reported ok, whatever the program was. The suite holds touch
+calibrations, declutters, eye checks, reach checks and park runs beside the round
+trips, and all of them ended ok, so the 52-episode dataset the checkpoint came from
+was a mix: round trips and calibrations at least, each labelled "carry the blue
+block between A and B". A calibration is the hand probing low around one block;
+a policy that learned that beside the carries would lean toward a block and
+hover, which is roughly what every policy run did. The converter now takes
+`--program round_trip.py` and keeps only runs whose provenance names that file;
+the dream passes it (hebbot scripts/franka_raw_to_lerobot.py, dream.sh). The
+dream (20000 steps, batch 16) restarted on the Spark over every relayed run,
+filtered. One cost on the way: stopping the first attempt with a pattern kill
+matched "pretrained_model" against "lerobot.*train" and took the policy host down
+with it; restarted, and the gate at 420 had already stopped on its own, four
+reflexes in one calibration, two on one descent. Relaunched at 422.
+
+**19:30 — the hang, caught in the act.** Gate 422's calibration hung after its
+first reflex, twelve minutes in, and this time I got to it before the timeout.
+Every thread was asleep: the main thread on a futex with no timeout, the Python
+threads trading the interpreter lock at the switch interval. gdb on the main
+thread: std::thread::join inside panda_py, called from the descent's
+stop_controller. panda_py runs its automatic error recovery on the controller's
+own thread and logs "Attempting automatic error recovery" through Python; that
+log needs the interpreter lock, which the main thread holds while it joins; the
+join waits for the recovery and the recovery waits for the lock. The race is
+whether the recovery's log lands before or after the join starts, which is why
+most reflexes recover and one in six hangs. The fix is a 1.5 s sleep on the
+descent's abort path before the join, which releases the lock (ASPIRE, env.py);
+the gate also parks and goes on if a calibration hangs. Relaunched at 424. The
+dream on the Spark is converting round trips only, fifteen kept by 19:20.
+
+**20:40 — gate 424: three pairs, then two reflexes on one hover.** Calibration
+424 took a reflex on a descent and came through the new join path without
+hanging. Programs 0425, 0427, 0429 six for six; policies 0426, 0428, 0430 zero.
+Seventeen pairs on the day, 102 legs to 0. Then 0431 verified two legs and lost
+its third hover to two reflexes in a row, the single retry spent. A batch is now
+resent up to twice (ASPIRE, env.py). Gate 432 launched; three more pairs make the
+twenty.
+
+**16:20 (omen's clock) — 91 round trips.** The filtered conversion finished: 91
+episodes, every one a round_trip.py run that reported ok, against the 52 of the
+first dataset that were a mix. Training runs at 2 steps a second; 20,000 steps is
+about 2 h 45 m, so the checkpoint lands this evening. The bench is idle, parked
+at home, waiting on the controller reboot; the reflex rate in the last
+calibration was 13% of motions with omen healthy by every number I can read.
+
+**17:00 (omen's clock) — the controller recovered on its own, the reflexes did
+not.** I had the bench idle an hour and a half waiting on a controller reboot;
+Doug asked whether we were done with the arm, which was the right question, and
+the gate went back on. Calibration 434: eight reflexes in 93 motions, 9%, the
+second target lost to two on one probe. A descent is now retried up to twice like
+a batch (ASPIRE, adapter.py). The rate over the day: 0 until 11:00, 2% at midday,
+13% and 9% in the last two calibrations, with omen healthy and the controller
+answering in 0.2 ms. Whatever it is, it lives in the robot's view of our packets,
+and the retries are how the bench stays busy until it is found.
+
+**17:20 (omen's clock) — manual recovery required.** Calibration 436 saw no
+block in the band from any look (the previous gate's probing had shoved them),
+and the declutter I ran to tidy could not make its first move: libfranka,
+"Automatic Error Recovery command rejected: manual error recovery required".
+The robot has gone into a state only Desk can clear. The gate now declutters
+before it calibrates as well, so a shoved table does not cost a gate; the bench
+waits on Doug for the recovery.
+
+**18:00 (omen's clock) — controller rebooted; the wrist camera's hub fails.**
+Doug repositioned the arm by hand and rebooted the controller. Parked, gate 438
+launched with the declutter first: declutter ok, calibration ok, then the wrist
+camera gave no frame on both runs of the first pair, before and after the
+hardware reset. The D405 is not on the USB bus: the VIA Labs USB 3 hub it hangs
+from at usb 2-4 re-enumerates and fails to configure (error -71), and the camera
+behind it never appears. The hub or its cable, disturbed when the arm was moved by
+hand. The gate is stopped; this is a hand's job.
+
+**18:05 — and the reflexes are gone.** Calibration 438, the first after the
+controller reboot: 81 motions, zero reflexes, where the two before it ran at 13%
+and 9%. So the day's packet loss was the controller's, not omen's: it degraded
+through the day from 11:00 (Desk refusing a login was the other symptom), and
+nothing on omen's side moved the needle because nothing on omen's side was
+wrong. Doug's instinct to reboot it was right and I argued it down on the
+strength of a clean ping, which measures the wrong thing: ICMP answered from a
+healthy network stack while the real-time controller behind it was late. The
+retries stay, since a reflex is cheap to survive and the next degradation will
+be gradual too; the mitigation list from today (EEE off, the harness pinned,
+realtime priority, the sync blocking, the join pause) stays too, each one
+harmless and one of them, the join pause, a real deadlock fixed. What should
+change: a rising reflex rate with omen healthy is the controller's cue to
+reboot, and the gate's per-run reflex count is the number to watch for it.
+
+**18:50 (omen's clock) — gate 440: two pairs, then the joint stops.** With the
+camera's hub reseated, gate 440 ran declutter, calibration (107 motions, no
+reflex), 0441 six for six at 5–8 mm, policy 0442 zero, 0443 six for six, policy
+0444 zero. Nineteen pairs on the day, 114 legs to 0. Then 0445 verified three legs
+and lost its fourth approach: the IK had put the base and wrist 0.04 rad from
+their stops, the solution nearest the seed, and the motion generator refused to
+converge there three times with no reflex. The solver now penalises any solution
+within 0.08 rad of a stop so that a clear one wins (ASPIRE, franka_kinematics.py).
+Gate 446 launched for the twentieth pair.
+
+**19:10 (omen's clock) — the stops.** The solver now prefers a solution at least
+0.08 rad clear of every joint stop when one lies within 2 rad of the seed, and
+takes the cramped one otherwise (ASPIRE a34deee, 3ab65ba): for 0445's approach
+the only clear solution was the other base branch, 6.4 rad away, which the guard
+would refuse as a swing. So 0445's failure is upstream, in the choice of grasp
+yaw, whose margin check runs from the survey's seed while the approach runs from
+the hover's; that goes in the TODO. Gate 446 running for the twentieth pair.
+
+**19:40 (omen's clock) — twenty pairs: the first paired gate, formally.** Across
+gates 370, 398, 424, 440 and 446, twenty program/policy pairs on the same table:
+
+| | legs | safety events |
+|---|---|---|
+| program (round_trip.py) | 120 of 120 | 0 |
+| policy (dream-20261117-1703, 10k steps) | 0 of 120 | 20 |
+
+Every policy run the same: five to eight chunks of a slow lean toward the base
+from home, the guard refusing the chunk that would cross the box's near face,
+nothing on the table touched. Verdict by Tuesday's rule: FAIL. The measurement
+behind it: 52 episodes, of which an unknown share were calibrations labelled as
+carries, trained to 10,000 steps and run as 10-step open-loop chunks at a tenth
+speed, do not learn the reach. The second checkpoint, 91 clean round trips at
+20,000 steps, lands tonight and gets the same twenty pairs. The program side's
+number is the one to keep: 120 for 120 across a day that included a camera
+bracket swap, a controller going bad and recovering, a marooned block, a dropped
+block, and eleven rules added to the skill.
+
+**19:55 (omen's clock) — the hub again.** Gate 446 added two more pairs (0447,
+0449 six for six; 0448, 0450 zero), then 0451's first approach was refused by the
+harness's own guard: the wrist camera's last frame was 4.2 s old, the stream had
+stalled on the USB side, and a stale frame would have been mistaken for the
+scene. The right refusal. The hub the D405 hangs from is the weak part on the
+bench now; it has dropped the camera twice since the arm was moved by hand. The
+gate now treats a stalled stream reported in the run's result the way it treats
+a dead camera (reset, one retry). Relaunched at 452.
+
+**20:15 (omen's clock) — the second checkpoint.** dream-20261119-1447 finished:
+91 round-trip episodes, 20,000 steps at batch 16, 2 h 46 m on the Spark, the
+checkpoint at ~/runs/dream-20261119-1447/checkpoints/020000/pretrained_model.
+Gate 452 had added two more pairs with the old policy (0453, 0455 six for six;
+0454 zero) before I stopped it between runs. The policy host on the Spark now
+serves the new checkpoint; gate 458 is its twenty pairs. What it has over the
+first: nearly twice the episodes, none of them calibrations, twice the steps.
+What it has not: anything closed-loop, any force in the decision, any narration.
+If it reaches for a block at all, that is the day's second result.
+
+**20:30 (omen's clock) — two gates at once, my doing.** The swap script ran in
+the background under a ten-minute cap I had forgotten; I assumed it had been
+cut short, restarted the host and launched gate 458 by hand, and the script
+finished after all and launched its own. Two gates, two harness runs on one
+robot, both runs without a result, the gate parking twice. Stopped everything
+through a script (never a pattern kill from the command line again), parked,
+and launched once: gate 460, the second checkpoint's twenty pairs, the host
+confirmed serving 020000.
+
+**21:00 (omen's clock) — the hub gives out.** Gate 460: declutter and calibration
+fine, then every run of the first two pairs got no frame from the wrist camera,
+before and after the hardware reset, and the gate stopped itself after two
+hung runs in a row. The VIA Labs hub's USB 3 side has dropped off the bus
+entirely (only its USB 2 half still enumerates) and the D405 behind it went with
+it at 19:20; 103 disconnect or error events on that port since boot. The second
+checkpoint has not had a single run yet. The bench is parked and waits for a hand
+on the hub; the Spark serves checkpoint 020000 and is ready.
+
+## 2026-11-20 (Friday) — the policy works offline; the runner was the fault
+
+**Morning — the second checkpoint leans too, so I looked at it offline.** Doug
+reseated the camera hub's cables and ordered a 3 m locking USB 3 cable to run the
+D405 straight to omen. Gate 466 on dream-20261119-1447 (91 clean round trips,
+20k steps): programs 0467–0473 six for six; policies 0468, 0470, 0472, 0474 the
+same lean toward the base as yesterday's checkpoint. Twice the clean data and
+twice the steps changed nothing, so the data mix was not the main fault.
+
+Offline, on its own training episodes, the checkpoint tracks the recorded joints
+within 0.10–0.15 rad and from home predicts the reach to the survey pose. A probe
+in the policy server saved the bench's first observation of run 0474: state,
+hand position and gripper width match the dataset's frame 0 to the millimetre;
+the wrist image is close; the scene camera's colours differ (dataset frames warm,
+blue mean 0.30 against 0.52 live). Swapping inputs between the two showed the
+images do not matter here: fed the bench's own first observation, the checkpoint
+predicts the right move, shoulder forward, the survey pose 2.5 s out. The first
+ten steps were executed faithfully on the bench. The fault was the runner
+executing ten of a hundred steps and asking again: the model's first step carries
+a 0.1–0.2 rad error in the base joint even on its training frames, the runner
+re-planned from that stationary, slightly turned state every half second, which
+the data never visited (in training the arm is always moving, the command leading
+the joints), and the error compounded into the lean. Classic behaviour-cloning
+drift, made worse by re-planning far more often than the model was trained for.
+
+The checkpoint was trained with n_action_steps 100. The runner now executes the
+whole chunk (ASPIRE d273ff7), and the adapter runs a chunk in segments split at
+each gripper change, so a chunk that descends, closes and lifts closes at the
+bottom (3de3b43, a new test, 45 passed). The next policy run is the first with
+both.

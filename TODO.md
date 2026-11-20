@@ -21,6 +21,16 @@ the lab notebook; bench-forced items jump the order.
   seed + refits, BLAS-free), the persistent hand-taught translation with drift
   flag, touch probing, the two-camera cross-check. Still to do: lower the carry
   speed during campaigns; a touch-find port so picks need the eye only as a seed.
+- **Paired gate: run it, then decide what the policy needs** (built 2026-11-18
+  afternoon; see the notebook). Pieces: `scripts/policy_server.py` (lerobot venv,
+  Spark or omen), `franka_real.policy_chunk` in ASPIRE, `learned_round_trip.py`,
+  `scripts/franka_gate.sh` (`/tmp/gate.sh <seed0> <pairs>` on omen, with
+  `CAP_HARNESS_POLICY_URL` pointing at the host), `scripts/paired_gate.py` for the
+  tally. Still to do: a lerobot venv on omen (uv, Python 3.12) so the host is
+  local; `producer` in the episode manifest so the converter can keep policy
+  episodes out of the dream until they pass; per-stage labels so a dream can
+  train on grasp or place alone; chunk execution is stop-go (0.5 s of motion,
+  then a query), a streaming joint controller would smooth it.
 - **Dreaming cycle: distil practised stages into learned reflexes** (planned
   2026-11-16, discussed and amended 2026-11-17; both notebook entries). Status
   2026-11-17 midday: (1) DONE — `FrankaEpisodeRecorder` in ASPIRE franka_real
@@ -81,6 +91,91 @@ the lab notebook; bench-forced items jump the order.
   same morning: `round_trip.py`, blue A↔B ×3, 6/6 verified, every place by
   contact, with an 11–14 mm x-bias to chase. Next: the clutter pick and the
   wall once the basket is replaced.
+- **Touch and other senses for the next policy version** (Doug, 2026-11-19
+  afternoon, watching the arm pick and place: the VLAs we are looking at take
+  vision, text and position, not touch; agreed to note it, not build it now).
+  What the data has: the 6-axis wrench and gripper width every frame at 20 Hz;
+  what it lacks: the program's own touch knowledge (contact descent stop reason,
+  contact height, force rise, "already grasping"), which lives in the episode
+  events and never reaches the LeRobot dataset. Plan, cheapest first: (1) derived
+  per-frame channels in the state vector from the events: in-contact, held, force
+  rise over the last frames, the program's phase; a converter change and a
+  retrain. (2) Sensor summaries and the phase through the language channel,
+  which doubles as the per-stage instruction. (3) A force-window encoder as its
+  own modality, later. Sensors worth adding when we do: per-joint external
+  torques (which link touches), gripper current or finger force (slip), a bench
+  microphone (taps and slides), all recorded at 100 Hz and reduced per frame to
+  max and rise. Architecture stance: keep the contact descent as a reflex
+  primitive and let the policy choose when to call it and where; touch stays with
+  the layer that measures it at 1 kHz.
+  Addendum (Doug, 2026-11-19 evening): train the VLA to emit text beside
+  actions, narration of what should be happening and, more useful, exceptions
+  when sensing disagrees. The exception labels exist already: the program's own
+  failure taxonomy in the episode events (air_close, pad on a neighbour,
+  contact high, lengthwise, dropped, reflex, re-look disagrees with survey,
+  standing where lying expected), each timestamped with the signals around it.
+  Narration labels come from the phases and the touch events. Needs a VLA with
+  a text head (not ACT), over-sampling of the rare exception moments, and a
+  gate that scores every emitted claim against the recorded signal before an
+  orchestrator acts on it. Mass estimates stay with the reflex layer (half a
+  newton against a wrench estimate noisy at a newton): the model may request
+  the measurement, not compute it.
+- **A grasp yaw whose approach lands on the joint stops** (run 0445, 2026-11-19):
+  the pick's yaw check (yaw_margin) solves the IK from the survey's seed, the
+  approach itself is solved from the hover's, and for one yaw that put the base
+  and wrist 0.04 rad from their stops, where the motion generator will not
+  converge. The solver now prefers clear solutions within 2 rad of the seed
+  (3ab65ba) but had none for that pose. Fix upstream: evaluate each candidate
+  yaw's approach and carry from the pose the arm will actually be in (hover
+  seed), or turn the hand 180 degrees when the approach is cramped (same grasp
+  for a symmetric gripper, the other wrist solution).
+- **(Resolved 2026-11-19 18:05: the controller.) A rising reflex rate loses the
+  robot's packets.** A controller reboot took the rate from 9-13% of motions to
+  zero (calibration 0438: 81 motions, none); omen had been healthy throughout and
+  pinging the controller at 1 kHz showed nothing, because ICMP is answered by
+  a network stack that was fine while the real-time side was late. Rule: a reflex
+  rate climbing with omen healthy means reboot the controller; the per-run count
+  of reflex_recovered events is the gauge. Original notes follow.
+- **(superseded) A 40 ms stall somewhere in the harness process loses the robot's packets**
+  (2026-11-19). Seven communication_constraints_violation reflexes in a day,
+  command success 56-78% in the window, on a link that pings clean at 1 kHz idle
+  and moving (max 3 ms). Not the NIC (own IRQ on CPU 12, no missed packets), not
+  scheduling (control thread at FIFO 99 after ASPIRE 12d7dbf, still reflexed),
+  not the episode sync (made blocking, still reflexed). A motion-only loop ran
+  clean. Suspects: the recorder's writer thread (16-bit PNG in Python holds the
+  GIL ~30 ms, 10 a second over two cameras) if panda_py's loop touches the GIL;
+  the two RealSense streams on one USB host controller; Chrome on omen's desktop
+  at a third of a core (the first reflex came twenty minutes after Doug sat
+  down there). The env now recovers and resends a batch once (43ae409), so a
+  reflex costs a half-second, not a run. To find it: count waypoints_retry events
+  per run against what else ran; try a run with the recorder's depth PNGs off;
+  try one with Chrome closed; perf the process on a reflex.
+  Ruled out by 15:20 on the 19th: EEE (off, still two reflexes per hundred
+  motions), CPU pinning to 8-11, performance governor and C2/C3 off, xhci
+  interrupts moved to 13-14, the wire (1 Gb/s, no errors), the WiFi (-44 dBm).
+  The runs now survive them on retries; the per-run count of reflex_recovered
+  events is the number to watch. Timeline: zero reflexes until ~11:00 on the
+  19th, then about two per hundred motions; at 11:00 the bracket was swapped,
+  Also: two of the reflexes hung the harness in panda_py's automatic error
+  recovery (9006 after a self-collision reflex, 0395 after a communication
+  one); the gate now kills, parks and continues. Find whether the hang is
+  panda_py's recovery thread or the harness's retry on top of it (a stack
+  dump of a hung process: py-spy dump, or faulthandler on SIGUSR1).
+  the D405 replugged, omen moved in its enclosure, and the desktop came alive.
+- **The arm's reach near the base is set by the IK and the self-collision reflex,
+  not the geometry** (2026-11-19). A straight-down hand at x 0.30-0.34, z 0.05-0.10
+  is refused or aborted: calibration 0358 lost 20 of 25 probes at x 0.30-0.36, and
+  reach_check.py (run 9006) had its low moves abort by reflex at x 0.30-0.32 and
+  the run hang on a self_collision_avoidance_violation at 0.34 (the harness's
+  automatic recovery did not return; the process had to be killed and the D405
+  reset). Doug, watching: the IK is missing obvious solutions. The analytical
+  solver sweeps q7 in the seed's branch and falls back to the home branch only
+  when nothing is valid; a pose near the base may need the other elbow or a
+  tilted hand, which no program asks for. The working band starts at x 0.40 until
+  this is fixed; blocks nearer the base are moved by hand. A fix needs: the
+  harness to survive a reflex (recover, then report), and an IK that offers every
+  branch with a self-collision check, or a tilted-hand look and grasp for the
+  base side.
 - **The eye's two authorities disagree by 2-3 cm in base y** (found 2026-11-18
   morning, runs 0295-0315). Touch calibrations settle the wrist correction near
   base (0.01, -0.005); the placement lessons at weight 0.15 then walk it ~1 mm a
@@ -96,6 +191,14 @@ the lab notebook; bench-forced items jump the order.
   a controlled test: one block, the same look from 33 and 14 cm and at two
   yaws, then a probe; and log the wrist RGB at every look (only depth is kept
   now). Until then the batch's calibration re-anchors the eye.
+  Update 2026-11-18 night: the walk is faster than 1 mm a leg when the
+  residuals all point one way (0351: ten residuals of +2-3 cm base y, the
+  offset from 0.025 to 0.053 hand y in one run; 0353 then failed with the
+  survey and the hover 6 cm apart). Placement lessons now report at weight
+  zero (ASPIRE 29b4528); touch is the only authority. The held offset makes
+  the controlled test cheap: the per-leg residuals of a batch, now
+  uncorrupted by the walk, show directly whether they depend on the block's
+  yaw (the grasp) or on the look height (a tilt).
 - **Replace the basket with a low-rimmed container** (decided 2026-11-16): the
   Franka Hand body is far wider than the finger span and bumped the 100 mm wall
   from 9 mm away. Options (grasp-axis choice, lateral back-off, tilted approach,

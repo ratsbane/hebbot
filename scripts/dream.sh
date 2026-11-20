@@ -28,7 +28,7 @@ done
 
 rm -rf ~/datasets/$name
 $py ~/hebbot_tools/franka_raw_to_lerobot.py --root ~/datasets/$name --repo-id hebbot/$name \
-  --task "$task" ~/episodes/stack_blocks/*/run-* 2>&1 | grep -v -i "warning\|svt\|mp4 @"
+  --task "$task" --program round_trip.py ~/episodes/stack_blocks/*/run-* 2>&1 | grep -v -i "warning\|svt\|mp4 @"
 episodes=$($py - <<EOF
 import json; print(json.load(open("$HOME/datasets/$name/meta/info.json"))["total_episodes"])
 EOF

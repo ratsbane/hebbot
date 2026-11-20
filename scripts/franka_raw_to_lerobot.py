@@ -171,6 +171,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo-id", default="hebbot/franka_episodes")
     parser.add_argument("--task", default=None, help="override the task string")
     parser.add_argument("--include-failed", action="store_true")
+    parser.add_argument(
+        "--program",
+        default=None,
+        help="keep only runs whose provenance names a program file with this basename "
+        "(e.g. round_trip.py); without it every ok run under the suite is an episode, and "
+        "a bench suite holds touch calibrations, declutters and eye checks too (found "
+        "2026-11-19: the first checkpoint had trained on that mix)",
+    )
     parser.add_argument("--fps", type=int, default=None, help="override the recorder fps")
     args = parser.parse_args(argv)
 
@@ -183,6 +191,14 @@ def main(argv: list[str] | None = None) -> int:
         if not args.include_failed and not episode["program_ok"]:
             print(f"skip {run}: program_ok={episode['program_ok']}", file=sys.stderr)
             continue
+        if args.program is not None:
+            provenance = Path(run) / "source" / "provenance.json"
+            program = ""
+            if provenance.is_file():
+                program = str(json.loads(provenance.read_text()).get("input_path") or "")
+            if Path(program).name != args.program:
+                print(f"skip {run}: program {Path(program).name or '?'}", file=sys.stderr)
+                continue
         episodes.append(episode)
     if not episodes:
         print("nothing to convert", file=sys.stderr)
