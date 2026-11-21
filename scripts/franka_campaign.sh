@@ -6,7 +6,7 @@
 # it is the only truth along the block, see the notebook for 2026-11-17 15:50.
 #
 #   /tmp/campaign.sh examples/franka_real/stack_blocks/round_trip.py <seed0> <n>
-prog=$1; seed0=$2; n=$3
+prog=$1; seed0=$2; n=$3; camfail=0
 cd ~/git/ASPIRE || exit 2
 # The harness runs on CPUs 8-11, away from the GPU's interrupt lines (CPUs 2 and
 # 4) and the robot NIC's (12): hard interrupts preempt even a FIFO-99 control
@@ -29,7 +29,8 @@ camera_dead() {  # the run never got a frame: the D405 re-enumerated after a cab
 }
 run() {  # seed program -> prints True/False, sets $d
   timeout 1500 taskset -c 8-11 .venv-franka/bin/cap-harness run --benchmark franka_real --suite stack_blocks --task-id 0 --seed $1 --allow-motion --program "$2" --output-root ~/franka_runs > /tmp/campaign_$1.log 2>&1
-  if camera_dead $1; then
+  d=$(ls -td /home/doug/franka_runs/franka_real/stack_blocks/00-stack-blocks/$(printf %04d $1)/run-*/ 2>/dev/null | head -1)
+  if camera_dead $1 || grep -q "stream has stalled\|produced no frame" "$d/source/program-result.json" 2>/dev/null; then
     echo "seed $1: camera gave no frame; hardware reset and one retry" >&2
     .venv-franka/bin/python ~/bin/d405_reset.py >&2 && \
       timeout 1500 taskset -c 8-11 .venv-franka/bin/cap-harness run --benchmark franka_real --suite stack_blocks --task-id 0 --seed $1 --allow-motion --program "$2" --output-root ~/franka_runs > /tmp/campaign_$1.log 2>&1
@@ -52,6 +53,15 @@ for i in $(seq 1 $n); do
   ok=$(run $seed "$prog")
   echo "seed $seed ok=$ok $d"
   ~/sync_episodes.sh   # blocking: the sync's USB-WiFi load stalls the 1 kHz loop when it overlaps a run (2026-11-19)   # the Spark gets every run as it lands
+  if [ "$ok" != "True" ] && { [ -z "$ok" ] || grep -q "stream has stalled\|produced no frame" "$d/source/program-result.json" 2>/dev/null; }; then
+    # The camera, not the skill (the wrist D405's USB hub, 2026-11-20): reset,
+    # park, and go on; three in a row stops the campaign.
+    camfail=$((camfail + 1)); echo "seed $seed: camera failure $camfail in a row; resetting"
+    .venv-franka/bin/python ~/bin/d405_reset.py >/dev/null 2>&1; bash /tmp/park.sh $((seed + 9000)) >/dev/null 2>&1
+    [ "$camfail" -ge 3 ] && { echo "stopping: three camera failures in a row"; exit 1; }
+    continue
+  fi
+  camfail=0
   [ "$ok" = "True" ] || { echo "stopping: run not ok"; exit 1; }
 done
 echo "campaign done"
