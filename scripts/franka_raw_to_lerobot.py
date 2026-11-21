@@ -96,7 +96,9 @@ def load_episode(run_dir: Path) -> dict | None:
     verdict = None
     if report.is_file():
         verdict = json.loads(report.read_text()).get("verdict")
-    return {
+    dq_path = raw / "arm-dq.npy"
+    arm_speed = np.abs(np.load(dq_path)).max(axis=1) if dq_path.is_file() else None
+    episode = {
         "meta": meta,
         "arm_host": arm_host,
         "arm_q": arm_q,
@@ -110,6 +112,9 @@ def load_episode(run_dir: Path) -> dict | None:
         "colour": colour,
         "run": run_dir.name,
     }
+    if arm_speed is not None and arm_speed.shape[0] == arm_host.shape[0]:
+        episode["arm_speed"] = arm_speed
+    return episode
 
 
 def hold_last(times: np.ndarray, values: np.ndarray, at: np.ndarray) -> np.ndarray:
@@ -118,14 +123,70 @@ def hold_last(times: np.ndarray, values: np.ndarray, at: np.ndarray) -> np.ndarr
     return values[np.clip(index, 0, values.shape[0] - 1)]
 
 
+LAG_SEARCH_S = (0.0, 3.0, 0.05)  # the image-to-arm lag searched, seconds: from, to, step
+ALIGN_MIN_CORR = 0.12  # below this the motion does not pin the lag down, and the episode is left out
+
+
+def estimate_lag(episode: dict, role: str = "wrist") -> tuple[float, float]:
+    """The lag, in seconds, by which the images trail the arm log on the
+    converter's clocks, from motion: the shift that best lines up how much
+    the wrist image changes between samples with how fast the joints move.
+
+    The recorder's camera and arm clocks do not share a zero: the arm log
+    starts well after the camera (2.6-3.3 s after the recorder's start pair,
+    2026-11-20), and the clock pairs that should map one onto the other are
+    themselves unreliable (a 4.5 % "drift" in a 30 s run). Measured from the
+    images, the pairing was off by about a second in every run checked (0.8 s
+    from AprilTags seen across survey looks, 1.0 s from motion onsets): every
+    image was paired with the arm state of about a second later, so a policy
+    learned "moving" joints beside a still image. Returns (lag, correlation).
+    """
+    import av
+
+    if role not in episode["videos"] or "arm_speed" not in episode:
+        return 0.0, 0.0
+    mp4, index = episode["videos"][role]
+    change = []
+    previous = None
+    with av.open(str(mp4)) as container:
+        for frame in container.decode(video=0):
+            small = frame.reformat(width=160, height=120, format="gray").to_ndarray().astype(np.float32)
+            change.append(0.0 if previous is None else float(np.mean(np.abs(small - previous))))
+            previous = small
+    change = np.asarray(change)
+    t = episode["cam_t"]
+    sample_change = change[np.clip(index, 0, len(change) - 1)]
+    sample_change[index < 0] = 0.0
+    # a repeated frame shows no change whatever the arm does: judge only fresh samples
+    fresh = np.concatenate([[False], index[1:] != index[:-1]])
+    if fresh.sum() < 50 or np.std(sample_change[fresh]) == 0:
+        return 0.0, 0.0
+    a = (sample_change[fresh] - sample_change[fresh].mean()) / sample_change[fresh].std()
+    best = (0.0, -1.0)
+    start, stop, step = LAG_SEARCH_S
+    for lag in np.arange(start, stop + 1e-9, step):
+        speed = hold_last(episode["arm_host"], episode["arm_speed"], t - lag)[fresh]
+        if np.std(speed) == 0:
+            continue
+        b = (speed - speed.mean()) / speed.std()
+        corr = float(np.mean(a * b))
+        if corr > best[1]:
+            best = (float(lag), corr)
+    return best
+
+
 def frames_of(episode: dict):
-    """Yield one LeRobot frame per camera sample, decoding the videos as it goes."""
+    """Yield one LeRobot frame per camera sample, decoding the videos as it goes.
+
+    The arm is read ``episode["lag_s"]`` earlier than each camera sample, so
+    that the joints beside an image are the joints the image shows."""
     import av  # PyAV ships with lerobot[dataset]
 
     t = episode["cam_t"]
-    q = hold_last(episode["arm_host"], episode["arm_q"], t)
-    ee = hold_last(episode["arm_host"], episode["arm_ee"], t)
-    force = hold_last(episode["arm_host"], episode["arm_force"], t)
+    t_arm = t - float(episode.get("lag_s", 0.0))
+    q = hold_last(episode["arm_host"], episode["arm_q"], t_arm)
+    ee = hold_last(episode["arm_host"], episode["arm_ee"], t_arm)
+    force = hold_last(episode["arm_host"], episode["arm_force"], t_arm)
     state = np.concatenate([q, episode["gripper"].reshape(-1, 1)], axis=1).astype(np.float32)
     action = np.concatenate([state[1:], state[-1:]], axis=0)  # next sample, hold at the end
     decoders = {}
@@ -171,6 +232,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo-id", default="hebbot/franka_episodes")
     parser.add_argument("--task", default=None, help="override the task string")
     parser.add_argument("--include-failed", action="store_true")
+    parser.add_argument("--no-align", action="store_true",
+                        help="pair images with the arm by the recorder's clocks as they are (the old behaviour)")
     parser.add_argument(
         "--program",
         default=None,
@@ -199,6 +262,14 @@ def main(argv: list[str] | None = None) -> int:
             if Path(program).name != args.program:
                 print(f"skip {run}: program {Path(program).name or '?'}", file=sys.stderr)
                 continue
+        if not args.no_align:
+            lag, corr = estimate_lag(episode)
+            if corr < ALIGN_MIN_CORR:
+                print(f"skip {run}: image-to-arm lag not measurable (best {lag:.2f} s, r={corr:.2f})",
+                      file=sys.stderr)
+                continue
+            episode["lag_s"] = lag
+            print(f"{run}: images trail the arm log by {lag:.2f} s (r={corr:.2f})", file=sys.stderr)
         episodes.append(episode)
     if not episodes:
         print("nothing to convert", file=sys.stderr)

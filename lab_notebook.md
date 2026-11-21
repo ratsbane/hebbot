@@ -6068,3 +6068,99 @@ whole chunk (ASPIRE d273ff7), and the adapter runs a chunk in segments split at
 each gripper change, so a chunk that descends, closes and lifts closes at the
 bottom (3de3b43, a new test, 45 passed). The next policy run is the first with
 both.
+
+**Late morning — the policy reaches.** Policy run 0476, the first on whole
+chunks: chunk one took the arm to the survey pose (0.50, −0.07, 0.31), the next
+turned the wrist as the program does for a block lying across the table and
+brought the hand over the blocks (0.54, −0.11, 0.38), and then it came down,
+open, aiming 5 cm from the nearest green, to 1.9 cm, 2 mm above the table. The
+robot's cartesian reflex stopped it, and the harness's retry, which I had
+written for the communication reflex, pressed the same move twice more. No block
+moved more than 4 mm; the gripper never closed. That is the first learned
+behaviour on this bench that looks like the task: reach, look, turn, descend.
+Two fixes before the next one (ASPIRE d0d9406): retries now read libfranka's last
+motion errors and fire only for the communication reflex, never after a contact
+reflex; and a policy chunk whose hand would go below 2.4 cm is refused before it
+moves, since the policy has no touch and the program's last centimetre is a
+contact descent. The touch discussion of yesterday, arrived at from the other
+side.
+
+**Midday — a floor that behaves like a descent.** The 2.4 cm floor first refused
+whole chunks, which left the policy no way to grasp (0488: down to 14 cm, then a
+chunk below the floor refused). It became a stop: a chunk runs down to its last
+row above the floor and ends there, and a gripper change later in the chunk is
+applied at that point (ASPIRE 6c2307d). Policy 0490 used it: survey, over the
+table, 16 cm, then the floor at 2.7 cm with the fingers open, 7 cm short of the
+green it was heading for; then every chunk began a hair lower and was refused
+outright, so it could neither close nor lift. A chunk starting at the floor now
+moves nothing and applies the gripper change it carries (f83ad66; 47 tests).
+Run 0476's reach, 0490's descent to the floor: the policy has the shape of a
+pick, and its aim is centimetres off, which is what a checkpoint that never
+closes the loop on vision during a five-second chunk would show. Next on the
+policy side, when the gate's twenty pairs are in: shorter chunks with temporal
+ensembling (what ACT was designed for) instead of whole open-loop chunks.
+
+**Afternoon — the first learned grasp.** Policy 0492, the first that could close
+or lift at the floor, ran 31 chunks. Three descents to the floor closed on air
+and reopened; the fourth closed at 0.32 of full width, a 28 mm block lying flat,
+lifted it to 9 cm, carried it 5.8 cm and set it down; a fifth closed at 0.55
+(lengthwise) and moved a block 2.4 cm. The green that started at (0.51, −0.01)
+ended 6 cm away. Neither carry reaches the gate's 8 cm, so the tally still reads
+zero; the run ended when the hand pressed down onto a block top at the floor and
+the cartesian reflex stopped it, and the retry, now narrowed, did not press
+again. From a lean away from the table yesterday to a pick and place today, with
+no new data and no new training: whole chunks, a floor that stops, and a close
+at the floor.
+
+**Early afternoon — the second checkpoint's gate, closed.** Counting only pairs
+where both runs completed (0483's program lost its camera, 0506's policy run was
+stopped by hand): 18 pairs.
+
+| | legs | safety events |
+|---|---|---|
+| program | 108 of 108 | 0 |
+| policy, dream-20261119-1447 | 0 of 108 | 15 |
+
+Verdict FAIL, but not the same FAIL as the first checkpoint's. Of the fourteen
+policy runs on whole chunks, half reached and descended toward the blocks, two
+closed on a block at the floor (0492, which lifted it to 9 cm and set it down 6
+cm away, the scene confirming; 0510, which held one for three chunks and never
+lifted), and the rest went up to the ceiling or out past the front edge, or bobbed
+over one spot until the new dithering stop or the budget ended them. Doug's
+rearranged hub held through the last gate: no new USB errors in three pairs.
+
+What the gate measured this time is the runner, as much as the model: ten-step
+re-planning made a correct policy fail; whole open-loop chunks let it reach and
+sometimes grasp, but five seconds without looking is too long to aim. The next
+step is the one ACT was built for: query every step and blend the overlapping
+chunks (temporal ensembling), which needs the streaming joint controller from the
+TODO instead of the converge-to-waypoint executor. Until then the bench keeps
+collecting program episodes, which is what the next dream wants anyway.
+
+**Evening — AprilTags, the clocks, and an eye that was right all along.** Doug
+printed tag36h11 tags and taped two to the table at his 48 cm line, one each side.
+A survey run found them from nearly every look, but the positions scattered by
+10 cm until the camera and arm clocks were aligned: the camera's zero is not the
+arm log's, and fitting the tags across looks put the pairing off by 0.8 s. With
+that, every look agreed on each tag within 7 mm. Doug's better idea for the tags
+themselves: hover still over them (no clock question inside a long hold), and,
+better still, jog the fingertips onto each tag's centre with the Xbox controller
+(tag_hover.py in ASPIRE, scripts/jog_tags.py here). Hand against eye at both tags:
+the eye read 1.2–1.5 cm too far out and 1.0 cm toward the far side, the same at
+both, i.e. a constant offset. Taking it out of the offset calibration 0526 had set
+gives (0.2, 0.1) cm, this morning's near-zero value with the new bracket: the
+camera never moved; 0526's touch calibration had landed 1.7 cm off, one of its
+known 1–2 cm scatters. Two runs on the tag offset with no touch calibration: 0531
+and 0532 six for six, placement errors 4–8 mm. The tags are the eye's calibration
+from here; until the harness reads them itself, campaigns run with CALIBRATE=0 so
+the touch calibration does not overwrite them.
+
+The clock offset matters far beyond the tags. The dataset converter pairs each
+image with the arm state by the recorder's two clocks, assuming they share a zero;
+the arm log starts 2.6–3.3 s after the camera, and the images were paired with
+the joints of about a second later (0.8 s by the tags, 1.0 s by motion onsets; the
+clock pairs themselves are unreliable, claiming a 4.5 % drift in a 30 s run).
+Every checkpoint so far learned "joints moving" beside a still image. The
+converter now measures each episode's lag from image change against joint speed
+(0.85 s on the survey run, matching the tags; 1.3–1.8 s on long program runs) and
+shifts the arm by it; dream-20261120-1925 is training on the aligned data.
